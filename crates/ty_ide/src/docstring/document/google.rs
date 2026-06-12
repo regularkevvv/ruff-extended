@@ -428,8 +428,14 @@ fn is_inline_section_header(line: &str) -> bool {
     let name = name.trim();
     let description = description.trim();
     !description.is_empty()
+        && !description.starts_with(':')
         && name.chars().next().is_some_and(char::is_uppercase)
         && section_kind_from_name(name).is_some()
+}
+
+/// Returns whether `line` is a recognized Google-style section header.
+pub(in crate::docstring) fn is_section_like_header(line: &str) -> bool {
+    section_kind(line).is_some() || is_inline_section_header(line)
 }
 
 /// Returns whether `name` ends with a conventional exception-class suffix.
@@ -504,6 +510,11 @@ fn insert_parameter_documentation(
 
 fn google_parameter_names(display_name: &str) -> impl Iterator<Item = &str> {
     display_name.split(',').map(str::trim)
+}
+
+/// Returns whether every component of `name` is a Python identifier.
+pub(in crate::docstring) fn is_dotted_identifier(name: &str) -> bool {
+    !name.is_empty() && name.split('.').all(is_identifier)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -693,10 +704,13 @@ mod tests {
     }
 
     #[test]
-    fn double_colon_ends_same_indent_parameter_section() {
+    fn double_colon_is_not_an_inline_section_header() {
         assert_parameter_documentation(
             "Args:\nvalue: Parameter documentation.\nReturns:: reST literal marker.",
-            &[("value", "Parameter documentation.")],
+            &[
+                ("value", "Parameter documentation."),
+                ("Returns", ": reST literal marker."),
+            ],
         );
     }
 

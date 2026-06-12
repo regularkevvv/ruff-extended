@@ -109,6 +109,11 @@ impl<'a> PreformattedBlockScanner<'a> {
         self.rest_literal_blocks.observe_marker_in_line(line);
     }
 
+    /// Returns whether the line introduces a reST literal block.
+    pub(in crate::docstring) fn line_starts_rest_literal_block(line: &str) -> bool {
+        RestLiteralBlockScanner::line_starts_literal_block(line.trim_start())
+    }
+
     /// Whether or not the given line marks the start of a doctest.
     fn line_starts_doctest(line: &str) -> bool {
         line.trim_start_matches(' ').starts_with(">>>")
