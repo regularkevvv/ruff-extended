@@ -7,6 +7,7 @@ use std::borrow::Cow;
 
 use crate::NavigationTarget;
 use crate::stub_mapping::StubMapper;
+use ruff_db::files::File;
 use ruff_db::parsed::ParsedModuleRef;
 use ruff_python_ast::find_node::{CoveringNode, covering_node};
 use ruff_python_ast::token::{Token, TokenAt, TokenKind, Tokens};
@@ -276,6 +277,10 @@ impl<'db> Definitions<'db> {
         Some(Self::new(vec![resolved]))
     }
 
+    pub(crate) fn from_modules(files: impl IntoIterator<Item = File>) -> Self {
+        Self::new(files.into_iter().map(ResolvedDefinition::Module).collect())
+    }
+
     /// Apply the "goto declaration" interpretation to these definitions.
     pub(crate) fn goto_declaration(
         self,
@@ -409,6 +414,11 @@ impl<'db> Definitions<'db> {
     /// exposes only part of the co-definition set.
     pub(crate) fn intersects(&self, other: &Self) -> bool {
         self.iter().any(|definition| other.0.contains(definition))
+    }
+
+    /// Returns whether every definition in `self` is also present in `other`.
+    pub(crate) fn is_subset_of(&self, other: &Self) -> bool {
+        self.iter().all(|definition| other.0.contains(definition))
     }
 
     pub(crate) fn iter(&self) -> std::slice::Iter<'_, ResolvedDefinition<'db>> {

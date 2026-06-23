@@ -8,8 +8,9 @@ pub use module::Module;
 pub use module_name::{ModuleName, ModuleNameResolutionError};
 pub use path::{SearchPath, SearchPathError};
 pub use resolve::{
-    SearchPaths, file_to_module, resolve_module, resolve_module_confident, resolve_real_module,
-    resolve_real_module_confident, resolve_real_shadowable_module,
+    SearchPaths, file_to_module, is_legacy_namespace_package, resolve_module,
+    resolve_module_confident, resolve_real_module, resolve_real_module_confident,
+    resolve_real_shadowable_module,
 };
 pub use settings::{SearchPathSettings, SearchPathSettingsError};
 pub use strategy::{FallibleStrategy, MisconfigurationStrategy, UseDefaultStrategy};

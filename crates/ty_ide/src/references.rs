@@ -10,6 +10,8 @@
 //! all references to these externally-visible symbols therefore requires
 //! an expensive search of all source files in the workspace.
 
+use std::cell::Cell;
+
 use crate::goto::{Definitions, GotoTarget};
 use crate::{Db, ReferenceKind, ReferenceTarget};
 use ruff_db::files::File;
@@ -188,6 +190,7 @@ fn references_for_keyword_arguments_in_file(
         mode,
         target_text,
         ancestors: Vec::new(),
+        ambiguity: None,
     });
 
     AnyNodeRef::from(module.syntax()).visit_source_order(&mut finder);
@@ -221,6 +224,28 @@ pub(crate) fn contains_identifier(source: &str, name: &str) -> bool {
     })
 }
 
+/// Finds references in `file` that resolve to one of the given module files.
+///
+/// Returns `None` if an occurrence also resolves outside that module set.
+pub(crate) fn module_references_for_file(
+    db: &dyn Db,
+    file: File,
+    module_files: impl IntoIterator<Item = File>,
+    module_name: &str,
+) -> Option<Vec<ReferenceTarget>> {
+    let definitions = Definitions::from_modules(module_files);
+    let ambiguity = Cell::new(false);
+    let references = references_for_file_with_ambiguity(
+        db,
+        file,
+        &definitions,
+        module_name,
+        ReferencesMode::References,
+        Some(&ambiguity),
+    );
+    (!ambiguity.get()).then_some(references)
+}
+
 fn is_ascii_identifier_continue(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
@@ -233,6 +258,17 @@ fn references_for_file(
     target_definitions: &Definitions<'_>,
     target_text: &str,
     mode: ReferencesMode,
+) -> Vec<ReferenceTarget> {
+    references_for_file_with_ambiguity(db, file, target_definitions, target_text, mode, None)
+}
+
+fn references_for_file_with_ambiguity(
+    db: &dyn Db,
+    file: File,
+    target_definitions: &Definitions<'_>,
+    target_text: &str,
+    mode: ReferencesMode,
+    ambiguity: Option<&Cell<bool>>,
 ) -> Vec<ReferenceTarget> {
     let parsed = ruff_db::parsed::parsed_module(db, file);
     let module = parsed.load(db);
@@ -247,10 +283,9 @@ fn references_for_file(
         tokens: module.tokens(),
         target_text,
         ancestors: Vec::new(),
+        ambiguity,
     };
-
     AnyNodeRef::from(module.syntax()).visit_source_order(&mut finder);
-
     references
 }
 
@@ -377,6 +412,7 @@ struct LocalReferencesFinder<'a> {
     mode: ReferencesMode,
     target_text: &'a str,
     ancestors: Vec<AnyNodeRef<'a>>,
+    ambiguity: Option<&'a Cell<bool>>,
 }
 
 impl<'a> SourceOrderVisitor<'a> for LocalReferencesFinder<'a> {
@@ -463,6 +499,7 @@ impl<'a> SourceOrderVisitor<'a> for LocalReferencesFinder<'a> {
                         tokens: sub_ast.tokens(),
                         target_text: self.target_text,
                         ancestors: Vec::new(),
+                        ambiguity: self.ambiguity,
                     };
                     sub_finder.visit_expr(sub_ast.expr());
                 }
@@ -566,6 +603,12 @@ impl<'a> LocalReferencesFinder<'a> {
 
         // Check if any of the current definitions match our target definitions
         if !self.target_definitions.intersects(&current_definitions) {
+            return;
+        }
+        if !current_definitions.is_subset_of(self.target_definitions)
+            && let Some(ambiguity) = self.ambiguity
+        {
+            ambiguity.set(true);
             return;
         }
 
