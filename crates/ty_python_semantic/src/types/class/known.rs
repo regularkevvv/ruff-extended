@@ -1,6 +1,7 @@
+use crate::TypingContext;
 use crate::{
-    Db, Program,
-    place::{DefinedPlace, Definedness, Place, known_module_symbol},
+    Db, InferenceEnvironment, Program,
+    place::{DefinedPlace, Definedness, Place, known_module_symbol_in_environment},
     types::{
         Binding, ClassLiteral, ClassType, GenericContext, KnownInstanceType, StaticClassLiteral,
         SubclassOfType, Type, binding_type,
@@ -13,6 +14,7 @@ use crate::{
         known_instance::DeprecatedInstance,
     },
 };
+#[cfg(test)]
 use ruff_db::files::File;
 use ruff_python_ast as ast;
 use ruff_python_ast::PythonVersion;
@@ -21,8 +23,10 @@ use std::{
     borrow::Cow,
     sync::{LazyLock, Mutex},
 };
-use ty_module_resolver::{KnownModule, file_to_module};
-use ty_python_core::{SemanticIndex, Truthiness, scope::NodeWithScopeKind};
+use ty_module_resolver::{KnownModule, file_to_module_in_program};
+use ty_python_core::{
+    SemanticIndex, Truthiness, environment::AnalysisFile, scope::NodeWithScopeKind,
+};
 
 /// Non-exhaustive enumeration of known classes (e.g. `builtins.int`, `typing.Any`, ...) to allow
 /// for easier syntax when interacting with very common classes.
@@ -835,6 +839,10 @@ impl KnownClass {
     }
 
     pub(crate) fn name(self, db: &dyn Db) -> &'static str {
+        self.name_for_version(Program::get(db).python_version(db))
+    }
+
+    fn name_for_version(self, python_version: PythonVersion) -> &'static str {
         match self {
             Self::Bool => "bool",
             Self::Object => "object",
@@ -900,7 +908,7 @@ impl KnownClass {
             Self::Enum => "Enum",
             Self::EnumProperty => "property",
             Self::EnumType => {
-                if Program::get(db).python_version(db) >= PythonVersion::PY311 {
+                if python_version >= PythonVersion::PY311 {
                     "EnumType"
                 } else {
                     "EnumMeta"
@@ -988,6 +996,20 @@ impl KnownClass {
             "Use `Type::heterogeneous_tuple` or `Type::homogeneous_tuple` to create `tuple` instances"
         );
         self.to_class_literal(db)
+            .to_class_type(db)
+            .map(|class| Type::instance(db, class))
+            .unwrap_or_else(Type::unknown)
+    }
+
+    #[track_caller]
+    pub(crate) fn to_instance_in_context(self, context: TypingContext<'_>) -> Type<'_> {
+        let db = context.db();
+        debug_assert_ne!(
+            self,
+            KnownClass::Tuple,
+            "Use `Type::heterogeneous_tuple` or `Type::homogeneous_tuple` to create `tuple` instances"
+        );
+        self.to_class_literal_in_context(context)
             .to_class_type(db)
             .map(|class| Type::instance(db, class))
             .unwrap_or_else(Type::unknown)
@@ -1094,9 +1116,24 @@ impl KnownClass {
         self,
         db: &dyn Db,
     ) -> Result<StaticClassLiteral<'_>, KnownClassLookupError<'_>> {
-        let module = self.canonical_module(db);
+        self.try_to_class_literal_without_logging_in_environment(db, InferenceEnvironment::get(db))
+    }
+
+    fn try_to_class_literal_without_logging_in_environment(
+        self,
+        db: &dyn Db,
+        environment: InferenceEnvironment,
+    ) -> Result<StaticClassLiteral<'_>, KnownClassLookupError<'_>> {
+        let python_version = environment.program(db).python_version(db);
+        let module = self.canonical_module_for_version(python_version);
         let third_party = module.is_third_party();
-        let symbol = known_module_symbol(db, module, self.name(db)).place;
+        let symbol = known_module_symbol_in_environment(
+            db,
+            environment,
+            module,
+            self.name_for_version(python_version),
+        )
+        .place;
         match symbol {
             Place::Defined(DefinedPlace {
                 ty: Type::ClassLiteral(ClassLiteral::Static(class_literal)),
@@ -1126,8 +1163,17 @@ impl KnownClass {
     ///
     /// If the class cannot be found, a debug-level log message will be emitted stating this.
     pub(crate) fn try_to_class_literal(self, db: &dyn Db) -> Option<StaticClassLiteral<'_>> {
+        self.try_to_class_literal_in_environment(db, InferenceEnvironment::get(db))
+    }
+
+    pub(crate) fn try_to_class_literal_in_environment(
+        self,
+        db: &dyn Db,
+        environment: InferenceEnvironment,
+    ) -> Option<StaticClassLiteral<'_>> {
         #[salsa::interned(heap_size=ruff_memory_usage::heap_size)]
         struct KnownClassArgument {
+            environment: InferenceEnvironment,
             class: KnownClass,
         }
 
@@ -1136,19 +1182,21 @@ impl KnownClass {
             db: &'db dyn Db,
             class: KnownClassArgument<'db>,
         ) -> Option<StaticClassLiteral<'db>> {
+            let environment = class.environment(db);
             let class = class.class(db);
+            let python_version = environment.program(db).python_version(db);
             class
-                .try_to_class_literal_without_logging(db)
+                .try_to_class_literal_without_logging_in_environment(db, environment)
                 .or_else(|lookup_error| {
                     if matches!(
                         lookup_error,
                         KnownClassLookupError::ClassPossiblyUnbound { .. }
                     ) {
-                        tracing::info!("{}", lookup_error.display(db, class));
+                        tracing::info!("{}", lookup_error.display(db, class, python_version));
                     } else {
                         tracing::info!(
                             "{}. Falling back to `Unknown` for the symbol instead.",
-                            lookup_error.display(db, class)
+                            lookup_error.display(db, class, python_version)
                         );
                     }
 
@@ -1163,7 +1211,14 @@ impl KnownClass {
                 .ok()
         }
 
-        known_class_to_class_literal(db, KnownClassArgument::new(db, self))
+        known_class_to_class_literal(db, KnownClassArgument::new(db, environment, self))
+    }
+
+    pub(crate) fn try_to_class_literal_in_context(
+        self,
+        context: TypingContext<'_>,
+    ) -> Option<StaticClassLiteral<'_>> {
+        self.try_to_class_literal_in_environment(context.db(), context.environment())
     }
 
     /// Look up a [`KnownClass`] in its canonical module and return a [`Type`] representing that
@@ -1176,12 +1231,26 @@ impl KnownClass {
             .unwrap_or_else(Type::unknown)
     }
 
-    /// Look up a [`KnownClass`] in its canonical module and return a [`Type`] representing that class
-    /// and all possible subclasses of the class.
+    pub(crate) fn to_class_literal_in_context(self, context: TypingContext<'_>) -> Type<'_> {
+        self.try_to_class_literal_in_context(context)
+            .map(|class| Type::ClassLiteral(ClassLiteral::Static(class)))
+            .unwrap_or_else(Type::unknown)
+    }
+
+    /// Look up a [`KnownClass`] in its canonical module and return a [`Type`] representing that
+    /// class and all possible subclasses of the class.
     ///
     /// If the class cannot be found, a debug-level log message will be emitted stating this.
     pub fn to_subclass_of(self, db: &dyn Db) -> Type<'_> {
         self.to_class_literal(db)
+            .to_class_type(db)
+            .map(|class| SubclassOfType::from(db, class))
+            .unwrap_or_else(SubclassOfType::subclass_of_unknown)
+    }
+
+    pub(crate) fn to_subclass_of_in_context(self, context: TypingContext<'_>) -> Type<'_> {
+        let db = context.db();
+        self.to_class_literal_in_context(context)
             .to_class_type(db)
             .map(|class| SubclassOfType::from(db, class))
             .unwrap_or_else(SubclassOfType::subclass_of_unknown)
@@ -1215,6 +1284,10 @@ impl KnownClass {
 
     /// Return the module in which we should look up the definition for this class
     pub(super) fn canonical_module(self, db: &dyn Db) -> KnownModule {
+        self.canonical_module_for_version(Program::get(db).python_version(db))
+    }
+
+    fn canonical_module_for_version(self, python_version: PythonVersion) -> KnownModule {
         match self {
             Self::Bool
             | Self::Object
@@ -1294,15 +1367,13 @@ impl KnownClass {
             | Self::ExtensionTypedDictFallback
             | Self::NewType => KnownModule::TypingExtensions,
             Self::Sentinel => {
-                if Program::get(db).python_version(db) >= PythonVersion::PY315 {
+                if python_version >= PythonVersion::PY315 {
                     KnownModule::Builtins
                 } else {
                     KnownModule::TypingExtensions
                 }
             }
             Self::NoDefaultType => {
-                let python_version = Program::get(db).python_version(db);
-
                 // typing_extensions has a 3.13+ re-export for the `typing.NoDefault`
                 // singleton, but not for `typing._NoDefaultType`. So we need to switch
                 // to `typing._NoDefaultType` for newer versions:
@@ -1553,11 +1624,22 @@ impl KnownClass {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn try_from_file_and_name(
         db: &dyn Db,
         file: File,
         class_name: &str,
     ) -> Option<Self> {
+        Self::try_from_analysis_file_and_name(db, AnalysisFile::from_default(db, file), class_name)
+    }
+
+    pub(crate) fn try_from_analysis_file_and_name(
+        db: &dyn Db,
+        analysis_file: AnalysisFile<'_>,
+        class_name: &str,
+    ) -> Option<Self> {
+        let python_version = analysis_file.program(db).python_version(db);
+
         // We assert that this match is exhaustive over the right-hand side in the unit test
         // `known_class_roundtrip_from_str()`
         let candidates: &[Self] = match class_name {
@@ -1629,12 +1711,8 @@ impl KnownClass {
             "SupportsIndex" => &[Self::SupportsIndex],
             "Enum" => &[Self::Enum],
             "EnumMeta" => &[Self::EnumType],
-            "EnumType" if Program::get(db).python_version(db) >= PythonVersion::PY311 => {
-                &[Self::EnumType]
-            }
-            "StrEnum" if Program::get(db).python_version(db) >= PythonVersion::PY311 => {
-                &[Self::StrEnum]
-            }
+            "EnumType" if python_version >= PythonVersion::PY311 => &[Self::EnumType],
+            "StrEnum" if python_version >= PythonVersion::PY311 => &[Self::StrEnum],
             "IntEnum" => &[Self::IntEnum],
             "Flag" => &[Self::Flag],
             "IntFlag" => &[Self::IntFlag],
@@ -1663,16 +1741,15 @@ impl KnownClass {
             _ => return None,
         };
 
-        let module = file_to_module(db, file)?.known(db)?;
+        let module = file_to_module_in_program(db, analysis_file.program_file(db))?.known(db)?;
 
         candidates
             .iter()
             .copied()
-            .find(|&candidate| candidate.check_module(db, module))
+            .find(|&candidate| candidate.check_module_for_version(python_version, module))
     }
 
-    /// Return `true` if the module of `self` matches `module`
-    fn check_module(self, db: &dyn Db, module: KnownModule) -> bool {
+    fn check_module_for_version(self, python_version: PythonVersion, module: KnownModule) -> bool {
         match self {
             Self::Bool
             | Self::Object
@@ -1756,7 +1833,9 @@ impl KnownClass {
             | Self::Template
             | Self::Path
             | Self::FunctoolsPartial
-            | Self::PydanticBaseModel => module == self.canonical_module(db),
+            | Self::PydanticBaseModel => {
+                module == self.canonical_module_for_version(python_version)
+            }
             Self::NoneType => matches!(module, KnownModule::Typeshed | KnownModule::Types),
             Self::SpecialForm
             | Self::TypeAliasType
@@ -1947,19 +2026,33 @@ impl<'db> KnownClassLookupError<'db> {
         }
     }
 
-    fn display(&self, db: &'db dyn Db, class: KnownClass) -> impl std::fmt::Display + 'db {
+    fn display(
+        &self,
+        db: &'db dyn Db,
+        class: KnownClass,
+        python_version: PythonVersion,
+    ) -> impl std::fmt::Display + 'db {
         struct ErrorDisplay<'db> {
             db: &'db dyn Db,
             class: KnownClass,
+            python_version: PythonVersion,
             error: KnownClassLookupError<'db>,
         }
 
         impl std::fmt::Display for ErrorDisplay<'_> {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                let ErrorDisplay { db, class, error } = *self;
+                let ErrorDisplay {
+                    db,
+                    class,
+                    python_version,
+                    error,
+                } = *self;
 
-                let class = class.display(db);
-                let python_version = Program::get(db).python_version(db);
+                let class = format_args!(
+                    "{}.{}",
+                    class.canonical_module_for_version(python_version),
+                    class.name_for_version(python_version)
+                );
                 let location = if error.is_third_party() {
                     ""
                 } else {
@@ -1989,6 +2082,7 @@ impl<'db> KnownClassLookupError<'db> {
         ErrorDisplay {
             db,
             class,
+            python_version,
             error: *self,
         }
     }
@@ -2003,15 +2097,21 @@ mod tests {
     use strum::IntoEnumIterator;
     use ty_module_resolver::resolve_module_confident;
 
+    fn set_python_version(db: &mut crate::db::tests::TestDb, version: PythonVersion) {
+        let program = Program::get(db);
+        program.resolver(db).set_python_version(db).to(version);
+        program
+            .set_python_version_with_source(db)
+            .to(PythonVersionWithSource {
+                version,
+                source: PythonVersionSource::default(),
+            });
+    }
+
     #[test]
     fn known_class_roundtrip_from_str() {
         let mut db = setup_db();
-        Program::get(&db)
-            .set_python_version_with_source(&mut db)
-            .to(PythonVersionWithSource {
-                version: PythonVersion::latest_preview(),
-                source: PythonVersionSource::default(),
-            });
+        set_python_version(&mut db, PythonVersion::latest_preview());
         for class in KnownClass::iter() {
             if class.canonical_module(&db).is_third_party() {
                 continue;
@@ -2036,12 +2136,7 @@ mod tests {
     fn known_class_doesnt_fallback_to_unknown_unexpectedly_on_latest_version() {
         let mut db = setup_db();
 
-        Program::get(&db)
-            .set_python_version_with_source(&mut db)
-            .to(PythonVersionWithSource {
-                version: PythonVersion::latest_ty(),
-                source: PythonVersionSource::default(),
-            });
+        set_python_version(&mut db, PythonVersion::latest_ty());
 
         for class in KnownClass::iter() {
             if class.canonical_module(&db).is_third_party() {
@@ -2098,12 +2193,7 @@ mod tests {
 
         for (class, version_added) in classes {
             if version_added != current_version {
-                program
-                    .set_python_version_with_source(&mut db)
-                    .to(PythonVersionWithSource {
-                        version: version_added,
-                        source: PythonVersionSource::default(),
-                    });
+                set_python_version(&mut db, version_added);
                 current_version = version_added;
             }
 

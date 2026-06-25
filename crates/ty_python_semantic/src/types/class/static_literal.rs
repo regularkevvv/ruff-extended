@@ -3,7 +3,7 @@ use itertools::{Either, Itertools};
 use ruff_db::{
     diagnostic::Span,
     files::File,
-    parsed::{ParsedModuleRef, parsed_module},
+    parsed::{ParsedModuleRef, parsed_module_versioned},
 };
 use ruff_python_ast as ast;
 use ruff_python_ast::{PythonVersion, name::Name};
@@ -11,7 +11,7 @@ use ruff_text_size::{Ranged, TextRange};
 use std::cell::RefCell;
 
 use crate::{
-    Db, FxIndexMap, FxIndexSet, Program, TypeQualifiers,
+    Db, FxIndexMap, FxIndexSet, TypeQualifiers,
     place::{
         DefinedPlace, Definedness, Place, PlaceAndQualifiers, Provenance, PublicTypePolicy,
         TypeOrigin, place_from_bindings, place_from_declarations,
@@ -61,7 +61,7 @@ use ty_python_core::{
     definition::{Definition, DefinitionKind, DefinitionState, TargetKind},
     place_table,
     scope::{Scope, ScopeId},
-    semantic_index,
+    semantic_index_in_environment,
     symbol::Symbol,
     use_def_map,
 };
@@ -290,11 +290,11 @@ impl<'db> StaticClassLiteral<'db> {
     )]
     fn pep695_generic_context_inner(self, db: &'db dyn Db) -> Option<GenericContext<'db>> {
         let scope = self.body_scope(db);
-        let file = scope.file(db);
-        let parsed = parsed_module(db, file).load(db);
+        let analysis_file = scope.analysis_file(db);
+        let parsed = parsed_module_versioned(db, analysis_file.versioned_file(db)).load(db);
         let class_def_node = scope.node(db).expect_class().node(&parsed);
         class_def_node.type_params.as_ref().map(|type_params| {
-            let index = semantic_index(db, scope.file(db));
+            let index = semantic_index_in_environment(db, analysis_file);
             let definition = index.expect_single_definition(class_def_node);
             GenericContext::from_type_params(db, index, definition, type_params)
         })
@@ -405,7 +405,7 @@ impl<'db> StaticClassLiteral<'db> {
 
     pub(crate) fn definition(self, db: &'db dyn Db) -> Definition<'db> {
         let body_scope = self.body_scope(db);
-        let index = semantic_index(db, body_scope.file(db));
+        let index = semantic_index_in_environment(db, body_scope.analysis_file(db));
         index.expect_single_definition(body_scope.node(db).expect_class())
     }
 
@@ -496,11 +496,12 @@ impl<'db> StaticClassLiteral<'db> {
                 class.name(db)
             );
 
-            let module = parsed_module(db, class.file(db)).load(db);
+            let analysis_file = class.body_scope(db).analysis_file(db);
+            let module = parsed_module_versioned(db, analysis_file.versioned_file(db)).load(db);
             let class_stmt = class.node(db, &module);
 
-            let class_definition =
-                semantic_index(db, class.file(db)).expect_single_definition(class_stmt);
+            let class_definition = semantic_index_in_environment(db, analysis_file)
+                .expect_single_definition(class_stmt);
 
             expanded_class_base_entries(db, class.known(db), class_stmt, class_definition)
                 .into_iter()
@@ -586,7 +587,8 @@ impl<'db> StaticClassLiteral<'db> {
     fn decorators_inner(self, db: &'db dyn Db) -> Box<[Type<'db>]> {
         tracing::trace!("StaticClassLiteral::decorators: {}", self.name(db));
 
-        let module = parsed_module(db, self.file(db)).load(db);
+        let analysis_file = self.body_scope(db).analysis_file(db);
+        let module = parsed_module_versioned(db, analysis_file.versioned_file(db)).load(db);
 
         let class_stmt = self.node(db, &module);
         if class_stmt.decorator_list.is_empty() {
@@ -594,7 +596,7 @@ impl<'db> StaticClassLiteral<'db> {
         }
 
         let class_definition =
-            semantic_index(db, self.file(db)).expect_single_definition(class_stmt);
+            semantic_index_in_environment(db, analysis_file).expect_single_definition(class_stmt);
 
         class_stmt
             .decorator_list
@@ -618,10 +620,11 @@ impl<'db> StaticClassLiteral<'db> {
     /// Iterate through the decorators on this class, returning the index of the first one
     /// that is either `@dataclass` or `@dataclass(...)`.
     pub(crate) fn find_dataclass_decorator_position(self, db: &'db dyn Db) -> Option<usize> {
-        let module = parsed_module(db, self.file(db)).load(db);
+        let analysis_file = self.body_scope(db).analysis_file(db);
+        let module = parsed_module_versioned(db, analysis_file.versioned_file(db)).load(db);
         let class_stmt = self.node(db, &module);
         let class_definition =
-            semantic_index(db, self.file(db)).expect_single_definition(class_stmt);
+            semantic_index_in_environment(db, analysis_file).expect_single_definition(class_stmt);
 
         class_stmt.decorator_list.iter().position(|decorator| {
             let decorator_callable = decorator
@@ -772,7 +775,9 @@ impl<'db> StaticClassLiteral<'db> {
             return None;
         }
 
-        let module = parsed_module(db, self.file(db)).load(db);
+        let module =
+            parsed_module_versioned(db, self.body_scope(db).analysis_file(db).versioned_file(db))
+                .load(db);
         let class_stmt = self.node(db, &module);
         Some(typed_dict_params_from_class_def(class_stmt))
     }
@@ -799,7 +804,11 @@ impl<'db> StaticClassLiteral<'db> {
         // Dataclass transformer flags can be overwritten using class arguments.
         if let Some(transformer_params) = transformer_params.as_mut() {
             if let Some(class_def) = self.definition(db).kind(db).as_class() {
-                let module = parsed_module(db, self.file(db)).load(db);
+                let module = parsed_module_versioned(
+                    db,
+                    self.body_scope(db).analysis_file(db).versioned_file(db),
+                )
+                .load(db);
 
                 if let Some(arguments) = &class_def.node(&module).arguments {
                     let mut flags = transformer_params.flags(db);
@@ -952,7 +961,11 @@ impl<'db> StaticClassLiteral<'db> {
                 return Ok((SubclassOfType::subclass_of_unknown(), None));
             }
 
-            let module = parsed_module(db, class.file(db)).load(db);
+            let module = parsed_module_versioned(
+                db,
+                class.body_scope(db).analysis_file(db).versioned_file(db),
+            )
+            .load(db);
 
             let explicit_metaclass = class.explicit_metaclass(db, &module);
 
@@ -1481,6 +1494,12 @@ impl<'db> StaticClassLiteral<'db> {
             Some(Type::function_like_callable(db, signature))
         };
 
+        let python_version = self
+            .body_scope(db)
+            .analysis_file(db)
+            .program(db)
+            .python_version(db);
+
         match (field_policy, name) {
             (CodeGeneratorKind::DataclassLike(_), "__init__") => {
                 if !self.has_dataclass_param(db, field_policy, DataclassFlags::INIT) {
@@ -1537,6 +1556,7 @@ impl<'db> StaticClassLiteral<'db> {
                     instance_ty,
                     fields_iter,
                     specialization.map(|s| s.generic_context(db)),
+                    python_version,
                 )
             }
             (CodeGeneratorKind::DataclassLike(_), "__lt__" | "__le__" | "__gt__" | "__ge__") => {
@@ -1586,7 +1606,7 @@ impl<'db> StaticClassLiteral<'db> {
                 }
             }
             (CodeGeneratorKind::DataclassLike(_), "__match_args__")
-                if Program::get(db).python_version(db) >= PythonVersion::PY310 =>
+                if python_version >= PythonVersion::PY310 =>
             {
                 if !self.has_dataclass_param(db, field_policy, DataclassFlags::MATCH_ARGS) {
                     return None;
@@ -1609,7 +1629,7 @@ impl<'db> StaticClassLiteral<'db> {
                 Some(Type::heterogeneous_tuple(db, match_args))
             }
             (CodeGeneratorKind::DataclassLike(_), "__weakref__")
-                if Program::get(db).python_version(db) >= PythonVersion::PY311 =>
+                if python_version >= PythonVersion::PY311 =>
             {
                 if !self.has_dataclass_param(db, field_policy, DataclassFlags::WEAKREF_SLOT)
                     || !self.has_dataclass_param(db, field_policy, DataclassFlags::SLOTS)
@@ -1650,7 +1670,7 @@ impl<'db> StaticClassLiteral<'db> {
                     })
             }
             (CodeGeneratorKind::DataclassLike(_), "__replace__")
-                if Program::get(db).python_version(db) >= PythonVersion::PY313 =>
+                if python_version >= PythonVersion::PY313 =>
             {
                 let self_parameter = Parameter::positional_or_keyword(Name::new_static("self"))
                     .with_annotated_type(instance_ty);
@@ -1677,7 +1697,7 @@ impl<'db> StaticClassLiteral<'db> {
                 None
             }
             (CodeGeneratorKind::DataclassLike(_), "__slots__")
-                if Program::get(db).python_version(db) >= PythonVersion::PY310 =>
+                if python_version >= PythonVersion::PY310 =>
             {
                 self.has_dataclass_param(db, field_policy, DataclassFlags::SLOTS)
                     .then(|| {
@@ -2255,9 +2275,9 @@ impl<'db> StaticClassLiteral<'db> {
         let mut is_attribute_bound = false;
         let mut provenance = Provenance::Unknown;
 
-        let file = class_body_scope.file(db);
-        let module = parsed_module(db, file).load(db);
-        let index = semantic_index(db, file);
+        let analysis_file = class_body_scope.analysis_file(db);
+        let module = parsed_module_versioned(db, analysis_file.versioned_file(db)).load(db);
+        let index = semantic_index_in_environment(db, analysis_file);
         let class_map = use_def_map(db, class_body_scope);
         let class_table = place_table(db, class_body_scope);
         let is_valid_scope = |method_scope: &Scope| {
@@ -2895,7 +2915,8 @@ impl<'db> StaticClassLiteral<'db> {
     /// ```
     pub(crate) fn header_range(self, db: &'db dyn Db) -> TextRange {
         let class_scope = self.body_scope(db);
-        let module = parsed_module(db, class_scope.file(db)).load(db);
+        let module =
+            parsed_module_versioned(db, class_scope.analysis_file(db).versioned_file(db)).load(db);
         let class_node = self.node(db, &module);
         let class_name = &class_node.name;
         TextRange::new(
@@ -2911,7 +2932,8 @@ impl<'db> StaticClassLiteral<'db> {
     /// Returns the range of the class's name
     pub(crate) fn focus_range(self, db: &'db dyn Db) -> TextRange {
         let class_scope = self.body_scope(db);
-        let module = parsed_module(db, class_scope.file(db)).load(db);
+        let module =
+            parsed_module_versioned(db, class_scope.analysis_file(db).versioned_file(db)).load(db);
         let class_node = self.node(db, &module);
         class_node.name.range()
     }
@@ -3030,8 +3052,8 @@ impl<'db> VarianceInferable<'db> for StaticClassLiteral<'db> {
         }
         let class_body_scope = self.body_scope(db);
 
-        let file = class_body_scope.file(db);
-        let index = semantic_index(db, file);
+        let analysis_file = class_body_scope.analysis_file(db);
+        let index = semantic_index_in_environment(db, analysis_file);
 
         let explicit_bases_variances = self
             .explicit_bases(db)
@@ -3046,7 +3068,7 @@ impl<'db> VarianceInferable<'db> for StaticClassLiteral<'db> {
             // not considered here, since they don't use field types in their signatures. TODO:
             // ideally we'd have a single source of truth for information about synthesized
             // methods, so we just look them up normally and don't hardcode this knowledge here.
-            let is_frozen_dataclass_prior_to_313 = Program::get(db).python_version(db)
+            let is_frozen_dataclass_prior_to_313 = analysis_file.program(db).python_version(db)
                 <= PythonVersion::PY312
                 && CodeGeneratorKind::from_static_class(db, self)
                     .is_some_and(|kind| self.has_dataclass_param(db, kind, DataclassFlags::FROZEN));
@@ -3176,7 +3198,11 @@ fn explicit_bases_cycle_initial<'db>(
     id: salsa::Id,
     literal: StaticClassLiteral<'db>,
 ) -> Box<[Type<'db>]> {
-    let module = parsed_module(db, literal.file(db)).load(db);
+    let module = parsed_module_versioned(
+        db,
+        literal.body_scope(db).analysis_file(db).versioned_file(db),
+    )
+    .load(db);
     let class_stmt = literal.node(db, &module);
     // Try to produce a list of `Divergent` types of the right length. However, if one or more of
     // the bases is a starred expression, we don't know how many entries that will eventually
@@ -3221,7 +3247,7 @@ impl get_size2::GetSize for ImplicitAttributeName<'_> {}
 
 #[salsa::tracked(returns(deref), heap_size=ruff_memory_usage::heap_size)]
 fn implicit_attribute_names<'db>(db: &'db dyn Db, class_body_scope: ScopeId<'db>) -> Box<[Name]> {
-    let index = semantic_index(db, class_body_scope.file(db));
+    let index = semantic_index_in_environment(db, class_body_scope.analysis_file(db));
     let mut names = Vec::new();
 
     for function_scope_id in attribute_scopes(db, class_body_scope) {
