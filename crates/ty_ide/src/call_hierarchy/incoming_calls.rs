@@ -4,7 +4,7 @@ use crate::references::{contains_identifier, has_any_external_visible_definition
 use crate::{CallHierarchyItem, Db, SymbolKind};
 use rayon::prelude::*;
 use ruff_db::files::File;
-use ruff_db::parsed::{ParsedModuleRef, parsed_module};
+use ruff_db::parsed::ParsedModuleRef;
 use ruff_python_ast::helpers::is_dunder;
 use ruff_python_ast::name::Name;
 use ruff_python_ast::token::Tokens;
@@ -34,7 +34,7 @@ pub fn incoming_calls(
 ) -> Vec<IncomingCall> {
     let file = analysis_file.file(db);
     let program = analysis_file.program(db);
-    let module = parsed_module(db, file).load(db);
+    let module = analysis_file.parsed(db).load(db);
     let model = SemanticModel::new(db, analysis_file);
     let Some(goto_target) = find_goto_target(&model, &module, offset) else {
         return Vec::new();
@@ -63,7 +63,7 @@ pub fn incoming_calls(
         GotoTarget::FunctionDef(function) => function
             .inferred_type(&model)
             .and_then(Type::as_property_instance)
-            .and_then(|property| property.accessor_role(db, program, function.definition(&model))),
+            .and_then(|property| property.accessor_role(db, function.definition(&model))),
         _ => None,
     };
 
@@ -177,8 +177,7 @@ fn call_sites_for_file(
     target_role: Option<PropertyAccessorRole>,
     needle: Option<&str>,
 ) -> Vec<RawCallSite> {
-    let file = analysis_file.file(db);
-    let parsed = parsed_module(db, file);
+    let parsed = analysis_file.parsed(db);
     let module = parsed.load(db);
     let model = SemanticModel::new(db, analysis_file);
     let mut sites = Vec::new();
@@ -345,9 +344,9 @@ impl<'a> CallSitesFinder<'a, '_> {
         // `c.prop` would also match the setter when both accessors are
         // co-definitions in `target_definitions`.
         let intersects = current_definitions.iter().any(|resolved| {
-            let role = resolved.definition().and_then(|def| {
-                property.accessor_role(self.db, self.model.analysis_file().program(self.db), def)
-            });
+            let role = resolved
+                .definition()
+                .and_then(|def| property.accessor_role(self.db, def));
             let matches_site_kind = match attribute.ctx {
                 ast::ExprContext::Load => {
                     matches!(role, Some(PropertyAccessorRole::Getter) | None)

@@ -31,9 +31,7 @@ fn has_exact_runtime_class<'db>(db: &'db dyn Db, program: Program<'db>, ty: Type
     match ty {
         Type::LiteralValue(_) => true,
         Type::NominalInstance(instance) => instance.class(db, program).is_final(db),
-        Type::TypeAlias(alias) => {
-            has_exact_runtime_class(db, program, alias.value_type(db, program))
-        }
+        Type::TypeAlias(alias) => has_exact_runtime_class(db, program, alias.value_type(db)),
         _ => false,
     }
 }

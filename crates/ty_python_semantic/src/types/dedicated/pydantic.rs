@@ -10,11 +10,7 @@ use crate::types::{ClassBase, KnownClass, Parameter, StaticClassLiteral, Type};
 /// can override `__init__`; Pydantic preserves that custom constructor, so it must continue to
 /// control which keywords are accepted. This also avoids widening specialized model bases such as
 /// `RootModel` and `BaseSettings`, which define their own constructors.
-pub(in crate::types) fn uses_base_model_init(
-    db: &dyn Db,
-    program: crate::Program<'_>,
-    class: StaticClassLiteral<'_>,
-) -> bool {
+pub(in crate::types) fn uses_base_model_init(db: &dyn Db, class: StaticClassLiteral<'_>) -> bool {
     for base in class
         .iter_mro(db, None)
         .skip(1)
@@ -26,7 +22,7 @@ pub(in crate::types) fn uses_base_model_init(
             return true;
         }
 
-        if !class_member(db, program, base.body_scope(db), "__init__").is_undefined() {
+        if !class_member(db, base.body_scope(db), "__init__").is_undefined() {
             return false;
         }
     }
