@@ -223,7 +223,10 @@ impl ProjectDatabase {
                 0
             });
 
-            cmp::Reverse(ingredient.size_of_fields() + heap_size)
+            (
+                cmp::Reverse(ingredient.size_of_fields() + heap_size),
+                cmp::Reverse(ingredient.debug_name()),
+            )
         });
 
         memos.sort_by_key(|(query, memo)| {
@@ -232,7 +235,10 @@ impl ProjectDatabase {
                 0
             });
 
-            cmp::Reverse(memo.size_of_fields() + heap_size)
+            (
+                cmp::Reverse(memo.size_of_fields() + heap_size),
+                cmp::Reverse(*query),
+            )
         });
 
         let mut total_fields = 0;
