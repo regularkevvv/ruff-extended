@@ -13,7 +13,6 @@
 use crate::goto::{Definitions, GotoTarget};
 use crate::{Db, ReferenceKind, ReferenceTarget};
 use rayon::prelude::*;
-use ruff_db::files::File;
 use ruff_python_ast::find_node::{CoveringNode, covering_node};
 use ruff_python_ast::token::Tokens;
 use ruff_python_ast::{
@@ -23,6 +22,7 @@ use ruff_python_ast::{
 use ruff_text_size::Ranged;
 use ty_project::parallel::{ParallelIteratorExt, minimum_parallel_job_len};
 use ty_python_core::definition::{Definition, DefinitionKind, DefinitionState};
+use ty_python_core::environment::AnalysisFile;
 use ty_python_core::scope::{FileScopeId, NodeWithScopeKind, ScopeKind};
 use ty_python_semantic::{ImportAliasResolution, ResolvedDefinition, SemanticModel};
 
@@ -84,11 +84,13 @@ impl ReferencesMode {
 /// Search for references across all files in the project.
 pub(crate) fn references(
     db: &dyn Db,
-    file: File,
+    analysis_file: AnalysisFile<'_>,
     goto_target: &GotoTarget,
     mode: ReferencesMode,
 ) -> Option<Vec<ReferenceTarget>> {
-    let model = SemanticModel::new(db, file);
+    let file = analysis_file.file(db);
+    let program = analysis_file.program(db);
+    let model = SemanticModel::new(db, analysis_file);
     let target_definitions = goto_target.definitions(&model, mode.to_import_alias_resolution())?;
     let is_externally_visible_symbol =
         has_any_external_visible_definitions(db, &target_definitions);
@@ -98,7 +100,8 @@ pub(crate) fn references(
     let target_text = goto_target.to_string()?;
 
     // Find all of the references to the symbol within this file
-    let mut references = references_for_file(db, file, &target_definitions, &target_text, mode);
+    let mut references =
+        references_for_file(db, analysis_file, &target_definitions, &target_text, mode);
 
     // Check if we should search across files based on the mode
     let search_across_files = matches!(
@@ -131,11 +134,17 @@ pub(crate) fn references(
                 }
 
                 if is_externally_visible_symbol {
-                    references_for_file(db, other_file, &target_definitions, &target_text, mode)
+                    references_for_file(
+                        db,
+                        AnalysisFile::new(db, program, other_file),
+                        &target_definitions,
+                        &target_text,
+                        mode,
+                    )
                 } else {
                     references_for_keyword_arguments_in_file(
                         db,
-                        other_file,
+                        AnalysisFile::new(db, program, other_file),
                         &target_definitions,
                         &target_text,
                         mode,
@@ -157,11 +166,12 @@ pub(crate) fn references(
 
 fn references_for_keyword_arguments_in_file(
     db: &dyn Db,
-    file: File,
+    analysis_file: AnalysisFile<'_>,
     target_definitions: &Definitions<'_>,
     target_text: &str,
     mode: ReferencesMode,
 ) -> Vec<ReferenceTarget> {
+    let file = analysis_file.file(db);
     // This path is used for cross-file parameter keyword-label references.
     // DocumentHighlights is same-file-only and should never route through here.
     debug_assert!(
@@ -171,7 +181,7 @@ fn references_for_keyword_arguments_in_file(
 
     let parsed = ruff_db::parsed::parsed_module(db, file);
     let module = parsed.load(db);
-    let model = SemanticModel::new(db, file);
+    let model = SemanticModel::new(db, analysis_file);
     let mut references = Vec::new();
 
     let mut finder = KeywordArgumentReferencesFinder(LocalReferencesFinder {
@@ -248,14 +258,15 @@ fn is_slots_assignment(node: AnyNodeRef<'_>, value: AnyNodeRef<'_>) -> bool {
 /// The behavior depends on the provided mode.
 fn references_for_file(
     db: &dyn Db,
-    file: File,
+    analysis_file: AnalysisFile<'_>,
     target_definitions: &Definitions<'_>,
     target_text: &str,
     mode: ReferencesMode,
 ) -> Vec<ReferenceTarget> {
+    let file = analysis_file.file(db);
     let parsed = ruff_db::parsed::parsed_module(db, file);
     let module = parsed.load(db);
-    let model = SemanticModel::new(db, file);
+    let model = SemanticModel::new(db, analysis_file);
     let mut references = Vec::new();
 
     let mut finder = LocalReferencesFinder {
@@ -722,7 +733,7 @@ impl<'a> LocalReferencesFinder<'a> {
         let file = self.model.file();
         let class_range = class.range();
         let module = ruff_db::parsed::parsed_module(db, file).load(db);
-        let index = ty_python_core::semantic_index(db, file);
+        let index = ty_python_core::semantic_index(db, self.model.analysis_file());
 
         // The nearest class scope lexically enclosing `scope`, if any. `ancestor_scopes` skips
         // class scopes for name resolution, so we walk the lexical parents directly to stop at the
@@ -822,7 +833,7 @@ mod tests {
     use crate::tests::{CursorTest, cursor_test};
 
     fn cursor_target_is_externally_visible(test: &CursorTest) -> bool {
-        let model = SemanticModel::new(&test.db, test.cursor.file);
+        let model = SemanticModel::new(&test.db, test.cursor_analysis_file());
         let goto_target =
             find_goto_target(&model, &test.cursor.parsed, test.cursor.offset).unwrap();
         let definitions = goto_target
