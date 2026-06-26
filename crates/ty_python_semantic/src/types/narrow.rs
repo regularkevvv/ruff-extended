@@ -33,7 +33,7 @@ use ty_python_core::predicate::{
 use ty_python_core::scope::ScopeId;
 use ty_python_core::{ExpressionNodeKey, NarrowingEvaluator, place_table, semantic_index};
 
-use ruff_db::parsed::{ParsedModuleRef, parsed_module_versioned};
+use ruff_db::parsed::{ParsedModuleRef, parsed_module};
 use ruff_python_ast::name::Name;
 use ruff_python_stdlib::identifiers::is_identifier;
 
@@ -137,7 +137,7 @@ fn all_narrowing_constraints_for_pattern<'db>(
     db: &'db dyn Db,
     pattern: PatternPredicate<'db>,
 ) -> Option<FrozenNarrowingConstraints<'db>> {
-    let module = parsed_module_versioned(db, pattern.analysis_file(db).versioned_file(db)).load(db);
+    let module = parsed_module(db, pattern.analysis_file(db).versioned_file(db)).load(db);
     NarrowingConstraintsBuilder::new(db, &module, PredicateNode::Pattern(pattern), true).finish()
 }
 
@@ -150,8 +150,7 @@ fn all_narrowing_constraints_for_expression<'db>(
     db: &'db dyn Db,
     expression: Expression<'db>,
 ) -> ExpressionNarrowingConstraints<'db> {
-    let module =
-        parsed_module_versioned(db, expression.analysis_file(db).versioned_file(db)).load(db);
+    let module = parsed_module(db, expression.analysis_file(db).versioned_file(db)).load(db);
     let predicate = PredicateNode::Expression(expression);
     ExpressionNarrowingConstraints {
         positive: NarrowingConstraintsBuilder::new(db, &module, predicate, true).finish(),
@@ -164,7 +163,7 @@ fn all_negative_narrowing_constraints_for_pattern<'db>(
     db: &'db dyn Db,
     pattern: PatternPredicate<'db>,
 ) -> Option<FrozenNarrowingConstraints<'db>> {
-    let module = parsed_module_versioned(db, pattern.analysis_file(db).versioned_file(db)).load(db);
+    let module = parsed_module(db, pattern.analysis_file(db).versioned_file(db)).load(db);
     NarrowingConstraintsBuilder::new(db, &module, PredicateNode::Pattern(pattern), false).finish()
 }
 
@@ -174,7 +173,7 @@ fn all_narrowing_constraints_for_subject_element_pattern<'db>(
     pattern: PatternPredicate<'db>,
     target: ExpressionNodeKey,
 ) -> Option<FrozenNarrowingConstraints<'db>> {
-    let module = parsed_module_versioned(db, pattern.analysis_file(db).versioned_file(db)).load(db);
+    let module = parsed_module(db, pattern.analysis_file(db).versioned_file(db)).load(db);
     NarrowingConstraintsBuilder::new(
         db,
         &module,
@@ -1753,7 +1752,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                 self.db,
                 self.program(),
                 Type::instance(self.db, subject_class),
-                generic_context.inferable_typevars(self.db, self.program()),
+                generic_context.inferable_typevars(self.db),
             )
             .solve_with(|variance, path_bound| {
                 let Some(lower) = path_bound.lower else {

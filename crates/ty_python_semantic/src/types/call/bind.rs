@@ -17,7 +17,6 @@ use std::collections::HashSet;
 use std::fmt;
 
 use itertools::Itertools;
-use ruff_db::parsed::parsed_module;
 use ruff_python_ast::name::Name;
 use ruff_text_size::{Ranged, TextRange};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -1908,35 +1907,23 @@ impl<'db> Bindings<'db> {
                                     if let Some(first_param) = params.get_positional(first_index) {
                                         let mut input_ty = first_param.annotated_type();
                                         if let Some(specialization) = default_specialization {
-                                            input_ty = input_ty.apply_specialization(
-                                                db,
-                                                program,
-                                                specialization,
-                                            );
+                                            input_ty =
+                                                input_ty.apply_specialization(db, specialization);
                                         }
                                         input_types = input_types.add(input_ty);
                                         if let Some(specialization) = default_specialization {
-                                            return_ty = return_ty.apply_specialization(
-                                                db,
-                                                program,
-                                                specialization,
-                                            );
+                                            return_ty =
+                                                return_ty.apply_specialization(db, specialization);
                                         }
                                         output_types = output_types.add(return_ty);
                                         found_any = true;
                                     } else if let Some((_, variadic)) = params.variadic() {
                                         let mut input_ty = variadic.annotated_type();
                                         if let Some(specialization) = default_specialization {
-                                            input_ty = input_ty.apply_specialization(
-                                                db,
-                                                program,
-                                                specialization,
-                                            );
-                                            return_ty = return_ty.apply_specialization(
-                                                db,
-                                                program,
-                                                specialization,
-                                            );
+                                            input_ty =
+                                                input_ty.apply_specialization(db, specialization);
+                                            return_ty =
+                                                return_ty.apply_specialization(db, specialization);
                                         }
                                         input_types = input_types.add(input_ty);
                                         output_types = output_types.add(return_ty);
@@ -1944,11 +1931,8 @@ impl<'db> Bindings<'db> {
                                     } else if params.is_gradual() {
                                         input_types = input_types.add(Type::unknown());
                                         if let Some(specialization) = default_specialization {
-                                            return_ty = return_ty.apply_specialization(
-                                                db,
-                                                program,
-                                                specialization,
-                                            );
+                                            return_ty =
+                                                return_ty.apply_specialization(db, specialization);
                                         }
                                         output_types = output_types.add(return_ty);
                                         found_any = true;
@@ -3785,11 +3769,8 @@ impl<'db> CallableBinding<'db> {
                             let raw_parameter_type = overload.signature.parameters()
                                 [matched_parameter.index]
                                 .annotated_type();
-                            let parameter_type = raw_parameter_type.apply_optional_specialization(
-                                db,
-                                program,
-                                overload.specialization,
-                            );
+                            let parameter_type = raw_parameter_type
+                                .apply_optional_specialization(db, overload.specialization);
                             OverloadFilterSlot {
                                 parameter: parameter_type,
                                 // Argument types are cached by the raw parameter type, even when
@@ -4242,7 +4223,10 @@ impl<'db> CallableBinding<'db> {
                             "First overload defined here",
                         );
                         let file = function.file(context.db());
-                        let module = parsed_module(context.db(), file).load(context.db());
+                        let module = function
+                            .analysis_file(context.db())
+                            .parsed(context.db())
+                            .load(context.db());
                         let node =
                             overload.node(context.db(), function.file(context.db()), &module);
                         let span = if node.body.len() == 1 {
@@ -5095,7 +5079,7 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
 
         let return_with_tcx = Some(self.return_ty).zip(self.call_expression_tcx.annotation);
 
-        self.inferable_typevars = generic_context.inferable_typevars(self.db, program);
+        self.inferable_typevars = generic_context.inferable_typevars(self.db);
         let mut builder =
             SpecializationBuilder::new(self.db, self.program, constraints, self.inferable_typevars);
 
@@ -5346,9 +5330,7 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
 
         let specialization = builder.build_with(generic_context, choose_solution);
 
-        self.return_ty = self
-            .return_ty
-            .apply_specialization(self.db, self.program, specialization);
+        self.return_ty = self.return_ty.apply_specialization(self.db, specialization);
         self.specialization = Some(specialization);
     }
 
@@ -5411,9 +5393,8 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
 
         let mut expected_ty = parameter.annotated_type();
         if let Some(specialization) = self.specialization {
-            argument_type =
-                argument_type.apply_specialization(self.db, self.program, specialization);
-            expected_ty = expected_ty.apply_specialization(self.db, self.program, specialization);
+            argument_type = argument_type.apply_specialization(self.db, specialization);
+            expected_ty = expected_ty.apply_specialization(self.db, specialization);
         }
         // This is one of the few places where we want to check if there's _any_ specialization
         // where assignability holds; normally we want to check that assignability holds for
@@ -6233,7 +6214,7 @@ impl<'db> Binding<'db> {
         let parameter_type = specialized_overload
             .specialization()
             .map_or(parameter_type, |specialization| {
-                parameter_type.apply_specialization(db, program, specialization)
+                parameter_type.apply_specialization(db, specialization)
             });
 
         (!parameter_type.has_dynamic(db, program)
@@ -6345,7 +6326,7 @@ impl<'db> Binding<'db> {
                     db,
                     program,
                     declared_return_ty,
-                    generic_context.inferable_typevars(db, program),
+                    generic_context.inferable_typevars(db),
                 );
                 if let Solutions::Constrained(solutions) =
                     path_bounds.solve(db, program, constraints)
@@ -6422,7 +6403,7 @@ impl<'db> Binding<'db> {
                 ));
             }
 
-            parameter_type = parameter_type.apply_specialization(db, program, specialization);
+            parameter_type = parameter_type.apply_specialization(db, specialization);
         }
 
         Some(ArgumentTypeContext::standard(
@@ -7806,7 +7787,9 @@ impl<'db> BindingError<'db> {
                     .typevar(context.db())
                     .definition(context.db())
                 {
-                    let module = parsed_module(context.db(), typevar_definition.file(context.db()))
+                    let module = typevar_definition
+                        .analysis_file(context.db())
+                        .parsed(context.db())
                         .load(context.db());
                     let typevar_range = typevar_definition.full_range(context.db(), &module);
                     let mut sub = SubDiagnostic::new(

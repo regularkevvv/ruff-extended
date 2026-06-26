@@ -15,7 +15,7 @@ use context::InferContext;
 use ruff_db::Instant;
 use ruff_db::diagnostic::{Annotation, Diagnostic, Span};
 use ruff_db::files::File;
-use ruff_db::parsed::parsed_module_versioned;
+use ruff_db::parsed::parsed_module;
 use ruff_python_ast as ast;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
@@ -206,7 +206,7 @@ pub fn check_types(
             .map(|error| Diagnostic::invalid_syntax(file, error, error)),
     );
 
-    let diagnostics = check_suppressions(db, file, diagnostics);
+    let diagnostics = check_suppressions(db, analysis_file, diagnostics);
 
     let elapsed = start.elapsed();
     if elapsed >= Duration::from_millis(100) {
@@ -4566,6 +4566,7 @@ impl<'db> Type<'db> {
                 Some(KnownFunction::AssertType) => {
                     let val_ty = BoundTypeVarInstance::synthetic(
                         db,
+                        program,
                         Name::new_static("T"),
                         TypeVarVariance::Invariant,
                     );
@@ -4573,7 +4574,11 @@ impl<'db> Type<'db> {
                     Binding::single(
                         self,
                         Signature::new_generic(
-                            Some(GenericContext::from_typevar_instances(db, [val_ty])),
+                            Some(GenericContext::from_typevar_instances(
+                                db,
+                                program,
+                                [val_ty],
+                            )),
                             Parameters::new(
                                 db,
                                 [
@@ -4827,11 +4832,12 @@ impl<'db> Type<'db> {
             Type::DataclassDecorator(_) => {
                 let typevar = BoundTypeVarInstance::synthetic(
                     db,
+                    program,
                     Name::new_static("T"),
                     TypeVarVariance::Invariant,
                 );
                 let typevar_meta = SubclassOfType::from(db, program, typevar);
-                let context = GenericContext::from_typevar_instances(db, [typevar]);
+                let context = GenericContext::from_typevar_instances(db, program, [typevar]);
                 let parameters = [Parameter::positional_only(Some(Name::new_static("cls")))
                     .with_annotated_type(typevar_meta)];
                 // Intersect with `Any` for the return type to reflect the fact that the `dataclass()`
@@ -5148,6 +5154,7 @@ impl<'db> Type<'db> {
                 // ```
                 let return_ty = BoundTypeVarInstance::synthetic(
                     db,
+                    program,
                     Name::new_static("_T"),
                     TypeVarVariance::Covariant,
                 );
@@ -5156,7 +5163,11 @@ impl<'db> Type<'db> {
                     Binding::single(
                         self,
                         Signature::new_generic(
-                            Some(GenericContext::from_typevar_instances(db, [return_ty])),
+                            Some(GenericContext::from_typevar_instances(
+                                db,
+                                program,
+                                [return_ty],
+                            )),
                             Parameters::new(
                                 db,
                                 [
@@ -5188,6 +5199,7 @@ impl<'db> Type<'db> {
             KnownClass::Tuple => {
                 let element_ty = BoundTypeVarInstance::synthetic(
                     db,
+                    program,
                     Name::new_static("T"),
                     TypeVarVariance::Covariant,
                 );
@@ -5205,7 +5217,11 @@ impl<'db> Type<'db> {
                         [
                             Signature::new(Parameters::empty(), Type::empty_tuple(db)),
                             Signature::new_generic(
-                                Some(GenericContext::from_typevar_instances(db, [element_ty])),
+                                Some(GenericContext::from_typevar_instances(
+                                    db,
+                                    program,
+                                    [element_ty],
+                                )),
                                 Parameters::new(
                                     db,
                                     [Parameter::positional_only(Some(Name::new_static(
@@ -6069,7 +6085,7 @@ impl<'db> Type<'db> {
         typevar_binding_context: Option<Definition<'db>>,
         inference_flags: InferenceFlags,
     ) -> Result<Type<'db>, InvalidTypeExpressionError<'db>> {
-        let program = scope_id.analysis_file(db).program(db);
+        let program = scope_id.program(db);
         match self {
             // Special cases for `float` and `complex`
             // https://typing.python.org/en/latest/spec/special-types.html#special-cases-for-float-and-complex
@@ -6402,11 +6418,10 @@ impl<'db> Type<'db> {
     pub(crate) fn apply_optional_specialization(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
         specialization: Option<Specialization<'db>>,
     ) -> Type<'db> {
         if let Some(specialization) = specialization {
-            self.apply_specialization(db, program, specialization)
+            self.apply_specialization(db, specialization)
         } else {
             self
         }
@@ -6421,7 +6436,6 @@ impl<'db> Type<'db> {
     pub(crate) fn apply_specialization(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
         specialization: Specialization<'db>,
     ) -> Type<'db> {
         if matches!(
@@ -6468,12 +6482,13 @@ impl<'db> Type<'db> {
             return self;
         }
 
-        self.apply_specialization_inner(db, program, specialization)
+        self.apply_specialization_inner(db, specialization)
     }
 
     #[salsa::tracked(
-        cycle_initial=|_, id, _, _, _| Type::divergent(id),
-        cycle_fn=|db, cycle, previous: &Type<'db>, value: Type<'db>, _, program, _| {
+        cycle_initial=|_, id, _, _| Type::divergent(id),
+        cycle_fn=|db, cycle, previous: &Type<'db>, value: Type<'db>, _, specialization: Specialization<'db>| {
+            let program = specialization.generic_context(db).program(db);
             value.cycle_normalized(db, program, *previous, cycle)
         },
         heap_size=ruff_memory_usage::heap_size
@@ -6481,9 +6496,9 @@ impl<'db> Type<'db> {
     fn apply_specialization_inner(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
         specialization: Specialization<'db>,
     ) -> Type<'db> {
+        let program = specialization.generic_context(db).program(db);
         let type_mapping = match specialization.materialization_kind(db) {
             None => TypeMapping::ApplySpecialization(ApplySpecialization::Specialization(
                 specialization,
@@ -7171,7 +7186,7 @@ impl<'db> Type<'db> {
             &TypeMapping::BindLegacyTypevars(
                 binding_context
                     .map(BindingContext::Definition)
-                    .unwrap_or(BindingContext::Synthetic),
+                    .unwrap_or(BindingContext::Synthetic(program)),
             ),
             TypeContext::default(),
         )
@@ -7509,10 +7524,9 @@ impl<'db> Type<'db> {
     pub(crate) fn default_specialize(self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
         let mut variables = FxOrderSet::default();
         self.find_legacy_typevars(db, program, None, &mut variables);
-        let generic_context = GenericContext::from_typevar_instances(db, variables);
+        let generic_context = GenericContext::from_typevar_instances(db, program, variables);
         self.apply_specialization(
             db,
-            program,
             generic_context.default_specialization(db, program, None),
         )
     }
@@ -8019,6 +8033,7 @@ impl<'db> TypeMapping<'_, 'db> {
         match self {
             TypeMapping::FreshenBoundTypeVars { .. } => GenericContext::from_typevar_instances(
                 db,
+                program,
                 context.variables(db).map(|bound_typevar| {
                     Type::TypeVar(bound_typevar)
                         .apply_type_mapping(db, program, self, TypeContext::default())
@@ -8032,6 +8047,7 @@ impl<'db> TypeMapping<'_, 'db> {
                 // (i.e., mapped to a non-TypeVar type)
                 GenericContext::from_typevar_instances(
                     db,
+                    program,
                     context.variables(db).filter(|bound_typevar| {
                         // Keep the type variable if it's not in the specialization
                         // or if it's mapped to itself (still a TypeVar)
@@ -8061,6 +8077,7 @@ impl<'db> TypeMapping<'_, 'db> {
             }
             TypeMapping::ReplaceSelf { new_upper_bound } => GenericContext::from_typevar_instances(
                 db,
+                program,
                 context.variables(db).map(|typevar| {
                     if typevar.typevar(db).is_self(db) {
                         BoundTypeVarInstance::synthetic_self(
@@ -8629,7 +8646,7 @@ impl<'db> InvalidTypeExpression<'db> {
                 .scope(db)
                 .parent()
                 .map(|parent| parent.to_scope_id(db, function_body_scope.analysis_file(db)))
-                == builtins_module_scope(db, function_body_scope.analysis_file(db).program(db))
+                == builtins_module_scope(db, function_body_scope.program(db))
         {
             diagnostic.set_primary_message("Did you mean `collections.abc.Callable`?");
         } else if matches!(self, InvalidTypeExpression::InvalidBareParamSpec(_)) {
@@ -8696,11 +8713,8 @@ impl<'db> AwaitError<'db> {
                 };
                 diag.info(format_args!("`__await__` is{possibly} not callable"));
                 if let Some(definition) = attribute_provenance.definition() {
-                    let module = parsed_module_versioned(
-                        db,
-                        definition.analysis_file(db).versioned_file(db),
-                    )
-                    .load(db);
+                    let module =
+                        parsed_module(db, definition.analysis_file(db).versioned_file(db)).load(db);
                     diag.annotate(
                         Annotation::secondary(definition.focus_range(db, &module).into())
                             .message("attribute defined here"),

@@ -2124,7 +2124,7 @@ mod tests {
         let program = db.program();
 
         for class in KnownClass::iter() {
-            if class.canonical_module(&db).is_third_party() {
+            if class.canonical_module(&db, program).is_third_party() {
                 continue;
             }
             // Check the class can be looked up successfully
@@ -2153,8 +2153,9 @@ mod tests {
         // and sort them according to the version they were added in.
         // This makes the test far faster as it minimizes the number of times
         // we need to change the Python version in the loop.
+        let program = db.program();
         let mut classes: Vec<(KnownClass, PythonVersion)> = KnownClass::iter()
-            .filter(|class| !class.canonical_module(&db).is_third_party())
+            .filter(|class| !class.canonical_module(&db, program).is_third_party())
             .map(|class| {
                 let version_added = match class {
                     KnownClass::Template => PythonVersion::PY314,
