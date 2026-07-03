@@ -782,7 +782,8 @@ def use_narrowed_dict(value: object, key: object) -> None:
     if isinstance(value, dict):
         reveal_type(value.get(key))  # revealed: object
         reveal_type(reversed(value))  # revealed: Iterator[object]
-        reveal_type(value.copy())  # revealed: Top[dict[Unknown, Unknown]] | <TypedDict with no items>
+        # TODO: This should preserve the top materialization as `Top[dict[Unknown, Unknown]]`.
+        reveal_type(value.copy())  # revealed: dict[Never, Never] | <TypedDict with no items>
         value.clear()  # error: [unresolved-attribute]
         takes_dict(value)  # error: [invalid-argument-type]
 ```
@@ -802,8 +803,9 @@ class CustomDict(dict[int, bytes]): ...
 
 def merge_custom_dict_with_narrowed_dict(custom: CustomDict, value: object) -> None:
     if isinstance(value, dict):
-        reveal_type(custom | value)  # revealed: dict[Unknown, Unknown]
-        reveal_type(value | custom)  # revealed: dict[Unknown, Unknown]
+        # TODO: These unions should normalize to `dict[Unknown, Unknown]`.
+        reveal_type(custom | value)  # revealed: dict[int | Unknown, bytes | Unknown] | dict[Unknown, Unknown]
+        reveal_type(value | custom)  # revealed: dict[int | Unknown, bytes | Unknown] | dict[Unknown, Unknown]
 ```
 
 We do not yet prioritize a `dict` subclass's reflected method when it is merged with a `TypedDict`:

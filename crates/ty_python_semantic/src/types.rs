@@ -6058,12 +6058,6 @@ impl<'db> Type<'db> {
                 // Guard against user-customized typesheds with a broken `dict` class
                 .unwrap_or_else(Type::unknown),
             Type::Union(union) => union.map(db, |element| element.dunder_class(db)),
-            Type::Intersection(intersection) => IntersectionType::from_elements(
-                db,
-                intersection
-                    .positive_elements_or_object(db)
-                    .map(|element| element.dunder_class(db)),
-            ),
             Type::TypeAlias(alias) => alias.value_type(db).dunder_class(db),
             _ => self.to_meta_type(db),
         }
