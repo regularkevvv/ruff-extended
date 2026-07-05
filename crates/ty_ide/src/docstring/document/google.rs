@@ -1,23 +1,34 @@
 use indexmap::IndexMap;
 use ruff_python_stdlib::identifiers::is_identifier;
-use ruff_source_file::UniversalNewlines;
-use ruff_text_size::TextSize;
+use ruff_text_size::{TextRange, TextSize};
 
-use super::indentation;
+use super::SectionKind;
 use super::preformatted::PreformattedBlockScanner;
 use super::rst::is_field_list_marker;
+use super::syntax::{
+    ParsedLine, indentation, parse_parenthesized_type, parsed_lines, split_once_unbracketed_colon,
+    starts_with_markdown_list_item,
+};
 
 /// Returns parameter documentation from recognized Google-style parameter sections.
 pub(super) fn parameter_documentation(raw: &str) -> IndexMap<String, String> {
     let mut parameters = IndexMap::new();
-    visit_parameter_sections(raw, |body| {
-        extend_parameter_documentation(&mut parameters, body);
+    visit_sections(raw, |kind, _, _, body| {
+        if matches!(
+            kind,
+            SectionKind::Parameters | SectionKind::KeywordArguments | SectionKind::OtherParameters
+        ) {
+            extend_parameter_documentation(&mut parameters, body);
+        }
     });
     parameters
 }
 
-/// Visits Google-style parameter sections in source order.
-fn visit_parameter_sections<'a>(raw: &'a str, mut visit: impl FnMut(&[ParsedLine<'a>])) {
+/// Visits recognized Google-style sections in source order.
+pub(in crate::docstring) fn visit_sections<'a>(
+    raw: &'a str,
+    mut visit: impl FnMut(SectionKind, TextRange, TextSize, &[ParsedLine<'a>]),
+) {
     let lines = parsed_lines(raw);
     let mut preformatted_blocks = PreformattedBlockScanner::default();
     let mut index = 0;
@@ -42,25 +53,26 @@ fn visit_parameter_sections<'a>(raw: &'a str, mut visit: impl FnMut(&[ParsedLine
             index += 1;
             continue;
         };
-        let body_end = section_body_end(&lines, header);
-        if header.kind == HeaderKind::Parameters {
-            visit(&lines[header.body_start..body_end]);
+        let (body_end, range) = section_body_end(&lines, header);
+        if let HeaderKind::Structured(kind) = header.kind {
+            visit(
+                kind,
+                range,
+                header.indent,
+                &lines[header.body_start..body_end],
+            );
         }
         index = body_end;
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ParsedLine<'a> {
-    text: &'a str,
-}
-
-fn parsed_lines(raw: &str) -> Vec<ParsedLine<'_>> {
-    raw.universal_newlines()
-        .map(|line| ParsedLine {
-            text: line.as_str(),
-        })
-        .collect()
+/// Returns whether `name` is a valid Python parameter name, including variadic prefixes.
+pub(in crate::docstring) fn is_parameter_name(name: &str) -> bool {
+    let identifier = name
+        .strip_prefix("**")
+        .or_else(|| name.strip_prefix('*'))
+        .unwrap_or(name);
+    is_identifier(identifier)
 }
 
 /// Returns the index after a non-Google underlined section that starts at `index`.
@@ -95,14 +107,14 @@ fn non_google_underlined_section_indent(
     lines: &[ParsedLine<'_>],
     index: usize,
 ) -> Option<TextSize> {
-    let header = lines.get(index)?.text;
-    let underline = lines.get(index + 1)?.text;
-    let header_indent = indentation(header);
-    let underline_text = underline.trim();
+    let header = lines.get(index)?;
+    let underline = lines.get(index + 1)?;
+    let header_indent = indentation(header.text);
+    let underline_text = underline.text.trim();
 
-    (!header.trim().is_empty()
-        && !header.trim_end().ends_with(':')
-        && indentation(underline) == header_indent
+    (!header.text.trim().is_empty()
+        && !header.text.trim_end().ends_with(':')
+        && indentation(underline.text) == header_indent
         && underline_text.len() >= 3
         && underline_text
             .chars()
@@ -112,15 +124,15 @@ fn non_google_underlined_section_indent(
 
 /// Returns the index after an indented reST or Markdown container at `index`.
 fn indented_non_google_block_end(lines: &[ParsedLine<'_>], index: usize) -> Option<usize> {
-    let marker = lines.get(index)?.text;
-    if !is_rest_directive_marker(marker)
-        && !is_field_list_marker(marker)
-        && !starts_with_markdown_list_item(marker.trim_start())
+    let marker = lines.get(index)?;
+    if !is_rest_directive_marker(marker.text)
+        && !is_field_list_marker(marker.text)
+        && !starts_with_markdown_list_item(marker.text.trim_start())
     {
         return None;
     }
 
-    let marker_indent = indentation(marker);
+    let marker_indent = indentation(marker.text);
     Some(
         lines[index + 1..]
             .iter()
@@ -141,27 +153,11 @@ fn is_rest_directive_marker(line: &str) -> bool {
     !name.is_empty() && !name.chars().any(char::is_whitespace)
 }
 
-fn starts_with_markdown_list_item(line: &str) -> bool {
-    let bytes = line.as_bytes();
-    if matches!(bytes, [b'-' | b'+' | b'*', b' ' | b'\t', ..]) {
-        return true;
-    }
-
-    let digits = bytes
-        .iter()
-        .take(9)
-        .take_while(|byte| byte.is_ascii_digit())
-        .count();
-    digits > 0
-        && matches!(bytes.get(digits), Some(b'.' | b')'))
-        && matches!(bytes.get(digits + 1), Some(b' ' | b'\t'))
-}
-
 /// Returns the index of the first line outside `header`'s body.
-fn section_body_end(lines: &[ParsedLine<'_>], header: SectionHeader) -> usize {
+fn section_body_end(lines: &[ParsedLine<'_>], header: SectionHeader) -> (usize, TextRange) {
     let mut body_end = header.body_start;
     let mut preformatted_blocks = PreformattedBlockScanner::default();
-    let mut parameter_item_indent = None;
+    let mut item_indent = None;
     let mut aligned_container_body = false;
 
     while let Some(line) = lines.get(body_end) {
@@ -177,7 +173,7 @@ fn section_body_end(lines: &[ParsedLine<'_>], header: SectionHeader) -> usize {
             if !blank_line_continues_section(
                 &lines[body_end..],
                 header,
-                parameter_item_indent,
+                item_indent,
                 aligned_container_body,
             ) {
                 break;
@@ -196,20 +192,19 @@ fn section_body_end(lines: &[ParsedLine<'_>], header: SectionHeader) -> usize {
             lines,
             body_end,
             header,
-            parameter_item_indent,
+            item_indent,
             aligned_container_body || can_start_aligned_container,
         ) || !line_belongs_to_body(
             header,
             line.text,
-            parameter_item_indent,
+            item_indent,
             aligned_container_body || can_start_aligned_container,
         ) {
             break;
         }
 
         aligned_container_body |= is_aligned_container_body(header, line.text);
-        parameter_item_indent =
-            parameter_item_indent.or_else(|| parameter_item_indent_for_line(header, line.text));
+        item_indent = item_indent.or_else(|| section_item_indent(header, line.text));
 
         if !preformatted_blocks.consume_preformatted_line(line.text) {
             preformatted_blocks.observe_line_outside_preformatted_block(line.text);
@@ -217,14 +212,19 @@ fn section_body_end(lines: &[ParsedLine<'_>], header: SectionHeader) -> usize {
         body_end += 1;
     }
 
-    body_end
+    let range = lines[header.body_start..body_end]
+        .last()
+        .map_or(header.range, |line| {
+            TextRange::new(header.range.start(), line.range.end())
+        });
+    (body_end, range)
 }
 
 /// Returns whether content after leading blank lines still belongs to `header`.
 fn blank_line_continues_section(
     lines: &[ParsedLine<'_>],
     header: SectionHeader,
-    parameter_item_indent: Option<TextSize>,
+    item_indent: Option<TextSize>,
     aligned_container_body: bool,
 ) -> bool {
     let Some((offset, next)) = lines
@@ -236,24 +236,38 @@ fn blank_line_continues_section(
     };
 
     let next_indent = indentation(next.text);
-    if next_indent <= header.indent
-        && (parse_section_header(lines, offset).is_some() || is_inline_section_header(next.text))
-    {
-        return false;
+    if next_indent <= header.indent {
+        if parse_section_header(lines, offset).is_some() || is_inline_section_header(next.text) {
+            return false;
+        }
+        // Returns and yields have no item syntax that distinguishes an aligned body from prose
+        // following an empty section.
+        if item_indent.is_none()
+            && matches!(
+                header.kind,
+                HeaderKind::Structured(SectionKind::Returns | SectionKind::Yields)
+            )
+        {
+            return false;
+        }
     }
-    // A blank line separates prose aligned with the parameter items from the section body.
-    if parameter_item_indent == Some(next_indent)
-        && parameter_item_indent_for_line(header, next.text).is_none()
+
+    // A blank line separates prose aligned with parameter items from the section body.
+    if item_indent == Some(next_indent)
+        && matches!(
+            header.kind,
+            HeaderKind::Structured(
+                SectionKind::Parameters
+                    | SectionKind::KeywordArguments
+                    | SectionKind::OtherParameters
+            )
+        )
+        && section_item_indent(header, next.text).is_none()
     {
         return false;
     }
 
-    line_belongs_to_body(
-        header,
-        next.text,
-        parameter_item_indent,
-        aligned_container_body,
-    )
+    line_belongs_to_body(header, next.text, item_indent, aligned_container_body)
 }
 
 /// Returns whether a recognized header at `index` ends the current section body.
@@ -261,7 +275,7 @@ fn section_header_ends_body(
     lines: &[ParsedLine<'_>],
     index: usize,
     header: SectionHeader,
-    parameter_item_indent: Option<TextSize>,
+    item_indent: Option<TextSize>,
     aligned_container_body: bool,
 ) -> bool {
     let Some(line) = lines.get(index) else {
@@ -270,74 +284,104 @@ fn section_header_ends_body(
     if aligned_container_body && is_aligned_container_body(header, line.text) {
         return false;
     }
+    let prefer_item = prefer_item_over_section_header(header, line.text, item_indent);
     if indentation(line.text) <= header.indent && is_inline_section_header(line.text) {
-        return true;
+        return !prefer_item;
     }
 
-    parse_section_header(lines, index).is_some_and(|next| {
-        next.indent <= header.indent
-            && (next.underlined
-                || !lowercase_same_indent_parameter_takes_precedence(
-                    header,
-                    line.text,
-                    parameter_item_indent,
-                ))
-    })
+    parse_section_header(lines, index)
+        .is_some_and(|next| next.indent <= header.indent && (next.underlined || !prefer_item))
 }
 
 /// Returns whether `line` belongs to `header` under Google-style indentation rules.
 fn line_belongs_to_body(
     header: SectionHeader,
     line: &str,
-    parameter_item_indent: Option<TextSize>,
+    item_indent: Option<TextSize>,
     aligned_container_body: bool,
 ) -> bool {
     let line_indent = indentation(line);
-    // Once a same-indent item establishes a first-line PEP 257 layout, continuations at that
-    // indentation remain part of the section.
+    // Once a same-indent item establishes a first-line PEP 257 layout, parameter continuations at
+    // that indentation remain part of the section.
+    let item_indent_matches_line = item_indent.is_none_or(|indent| indent == line_indent);
+    let is_same_indent_parameter_continuation = item_indent == Some(line_indent)
+        && matches!(
+            header.kind,
+            HeaderKind::Structured(
+                SectionKind::Parameters
+                    | SectionKind::KeywordArguments
+                    | SectionKind::OtherParameters
+            )
+        );
+
     (aligned_container_body && is_aligned_container_body(header, line))
         || line_indent > header.indent
         || (line_indent == header.indent
-            && parameter_item_indent.is_none_or(|indent| indent == line_indent)
-            && (parameter_item_indent.is_some()
-                || parameter_item_indent_for_line(header, line).is_some()))
+            && (is_same_indent_parameter_continuation
+                || (item_indent_matches_line && section_item_indent(header, line).is_some())))
 }
 
 fn is_aligned_container_body(header: SectionHeader, line: &str) -> bool {
     header.kind == HeaderKind::Container && indentation(line) == header.indent
 }
 
-/// Returns whether a same-indent lowercase item is a parameter rather than a section header.
-fn lowercase_same_indent_parameter_takes_precedence(
+/// Returns whether an ambiguous section header is an item in the current section.
+fn prefer_item_over_section_header(
     header: SectionHeader,
     line: &str,
-    parameter_item_indent: Option<TextSize>,
+    item_indent: Option<TextSize>,
 ) -> bool {
     let line_indent = indentation(line);
-    line_indent == header.indent
-        && parameter_item_indent.is_none_or(|indent| indent == line_indent)
-        && line.trim().chars().next().is_some_and(char::is_lowercase)
-        && parameter_item_indent_for_line(header, line).is_some()
+    matches!(
+        header.kind,
+        HeaderKind::Structured(
+            SectionKind::Parameters
+                | SectionKind::KeywordArguments
+                | SectionKind::OtherParameters
+                | SectionKind::Attributes
+                | SectionKind::Raises
+        )
+    ) && line_indent == header.indent
+        && item_indent.is_none_or(|indent| indent == line_indent)
+        && section_item_indent(header, line).is_some()
+        && (line.trim().chars().next().is_some_and(char::is_lowercase)
+            || (matches!(header.kind, HeaderKind::Structured(SectionKind::Raises))
+                && split_once_unbracketed_colon(line.trim())
+                    .is_some_and(|(name, _)| has_exception_name_suffix(name.trim()))))
 }
 
-fn parameter_item_indent_for_line(header: SectionHeader, line: &str) -> Option<TextSize> {
-    (header.kind == HeaderKind::Parameters && parse_parameter(line.trim()).is_some())
-        .then(|| indentation(line))
+/// Returns the indentation of an item recognized in the current section.
+fn section_item_indent(header: SectionHeader, line: &str) -> Option<TextSize> {
+    let trimmed = line.trim();
+    let is_item = match header.kind {
+        HeaderKind::Structured(
+            SectionKind::Parameters | SectionKind::KeywordArguments | SectionKind::OtherParameters,
+        ) => parse_parameter(trimmed).is_some(),
+        HeaderKind::Structured(SectionKind::Attributes | SectionKind::Raises) => {
+            split_once_unbracketed_colon(trimmed).is_some_and(|(name, _)| !name.trim().is_empty())
+        }
+        HeaderKind::Structured(SectionKind::Returns | SectionKind::Yields) => !trimmed.is_empty(),
+        HeaderKind::Container => false,
+    };
+    is_item.then(|| indentation(line))
 }
 
 /// Parses a recognized Google-style section header at `index`.
 fn parse_section_header(lines: &[ParsedLine<'_>], index: usize) -> Option<SectionHeader> {
-    let line = lines.get(index)?.text;
-    let kind = section_kind(line)?;
-    let underlined = lines
+    let line = lines.get(index)?;
+    let kind = section_kind(line.text)?;
+    let underline = lines
         .get(index + 1)
-        .is_some_and(|line| is_section_underline(line.text));
+        .filter(|line| is_section_underline(line.text));
 
     Some(SectionHeader {
         kind,
-        indent: indentation(line),
-        body_start: index + 1 + usize::from(underlined),
-        underlined,
+        indent: indentation(line.text),
+        body_start: index + 1 + usize::from(underline.is_some()),
+        range: underline.map_or(line.range, |underline| {
+            TextRange::new(line.range.start(), underline.range.end())
+        }),
+        underlined: underline.is_some(),
     })
 }
 
@@ -358,11 +402,17 @@ fn section_kind_from_name(name: &str) -> Option<HeaderKind> {
         .join(" ")
         .to_ascii_lowercase();
     Some(match normalized.as_str() {
-        "args" | "arguments" | "parameters" | "keyword args" | "keyword arguments"
-        | "other args" | "other arguments" | "other parameters" => HeaderKind::Parameters,
-        "attributes" | "return" | "returns" | "yield" | "yields" | "raise" | "raises" => {
-            HeaderKind::StructuredBoundary
+        "args" | "arguments" | "parameters" => HeaderKind::Structured(SectionKind::Parameters),
+        "keyword args" | "keyword arguments" => {
+            HeaderKind::Structured(SectionKind::KeywordArguments)
         }
+        "other args" | "other arguments" | "other parameters" => {
+            HeaderKind::Structured(SectionKind::OtherParameters)
+        }
+        "attributes" => HeaderKind::Structured(SectionKind::Attributes),
+        "return" | "returns" => HeaderKind::Structured(SectionKind::Returns),
+        "yield" | "yields" => HeaderKind::Structured(SectionKind::Yields),
+        "raise" | "raises" => HeaderKind::Structured(SectionKind::Raises),
         "attention" | "caution" | "danger" | "error" | "example" | "examples" | "hint"
         | "important" | "methods" | "note" | "notes" | "references" | "see also" | "tip"
         | "todo" | "todos" | "warning" | "warnings" | "warns" => HeaderKind::Container,
@@ -376,9 +426,17 @@ fn is_inline_section_header(line: &str) -> bool {
         return false;
     };
     let name = name.trim();
-    !description.trim().is_empty()
+    let description = description.trim();
+    !description.is_empty()
         && name.chars().next().is_some_and(char::is_uppercase)
         && section_kind_from_name(name).is_some()
+}
+
+/// Returns whether `name` ends with a conventional exception-class suffix.
+pub(in crate::docstring) fn has_exception_name_suffix(name: &str) -> bool {
+    ["Error", "Exception", "Warning"]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
 }
 
 /// Parses a parameter item into its display name and description.
@@ -388,14 +446,6 @@ fn parse_parameter(line: &str) -> Option<(&str, &str)> {
     google_parameter_names(display_name)
         .all(is_parameter_name)
         .then_some((display_name, description.trim()))
-}
-
-fn is_parameter_name(name: &str) -> bool {
-    let identifier = name
-        .strip_prefix("**")
-        .or_else(|| name.strip_prefix('*'))
-        .unwrap_or(name);
-    is_identifier(identifier)
 }
 
 /// Extends `parameters` with the documented items in one parameter section body.
@@ -456,115 +506,26 @@ fn google_parameter_names(display_name: &str) -> impl Iterator<Item = &str> {
     display_name.split(',').map(str::trim)
 }
 
-/// Splits at the first colon outside bracket pairs and quoted strings.
-fn split_once_unbracketed_colon(line: &str) -> Option<(&str, &str)> {
-    let mut depths = [0usize; 3];
-    let mut quote = None;
-    let mut escaped = false;
-
-    for (index, character) in line.char_indices() {
-        if let Some(quote_character) = quote {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == quote_character {
-                quote = None;
-            }
-            continue;
-        }
-
-        match character {
-            '\'' | '"' => quote = Some(character),
-            '(' => depths[0] += 1,
-            ')' => depths[0] = depths[0].saturating_sub(1),
-            '[' => depths[1] += 1,
-            ']' => depths[1] = depths[1].saturating_sub(1),
-            '{' => depths[2] += 1,
-            '}' => depths[2] = depths[2].saturating_sub(1),
-            ':' if depths == [0; 3] => {
-                return Some((&line[..index], &line[index + character.len_utf8()..]));
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Splits a trailing parenthesized type from a parameter display name.
-fn parse_parenthesized_type(name: &str) -> (&str, Option<&str>) {
-    if !name.ends_with(')') {
-        return (name, None);
-    }
-
-    let mut depth = 0usize;
-    let mut opening = None;
-    let mut quote = None;
-    let mut escaped = false;
-
-    // Only a balanced group that closes at the end can be a type suffix.
-    for (index, character) in name.char_indices() {
-        if let Some(quote_character) = quote {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == quote_character {
-                quote = None;
-            }
-            continue;
-        }
-
-        match character {
-            '\'' | '"' => quote = Some(character),
-            '(' => {
-                if depth == 0 {
-                    opening = Some(index);
-                }
-                depth += 1;
-            }
-            ')' => {
-                depth = match depth.checked_sub(1) {
-                    Some(depth) => depth,
-                    None => return (name, None),
-                };
-                if depth == 0 && index + character.len_utf8() == name.len() {
-                    let Some(opening) = opening else {
-                        return (name, None);
-                    };
-                    let display_name = name[..opening].trim();
-                    let ty = name[opening + '('.len_utf8()..index].trim();
-                    return if display_name.is_empty() || ty.is_empty() {
-                        (name, None)
-                    } else {
-                        (display_name, Some(ty))
-                    };
-                }
-            }
-            _ => {}
-        }
-    }
-    (name, None)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SectionHeader {
     kind: HeaderKind,
     indent: TextSize,
     body_start: usize,
+    range: TextRange,
     underlined: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HeaderKind {
-    Parameters,
-    StructuredBoundary,
+    Structured(SectionKind),
     Container,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parameter_documentation;
+    use ruff_text_size::TextSize;
+
+    use super::{SectionKind, parameter_documentation, visit_sections};
 
     #[test]
     fn extracts_parameter_items() {
@@ -728,6 +689,46 @@ mod tests {
         assert_parameter_documentation(
             "        >>> example()\n        result\n\t\n        Args:\n            value: Parameter documentation.",
             &[("value", "Parameter documentation.")],
+        );
+    }
+
+    #[test]
+    fn double_colon_ends_same_indent_parameter_section() {
+        assert_parameter_documentation(
+            "Args:\nvalue: Parameter documentation.\nReturns:: reST literal marker.",
+            &[("value", "Parameter documentation.")],
+        );
+    }
+
+    #[test]
+    fn visits_structured_sections_with_final_metadata() {
+        let raw = "    Args:\r\n    ----\r\n        value: Documentation.\r\nreturns:\r\n--------\r\n    bool: Result.";
+        let mut sections = Vec::new();
+        visit_sections(raw, |kind, range, header_indent, body| {
+            sections.push((
+                kind,
+                &raw[range],
+                header_indent,
+                body.iter().map(|line| line.text).collect::<Vec<_>>(),
+            ));
+        });
+
+        assert_eq!(
+            sections,
+            vec![
+                (
+                    SectionKind::Parameters,
+                    "    Args:\r\n    ----\r\n        value: Documentation.",
+                    TextSize::new(4),
+                    vec!["        value: Documentation."],
+                ),
+                (
+                    SectionKind::Returns,
+                    "returns:\r\n--------\r\n    bool: Result.",
+                    TextSize::new(0),
+                    vec!["    bool: Result."],
+                ),
+            ]
         );
     }
 
