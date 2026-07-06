@@ -1035,6 +1035,19 @@ struct GeneratorTypes<'db> {
     return_ty: Option<Type<'db>>,
 }
 
+impl<'db> GeneratorTypes<'db> {
+    fn materialize(self, db: &'db dyn Db, kind: MaterializationKind) -> Self {
+        let visitor = ApplyTypeMappingVisitor::default();
+        Self {
+            yield_ty: self.yield_ty.map(|ty| ty.materialize(db, kind, &visitor)),
+            send_ty: self
+                .send_ty
+                .map(|ty| ty.materialize(db, kind.flip(), &visitor)),
+            return_ty: self.return_ty.map(|ty| ty.materialize(db, kind, &visitor)),
+        }
+    }
+}
+
 fn object_type_form(db: &dyn Db) -> Type<'_> {
     TypeFormType::from_type_expression(db, Type::object())
 }
@@ -5603,9 +5616,16 @@ impl<'db> Type<'db> {
             Type::NominalInstance(instance) => {
                 instance.class(db).iter_mro(db).find_map(from_class_base)
             }
-            Type::ProtocolInstance(instance) => instance
-                .class_origin(db)
-                .and_then(|origin| origin.iter_mro(db).find_map(from_class_base)),
+            Type::ProtocolInstance(instance) => {
+                let generator_types = instance
+                    .class_origin(db)
+                    .and_then(|origin| origin.iter_mro(db).find_map(from_class_base));
+                if let Some(kind) = instance.materialization_kind(db) {
+                    generator_types.map(|types| types.materialize(db, kind))
+                } else {
+                    generator_types
+                }
+            }
             Type::Union(union) => {
                 let mut yield_builder = Some(UnionBuilder::new(db));
                 let mut send_builder = Some(UnionBuilder::new(db));
@@ -7611,6 +7631,17 @@ impl<'db> TypeMapping<'_, 'db> {
                     }
                 }),
             ),
+        }
+    }
+
+    pub(crate) const fn materialization_kind(&self) -> Option<MaterializationKind> {
+        match self {
+            TypeMapping::Materialize(kind)
+            | TypeMapping::ApplySpecializationWithMaterialization {
+                materialization_kind: kind,
+                ..
+            } => Some(*kind),
+            _ => None,
         }
     }
 

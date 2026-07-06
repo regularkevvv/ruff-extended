@@ -838,6 +838,13 @@ impl<'db> ProtocolInstanceType<'db> {
         matches!(self.inner, Protocol::Materialized(_))
     }
 
+    pub(super) fn materialization_kind(self, db: &'db dyn Db) -> Option<MaterializationKind> {
+        match self.inner {
+            Protocol::Materialized(materialized) => Some(materialized.materialization_kind(db)),
+            Protocol::FromClass(_) | Protocol::Synthesized(_) => None,
+        }
+    }
+
     /// Return `true` if this is the standard-library `Hashable` protocol.
     pub(super) fn is_hashable(self, db: &'db dyn Db) -> bool {
         self.to_nominal_instance(db)
@@ -1006,13 +1013,15 @@ impl<'db> ProtocolInstanceType<'db> {
         visitor: &ApplyTypeMappingVisitor<'db>,
     ) -> Self {
         match self.inner {
-            Protocol::FromClass(class)
-                if matches!(
-                    type_mapping,
-                    TypeMapping::Materialize(_)
-                        | TypeMapping::ApplySpecializationWithMaterialization { .. }
-                ) =>
-            {
+            Protocol::FromClass(class) => {
+                let Some(materialization_kind) = type_mapping.materialization_kind() else {
+                    return Self::from_class(class.apply_type_mapping_impl(
+                        db,
+                        type_mapping,
+                        tcx,
+                        visitor,
+                    ));
+                };
                 let interface = class.interface(db);
                 let mapped_class = class.apply_type_mapping_impl(db, type_mapping, tcx, visitor);
 
@@ -1038,10 +1047,8 @@ impl<'db> ProtocolInstanceType<'db> {
                     db,
                     mapped_interface,
                     mapped_class,
+                    materialization_kind,
                 ))
-            }
-            Protocol::FromClass(class) => {
-                Self::from_class(class.apply_type_mapping_impl(db, type_mapping, tcx, visitor))
             }
             Protocol::Materialized(materialized) => Self::materialized(
                 materialized.apply_type_mapping_impl(db, type_mapping, tcx, visitor),
@@ -1138,8 +1145,8 @@ impl<'db> VarianceInferable<'db> for Protocol<'db> {
 mod synthesized_protocol {
     use crate::types::protocol_class::{ProtocolClass, ProtocolInterface};
     use crate::types::{
-        ApplyTypeMappingVisitor, BoundTypeVarInstance, FindLegacyTypeVarsVisitor, Type,
-        TypeContext, TypeMapping, TypeVarVariance, VarianceInferable,
+        ApplyTypeMappingVisitor, BoundTypeVarInstance, FindLegacyTypeVarsVisitor,
+        MaterializationKind, Type, TypeContext, TypeMapping, TypeVarVariance, VarianceInferable,
     };
     use crate::{Db, FxOrderSet};
     use ty_python_core::definition::Definition;
@@ -1149,6 +1156,7 @@ mod synthesized_protocol {
     pub(in crate::types) struct MaterializedProtocolType<'db> {
         pub(in crate::types) interface: ProtocolInterface<'db>,
         pub(in crate::types) origin: ProtocolClass<'db>,
+        pub(in crate::types) materialization_kind: MaterializationKind,
     }
 
     impl get_size2::GetSize for MaterializedProtocolType<'_> {}
@@ -1167,6 +1175,9 @@ mod synthesized_protocol {
                     .apply_type_mapping_impl(db, type_mapping, tcx, visitor),
                 self.origin(db)
                     .apply_type_mapping_impl(db, type_mapping, tcx, visitor),
+                type_mapping
+                    .materialization_kind()
+                    .unwrap_or_else(|| self.materialization_kind(db)),
             )
         }
 
@@ -1195,6 +1206,7 @@ mod synthesized_protocol {
                     .recursive_type_normalized_impl(db, div, nested)?,
                 self.origin(db)
                     .recursive_type_normalized_impl(db, div, nested)?,
+                self.materialization_kind(db),
             ))
         }
     }

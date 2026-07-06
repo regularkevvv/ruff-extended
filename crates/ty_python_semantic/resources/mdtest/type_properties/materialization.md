@@ -884,6 +884,7 @@ python-version = "3.12"
 ```
 
 ```py
+from collections.abc import Generator
 from typing import Any, ClassVar, Never, Protocol, Self, TypeVar
 from ty_extensions import Bottom, Top, is_equivalent_to, is_subtype_of, static_assert
 from typing_extensions import TypeIs
@@ -1054,6 +1055,14 @@ def materialized_inference(
 ) -> None:
     reveal_type(infer_item(direct))  # revealed: object
     reveal_type(infer_item(inherited))  # revealed: object
+
+class MaterializedGenerator(Generator[Any, Any, Any], Protocol):
+    marker: Any
+
+def generator_delegation(generator: Top[MaterializedGenerator]):
+    reveal_type(generator.__next__())  # revealed: object
+    result = yield from generator
+    reveal_type(result)  # revealed: object
 
 class OriginGeneric[T](Protocol):
     value: Any
