@@ -1191,9 +1191,7 @@ mod synthesized_protocol {
                     .apply_type_mapping_impl(db, type_mapping, tcx, visitor),
                 self.origin(db)
                     .apply_type_mapping_impl(db, type_mapping, tcx, visitor),
-                type_mapping
-                    .materialization_kind()
-                    .unwrap_or_else(|| self.materialization_kind(db)),
+                self.materialization_kind(db),
             )
         }
 

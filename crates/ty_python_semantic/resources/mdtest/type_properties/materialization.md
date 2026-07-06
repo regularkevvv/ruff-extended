@@ -1057,10 +1057,16 @@ def materialized_inference(
 class MaterializedGenerator(Generator[Any, Any, Any], Protocol):
     marker: Any
 
-def generator_delegation(generator: Top[MaterializedGenerator]):
+def generator_delegation(
+    generator: Top[MaterializedGenerator],
+    nested: Bottom[Top[MaterializedGenerator]],
+):
     reveal_type(generator.__next__())  # revealed: object
     result = yield from generator
     reveal_type(result)  # revealed: object
+    reveal_type(nested.__next__())  # revealed: object
+    nested_result = yield from nested
+    reveal_type(nested_result)  # revealed: object
 
 class OriginGeneric[T](Protocol):
     value: Any
