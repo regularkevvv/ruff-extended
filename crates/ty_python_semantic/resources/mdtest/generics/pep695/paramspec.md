@@ -827,9 +827,8 @@ def overloaded_put_object(*, TagSet: object, func: object = None) -> None: ...
 to_thread_like_keyword(TagSet=reveal_type([{"Key": "k", "Value": "v"}]), func=overloaded_put_object)  # revealed: list[Tag]
 ```
 
-Generic callable arguments participate in fixpoint inference, allowing the inferred type of
-sibling `ParamSpec` arguments to constrain the type of the callable.
-
+Generic callable arguments participate in fixpoint inference, allowing the inferred type of sibling
+`ParamSpec` arguments to constrain the type of the callable.
 
 ```py
 from typing import Callable

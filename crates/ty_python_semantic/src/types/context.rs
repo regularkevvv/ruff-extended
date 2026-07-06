@@ -237,12 +237,8 @@ impl<'db, 'ast> InferContext<'db, 'ast> {
     }
 
     /// Consume this context without compacting its diagnostics.
-    ///
-    /// This is useful for short-lived inference results that will be replayed into another
-    /// context. Compacting those results would add allocation work without reducing durable
-    /// memory usage.
     #[must_use]
-    pub(crate) fn finish_unshrunk(mut self) -> TypeCheckDiagnostics {
+    pub(crate) fn finish_uncompacted(mut self) -> TypeCheckDiagnostics {
         self.bomb.defuse();
         self.diagnostics.into_inner()
     }

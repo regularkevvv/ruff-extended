@@ -496,6 +496,10 @@ pub(crate) struct Bindings<'db> {
 /// that all inferred argument types are available during overload evaluation.
 pub(crate) type MatchingOverloadSet = SmallVec<[SmallVec<[usize; 1]>; 1]>;
 
+pub(crate) fn requires_overload_evaluation(matching_overloads: &MatchingOverloadSet) -> bool {
+    matching_overloads.iter().any(|indices| indices.len() > 1)
+}
+
 impl<'db> Bindings<'db> {
     fn as_result(&self, db: &'db dyn Db) -> Result<(), CallErrorKind> {
         let mut all_ok = true;
@@ -5804,25 +5808,6 @@ struct ParamSpecArgumentContext<'a, 'call, 'db> {
     call_expression_tcx: TypeContext<'db>,
 }
 
-fn collect_typevar_variances<'db>(
-    db: &'db dyn Db,
-    ty: Type<'db>,
-) -> FxHashMap<BoundTypeVarIdentity<'db>, TypeVarVariance> {
-    let mut variances = FxHashMap::default();
-    ty.visit_specialization(db, |ty, variance| {
-        let Type::TypeVar(typevar) = ty else {
-            return;
-        };
-        variances
-            .entry(typevar.identity(db))
-            .and_modify(|current: &mut TypeVarVariance| {
-                *current = current.join(variance);
-            })
-            .or_insert(variance);
-    });
-    variances
-}
-
 /// Counts occurrences of inferable type variables in the provided type.
 fn count_inferable_typevar_occurrences<'db>(
     db: &'db dyn Db,
@@ -5957,7 +5942,7 @@ impl<'db> Binding<'db> {
 
     /// Returns the number of occurrences of inferable type variables in the parameter matching the
     /// provided argument index.
-    pub(crate) fn typevar_occurrences_for_argument(
+    pub(crate) fn typevar_occurrences_for_parameter(
         &self,
         db: &'db dyn Db,
         binding: &CallableBinding<'db>,
@@ -6209,8 +6194,6 @@ impl<'db> Binding<'db> {
         call_expression_tcx: TypeContext<'db>,
     ) -> Option<Specialization<'db>> {
         let generic_context = self.signature.generic_context?;
-        let mut return_ty = None;
-        let mut return_typevar_variances = None;
 
         let mut return_type_solutions: FxHashMap<BoundTypeVarIdentity<'db>, Type<'db>> =
             FxHashMap::default();
@@ -6218,7 +6201,6 @@ impl<'db> Binding<'db> {
             let normalized_return_ty = self
                 .normalized_constructor_return(db)
                 .unwrap_or(self.signature.return_ty);
-            return_ty = Some(normalized_return_ty);
             let path_bounds = normalized_return_ty.assignable_solutions_with_inferable(
                 db,
                 declared_return_ty,
@@ -6241,7 +6223,7 @@ impl<'db> Binding<'db> {
             }
         }
 
-        // Note that specializing parameter types for type context using this specialization is
+        // TODO: Note that specializing parameter types for type context using this specialization is
         // not strictly correct, as it requires eagerly choosing a solution for a given type variable,
         // which may conflate upper and lower bounds when applied transitively to parameter types
         // in which the type variable may be in invariant or contravariant position. A more correct
@@ -6252,43 +6234,23 @@ impl<'db> Binding<'db> {
             db,
             generic_context.variables(db).map(|typevar| {
                 let identity = typevar.identity(db);
-                let return_type_solution = return_type_solutions.get(&identity).copied();
 
-                // This is the specialization inferred from the argument types during the previous
-                // fixpoint round. Preserve it when it is a compatible covariant refinement of the
-                // declared return type. For non-covariant occurrences, the declared return type
-                // specialization must take precedence.
-                let inferred_solution = self
+                let call_expression_constraints = return_type_solutions.get(&identity).copied();
+                let argument_constraints = self
                     .specialization
                     .and_then(|specialization| specialization.get(db, typevar))
                     .filter(|ty| !ty.has_dynamic(db))
                     .map(|ty| ty.promote(db));
 
-                if let Some(return_solution) = return_type_solution
-                    && let Some(inferred_solution) = inferred_solution
-                    && let Some(return_ty) = return_ty
-                    && inferred_solution.is_assignable_to(db, return_solution)
-                {
-                    let variances = return_typevar_variances
-                        .get_or_insert_with(|| collect_typevar_variances(db, return_ty));
-                    if variances
-                        .get(&identity)
-                        .is_some_and(|variance| variance.is_covariant())
-                    {
-                        return Some(inferred_solution);
-                    }
-                }
-
-                // A successful previous-round specialization already includes a non-covariant
-                // return solution. It can be absent on the first round, or when checking retried
-                // without the declared type after finding incompatible arguments. For example,
-                // `result: list[int] = f("a")` retries with `T = str`, but the return context still
-                // supplies `T = int` for the diagnostic pass.
-                // Unresolved variables use a marker that argument inference ignores, allowing the
-                // concrete part of the parameter type to remain useful.
+                // TODO: We should similarly combine both the call expression and argument constraints
+                // here. We currently only rely on argument constraints when there is no explicit declared
+                // type for the call expression.
                 Some(
-                    return_type_solution
-                        .or(inferred_solution)
+                    call_expression_constraints
+                        .or(argument_constraints)
+                        // Default specialize any type variables to a marker type, which will be ignored
+                        // during argument inference, allowing the concrete subset of the parameter
+                        // type to still affect argument inference.
                         .unwrap_or(Type::Dynamic(DynamicType::UnspecializedTypeVar)),
                 )
             }),
