@@ -357,27 +357,51 @@ pub fn search_paths(db: &dyn Db, resolve_mode: ModuleResolveMode) -> SearchPathI
 #[derive(Debug, Clone, Copy)]
 struct StubPackagePaths<'a> {
     before_stdlib: &'a [SearchPath],
-    after_stdlib: &'a [SearchPath],
+    after_stdlib: Option<&'a [SearchPath]>,
+}
+
+impl<'a> StubPackagePaths<'a> {
+    /// Creates a non-empty view of stub-package search paths.
+    fn new(
+        before_stdlib: &'a [SearchPath],
+        after_stdlib: Option<&'a [SearchPath]>,
+    ) -> Option<Self> {
+        if before_stdlib.is_empty() && after_stdlib.is_none_or(<[SearchPath]>::is_empty) {
+            None
+        } else {
+            Some(Self {
+                before_stdlib,
+                after_stdlib,
+            })
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, get_size2::GetSize)]
 struct StubPackageIndex {
     paths: Box<[SearchPath]>,
+    extra_offset: usize,
     stdlib_offset: usize,
 }
 
 impl StubPackageIndex {
+    /// Indexes search paths that may contain a stub package, preserving their position relative to
+    /// the standard library.
     fn from_search_paths<'a>(
         db: &dyn Db,
         search_paths: impl Iterator<Item = &'a SearchPath>,
     ) -> Self {
         let mut paths = Vec::new();
+        let mut extra_offset = 0;
         let mut stdlib_offset = None;
 
         for search_path in search_paths {
             if search_path.is_standard_library() {
                 stdlib_offset = Some(paths.len());
             } else if search_path_may_contain_stub_package(db, search_path) {
+                if stdlib_offset.is_none() && search_path.is_extra() {
+                    extra_offset += 1;
+                }
                 paths.push(search_path.clone());
             }
         }
@@ -385,16 +409,41 @@ impl StubPackageIndex {
         let stdlib_offset = stdlib_offset.unwrap_or(paths.len());
         Self {
             paths: paths.into_boxed_slice(),
+            extra_offset,
             stdlib_offset,
         }
     }
 
+    /// Returns all indexed paths in normal typing-resolution order.
     fn all(&self) -> Option<StubPackagePaths<'_>> {
-        let (before_stdlib, after_stdlib) = self.paths.split_at(self.stdlib_offset);
-        (!self.paths.is_empty()).then_some(StubPackagePaths {
-            before_stdlib,
-            after_stdlib,
-        })
+        StubPackagePaths::new(self.before_stdlib(), Some(self.after_stdlib()))
+    }
+
+    /// Returns the extra paths searched by the separate stub-overlay pass.
+    ///
+    /// That pass does not cross the standard-library boundary, so it has no post-stdlib paths.
+    fn extra(&self) -> Option<StubPackagePaths<'_>> {
+        StubPackagePaths::new(&self.paths[..self.extra_offset], None)
+    }
+
+    /// Returns the paths not searched by the separate stub-overlay pass.
+    ///
+    /// These paths retain their position relative to stdlib for normal typing resolution.
+    fn remaining(&self) -> Option<StubPackagePaths<'_>> {
+        StubPackagePaths::new(
+            &self.paths[self.extra_offset..self.stdlib_offset],
+            Some(self.after_stdlib()),
+        )
+    }
+
+    /// Returns indexed paths that precede stdlib in normal typing resolution.
+    fn before_stdlib(&self) -> &[SearchPath] {
+        &self.paths[..self.stdlib_offset]
+    }
+
+    /// Returns indexed paths that follow stdlib in normal typing resolution.
+    fn after_stdlib(&self) -> &[SearchPath] {
+        &self.paths[self.stdlib_offset..]
     }
 }
 
@@ -1059,6 +1108,26 @@ enum ResolvedModule {
     Module(File),
 }
 
+impl ResolvedModule {
+    fn has_stub_file(self, db: &dyn Db) -> bool {
+        match self {
+            Self::NamespacePackage => false,
+            Self::LegacyNamespacePackage(file)
+            | Self::RegularPackage(file)
+            | Self::Module(file) => file.source_type(db) == PySourceType::Stub,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum ComponentFileFilter {
+    /// Prefer `.pyi` over `.py` in typing mode, or only accept `.py` in runtime mode.
+    ByMode,
+
+    /// Only accept a `.pyi` file.
+    StubOnly,
+}
+
 /// Where a candidate sits in the typing specification's module-resolution order.
 ///
 /// Variants are declared from highest to lowest precedence so that derived ordering can be used
@@ -1208,14 +1277,48 @@ impl<'db, 'name> NameResolver<'db, 'name> {
 
     /// Resolves the name as seen by a type checker.
     ///
-    /// This includes PEP 561 stub packages and `.pyi` files, with runtime source as a fallback when
-    /// no stub provides the requested module.
+    /// This includes PEP 561 stub packages and user-provided stub overlays, with runtime source as
+    /// a fallback when no stub provides the requested module. A stub overlay may use runtime
+    /// packages as parents, but its final module must come from a stub file.
     fn resolve_typing(&self, stub_packages: &StubPackageIndex) -> Option<ResolvedNames> {
-        let candidates = self.discover_roots(
-            search_paths(self.context.db, ModuleResolveMode::Typing),
-            stub_packages.all(),
+        let search_paths = self.context.db.search_paths();
+
+        if self.name.components().nth(1).is_none() {
+            let candidates = self.discover_roots(
+                search_paths.iter(self.context.db, ModuleResolveMode::Typing),
+                stub_packages.all(),
+            );
+            return self.resolve_remaining(candidates, ComponentFileFilter::ByMode);
+        }
+
+        // Only submodules need separate overlay resolution: their extra-path namespace parent can
+        // be shadowed before the resolver reaches the requested stub. Reuse those roots for the
+        // normal fallback so that each extra path is probed only once.
+        let extra_offset = search_paths
+            .static_paths
+            .partition_point(SearchPath::is_extra);
+        let mut candidates = self.discover_roots(
+            search_paths
+                .iter(self.context.db, ModuleResolveMode::Typing)
+                .take(extra_offset),
+            stub_packages.extra(),
         );
-        self.resolve_remaining(candidates)
+        if let Some(resolved) =
+            self.resolve_remaining(candidates.clone(), ComponentFileFilter::StubOnly)
+        {
+            return Some(resolved);
+        }
+
+        let remaining_candidates = self.discover_roots(
+            search_paths
+                .iter(self.context.db, ModuleResolveMode::Typing)
+                .skip(extra_offset),
+            stub_packages.remaining(),
+        );
+        candidates.extend(remaining_candidates);
+        let candidates = normalize_candidates(self.context.db, candidates);
+
+        self.resolve_remaining(candidates, ComponentFileFilter::ByMode)
     }
 
     /// Resolves the name for type checking against desperate ancestor search paths.
@@ -1227,7 +1330,7 @@ impl<'db, 'name> NameResolver<'db, 'name> {
         let stub_packages =
             StubPackageIndex::from_search_paths(self.context.db, search_paths.iter());
         let candidates = self.discover_roots(search_paths.iter(), stub_packages.all());
-        self.resolve_remaining(candidates)
+        self.resolve_remaining(candidates, ComponentFileFilter::ByMode)
     }
 
     /// Resolves the name to the implementation that is available at runtime.
@@ -1239,7 +1342,7 @@ impl<'db, 'name> NameResolver<'db, 'name> {
         search_paths: impl Iterator<Item = &'a SearchPath>,
     ) -> Option<ResolvedNames> {
         let candidates = self.discover_roots(search_paths, None);
-        self.resolve_remaining(candidates)
+        self.resolve_remaining(candidates, ComponentFileFilter::ByMode)
     }
 
     fn discover_roots<'a>(
@@ -1259,13 +1362,15 @@ impl<'db, 'name> NameResolver<'db, 'name> {
                 resolve_stub_package_in_search_path(&self.context, search_path, stub_name)
             }));
             // Defer file probes after stdlib until we know that stdlib does not win.
-            pending_stub_paths.extend(paths.after_stdlib.iter().filter(|search_path| {
-                candidate_may_exist(
-                    &self.context,
-                    &ModuleResolutionCandidate::stub(search_path),
-                    stub_name,
-                )
-            }));
+            if let Some(after_stdlib) = paths.after_stdlib {
+                pending_stub_paths.extend(after_stdlib.iter().filter(|search_path| {
+                    candidate_may_exist(
+                        &self.context,
+                        &ModuleResolutionCandidate::stub(search_path),
+                        stub_name,
+                    )
+                }));
+            }
         }
 
         for search_path in search_paths {
@@ -1284,8 +1389,13 @@ impl<'db, 'name> NameResolver<'db, 'name> {
             let can_stop = is_stdlib || pending_stub_paths.is_empty();
             let mut candidate = ModuleResolutionCandidate::root(search_path);
             let terminal = if candidate_may_exist(&self.context, &candidate, root_component) {
-                let resolved =
-                    resolve_component(&self.context, &mut candidate, root_component).is_ok();
+                let resolved = resolve_component(
+                    &self.context,
+                    &mut candidate,
+                    root_component,
+                    ComponentFileFilter::ByMode,
+                )
+                .is_ok();
                 let terminal = candidate.missing_submodule_is_terminal();
                 if resolved {
                     cur_candidates.push(candidate);
@@ -1312,17 +1422,30 @@ impl<'db, 'name> NameResolver<'db, 'name> {
         normalize_candidates(self.context.db, cur_candidates)
     }
 
-    fn resolve_remaining(&self, mut cur_candidates: ResolvedNames) -> Option<ResolvedNames> {
+    fn resolve_remaining(
+        &self,
+        mut cur_candidates: ResolvedNames,
+        final_filter: ComponentFileFilter,
+    ) -> Option<ResolvedNames> {
         if cur_candidates.is_empty() {
             return None;
         }
 
+        let mut components = self.name.components().skip(1).peekable();
         let mut next_candidates = Vec::new();
 
-        for component in self.name.components().skip(1) {
+        while let Some(component) = components.next() {
+            let is_final = components.peek().is_none();
+            let file_filter = if is_final {
+                final_filter
+            } else {
+                ComponentFileFilter::ByMode
+            };
+
             for mut candidate in cur_candidates.drain(..) {
                 if !candidate_may_exist(&self.context, &candidate, component)
-                    || resolve_component(&self.context, &mut candidate, component).is_err()
+                    || resolve_component(&self.context, &mut candidate, component, file_filter)
+                        .is_err()
                 {
                     if candidate.missing_submodule_is_terminal() {
                         // Everything after this package should be shadowed out by
@@ -1339,6 +1462,12 @@ impl<'db, 'name> NameResolver<'db, 'name> {
                 }
             }
 
+            // An overlay may traverse runtime parent packages, but the requested module itself
+            // must be a stub; otherwise an ordinary `.py` file on an extra path could override the
+            // runtime module. `is_final` marks the last component of the requested module name.
+            if is_final && final_filter == ComponentFileFilter::StubOnly {
+                next_candidates.retain(|candidate| candidate.module.has_stub_file(self.context.db));
+            }
             if next_candidates.is_empty() {
                 return None;
             }
@@ -1362,7 +1491,13 @@ fn resolve_stub_package_in_search_path(
     if !candidate_may_exist(context, &candidate, stub_name) {
         return None;
     }
-    resolve_component(context, &mut candidate, stub_name).ok()?;
+    resolve_component(
+        context,
+        &mut candidate,
+        stub_name,
+        ComponentFileFilter::ByMode,
+    )
+    .ok()?;
 
     // `mypackage-stubs.py(i)` is not a valid result.
     if matches!(candidate.module, ResolvedModule::Module(_)) {
@@ -1428,6 +1563,7 @@ fn resolve_component(
     context: &ResolverContext,
     candidate: &mut ModuleResolutionCandidate,
     module_name: &str,
+    file_filter: ComponentFileFilter,
 ) -> Result<(), ()> {
     if matches!(candidate.module, ResolvedModule::Module(_)) {
         tracing::trace!(
@@ -1441,7 +1577,7 @@ fn resolve_component(
 
     // Check for a regular package first (highest priority)
     package_path.push("__init__");
-    if let Some(init) = resolve_file_module(package_path, context) {
+    if let Some(init) = resolve_file_module_with_filter(package_path, context, file_filter) {
         // Remove the `__init__` component for any potential next step
         package_path.pop();
         candidate.py_typed = package_path
@@ -1458,7 +1594,7 @@ fn resolve_component(
     // Check for a file module next
     package_path.pop();
 
-    if let Some(file_module) = resolve_file_module(package_path, context) {
+    if let Some(file_module) = resolve_file_module_with_filter(package_path, context, file_filter) {
         candidate.module = ResolvedModule::Module(file_module);
         return Ok(());
     }
@@ -1521,11 +1657,22 @@ pub(super) fn resolve_file_module(
     module: &ModulePath,
     resolver_state: &ResolverContext,
 ) -> Option<File> {
+    resolve_file_module_with_filter(module, resolver_state, ComponentFileFilter::ByMode)
+}
+
+fn resolve_file_module_with_filter(
+    module: &ModulePath,
+    resolver_state: &ResolverContext,
+    filter: ComponentFileFilter,
+) -> Option<File> {
     let stub_file = if resolver_state.mode.is_typing() {
         module.with_pyi_extension().to_file(resolver_state)
     } else {
         None
     };
+    if filter == ComponentFileFilter::StubOnly {
+        return stub_file;
+    }
 
     stub_file.or_else(|| {
         module
