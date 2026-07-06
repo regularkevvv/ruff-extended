@@ -511,11 +511,12 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         let mut result = self.never();
 
         let source_protocol = ty.as_protocol_instance();
-        let materialized_source =
-            source_protocol.is_some_and(ProtocolInstanceType::is_materialized);
+        let materialized_source_changes_target = source_protocol.is_some_and(|source| {
+            source.materialization_changes_requirements(db, protocol.interface(db))
+        });
 
         if !protocol.is_materialized()
-            && !materialized_source
+            && !materialized_source_changes_target
             && let Some(nominal_instance) = protocol.to_nominal_instance(db)
         {
             // if `ty` and `protocol` are *both* protocols, we also need to treat `ty` as if it
@@ -843,6 +844,21 @@ impl<'db> ProtocolInstanceType<'db> {
             Protocol::Materialized(materialized) => Some(materialized.materialization_kind(db)),
             Protocol::FromClass(_) | Protocol::Synthesized(_) => None,
         }
+    }
+
+    fn materialization_changes_requirements(
+        self,
+        db: &'db dyn Db,
+        target: ProtocolInterface<'db>,
+    ) -> bool {
+        let Protocol::Materialized(materialized) = self.inner else {
+            return false;
+        };
+        materialized.interface(db).differs_for_members_required_by(
+            db,
+            materialized.origin(db).interface(db),
+            target,
+        )
     }
 
     /// Return `true` if this is the standard-library `Hashable` protocol.

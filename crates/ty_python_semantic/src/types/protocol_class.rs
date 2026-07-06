@@ -327,6 +327,18 @@ impl<'db> ProtocolInterface<'db> {
         self.inner(db).contains_key(name)
     }
 
+    pub(super) fn differs_for_members_required_by(
+        self,
+        db: &'db dyn Db,
+        other: Self,
+        required: Self,
+    ) -> bool {
+        required
+            .inner(db)
+            .keys()
+            .any(|name| self.inner(db).get(name) != other.inner(db).get(name))
+    }
+
     pub(super) fn member_has_todo_type(self, db: &'db dyn Db, name: &str) -> bool {
         self.member_by_name(db, name)
             .is_some_and(|member| member.has_todo_type())
