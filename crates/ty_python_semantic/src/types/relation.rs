@@ -737,6 +737,10 @@ impl<'db> HasIdentity<'db> for (Type<'db>, Type<'db>, TypeRelation, TypeVarEvalu
             self.3,
         )
     }
+
+    fn needs_recursive_identity(&self) -> bool {
+        self.0.needs_recursive_identity() || self.1.needs_recursive_identity()
+    }
 }
 
 impl<'db, 'c> HasRelationToVisitor<'db, 'c> {
@@ -1369,7 +1373,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             }
             CycleDetectorVisit::Pending(item) => {
                 let result = work();
-                self.relation_visitor.finish_visit(&item, result)
+                self.relation_visitor.finish_visit(item, result)
             }
         }
     }
