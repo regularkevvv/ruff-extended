@@ -5199,6 +5199,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                         &speculative_argument_types,
                         narrowed_tcx,
                         &self.dataclass_field_specifiers,
+                        true,
                     )
                 }
             } else {
@@ -5315,6 +5316,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             argument_types,
             call_expression_tcx,
             &self.dataclass_field_specifiers,
+            true,
         );
 
         if teardown_expression_cache {
@@ -5355,6 +5357,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             argument_types,
             params.shared.call_expression_tcx,
             &self.dataclass_field_specifiers,
+            true,
         );
 
         let checked_argument_types = argument_types.clone();
@@ -5440,21 +5443,25 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     break 'fixpoint (CheckedArgumentTypes::Context, round_builder);
                 }
                 next_bindings = bindings.clone();
-                next_bindings.check_types_for_argument_inference(
+                let _ = next_bindings.check_types_impl(
                     db,
                     inference_params.constraints,
                     &next_argument_types,
                     inference_params.call_expression_tcx,
+                    &self.dataclass_field_specifiers,
+                    false,
                 );
                 break 'fixpoint (CheckedArgumentTypes::Next, round_builder);
             }
 
             next_bindings = bindings.clone();
-            next_bindings.check_types_for_argument_inference(
+            let _ = next_bindings.check_types_impl(
                 db,
                 inference_params.constraints,
                 &next_argument_types,
                 inference_params.call_expression_tcx,
+                &self.dataclass_field_specifiers,
+                false,
             );
 
             if round == generic_fixpoint.typevar_occurrences {

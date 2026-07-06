@@ -767,6 +767,7 @@ pub fn call_signature_details<'db>(
             &call_arguments,
             TypeContext::default(),
             &[],
+            true,
         );
 
         // Extract signature details from all callable bindings

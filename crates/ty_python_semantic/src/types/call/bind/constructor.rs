@@ -76,63 +76,48 @@ impl<'db> ConstructorBinding<'db> {
         }
     }
 
-    /// Check types for this constructor method, and then decide (based on the resolved return
-    /// types) whether we should continue considering downstream constructors or discard them.
+    /// Checks this constructor and, if requested, discards inactive downstream constructors.
+    ///
+    /// During generic call inference, the candidate overload and constructor set must remain
+    /// stable across fixpoint iterations, and so downstream constructors are not discarded
+    /// until the final round.
     pub(super) fn check_types(
         &mut self,
         db: &'db dyn Db,
         constraints: &ConstraintSetBuilder<'db>,
         argument_types: &CallArguments<'_, 'db>,
         call_expression_tcx: TypeContext<'db>,
+        discard_downstream_constructors: bool,
     ) {
         self.entry
             .check_types(db, constraints, argument_types, call_expression_tcx);
 
         // Now that we've fully checked our own callable, we can determine whether downstream
         // constructors should be checked or not.
-        if !self.should_check_downstream(db) {
+        if !discard_downstream_constructors {
+            if let Some(downstream) = self.downstream_constructor_mut() {
+                let _ = downstream.check_types_impl(
+                    db,
+                    constraints,
+                    argument_types,
+                    call_expression_tcx,
+                    &[],
+                    false,
+                );
+            }
+        } else if !self.should_check_downstream(db) {
             // If not, we can discard the downstream constructor bindings entirely.
             self.downstream_constructor = None;
         }
     }
 
-    /// Checks this constructor and all potential downstream constructors without discarding any
-    /// of them. Generic-call fixpoint inference needs their candidate overloads to remain stable
-    /// across rounds, including while the current upstream specialization makes a downstream
-    /// inactive.
-    pub(super) fn check_types_for_argument_inference(
-        &mut self,
-        db: &'db dyn Db,
-        constraints: &ConstraintSetBuilder<'db>,
-        argument_types: &CallArguments<'_, 'db>,
-        call_expression_tcx: TypeContext<'db>,
-    ) {
-        self.entry
-            .check_types(db, constraints, argument_types, call_expression_tcx);
-        if let Some(downstream) = self.downstream_constructor_mut() {
-            downstream.check_types_for_argument_inference(
-                db,
-                constraints,
-                argument_types,
-                call_expression_tcx,
-            );
-        }
-    }
-
-    /// Discards an inactive downstream constructor after a fixpoint round is committed.
-    pub(super) fn finalize_argument_inference_check(&mut self, db: &'db dyn Db) -> bool {
-        if self.should_check_downstream(db) {
-            true
-        } else {
-            self.downstream_constructor = None;
-            false
-        }
-    }
-
-    /// Determines whether resolved upstream overloads require the downstream constructor.
+    /// For constructors which may have downstreams (that is, metaclass `__call__` or `__new__`),
+    /// analyze their overloads to determine whether to check downstream constructors.
     ///
     /// We analyze overloads individually rather than just relying on the resolved return type of
-    /// the overall callable, because multiple matching overloads can collapse to `Unknown`.
+    /// the overall callable, because in multiple-matching-overload cases where the overload
+    /// resolution algorithm might just collapse to `Unknown`, we want to make a more informed
+    /// decision based on whether all overloads return instance types, or not.
     fn should_check_downstream(&self, db: &'db dyn Db) -> bool {
         let constructor_kind = self.constructor_kind();
         if constructor_kind.is_init() || self.downstream_constructor().is_none() {
@@ -157,6 +142,16 @@ impl<'db> ConstructorBinding<'db> {
         })
     }
 
+    /// Discards an inactive downstream constructor after a fixpoint round is committed.
+    pub(super) fn finalize_argument_inference_check(&mut self, db: &'db dyn Db) -> bool {
+        if self.should_check_downstream(db) {
+            true
+        } else {
+            self.downstream_constructor = None;
+            false
+        }
+    }
+
     /// Check types for downstream constructors, if any.
     pub(super) fn check_downstream_constructor(
         &mut self,
@@ -175,6 +170,7 @@ impl<'db> ConstructorBinding<'db> {
                 argument_types,
                 call_expression_tcx,
                 dataclass_field_specifiers,
+                true,
             );
         }
     }

@@ -207,35 +207,18 @@ impl<'db> CallableItem<'db> {
         constraints: &ConstraintSetBuilder<'db>,
         argument_types: &CallArguments<'_, 'db>,
         call_expression_tcx: TypeContext<'db>,
+        discard_downstream_constructors: bool,
     ) {
         match self {
             CallableItem::Regular(binding) => {
                 binding.check_types(db, constraints, argument_types, call_expression_tcx);
             }
-            CallableItem::Constructor(binding) => {
-                binding.check_types(db, constraints, argument_types, call_expression_tcx);
-            }
-        }
-    }
-
-    /// Checks this callable while preserving every callable that can contribute argument context
-    /// during generic-call fixpoint inference.
-    fn check_types_for_argument_inference(
-        &mut self,
-        db: &'db dyn Db,
-        constraints: &ConstraintSetBuilder<'db>,
-        argument_types: &CallArguments<'_, 'db>,
-        call_expression_tcx: TypeContext<'db>,
-    ) {
-        match self {
-            CallableItem::Regular(binding) => {
-                binding.check_types(db, constraints, argument_types, call_expression_tcx);
-            }
-            CallableItem::Constructor(binding) => binding.check_types_for_argument_inference(
+            CallableItem::Constructor(binding) => binding.check_types(
                 db,
                 constraints,
                 argument_types,
                 call_expression_tcx,
+                discard_downstream_constructors,
             ),
         }
     }
@@ -407,9 +390,16 @@ impl<'db> BindingsElement<'db> {
         constraints: &ConstraintSetBuilder<'db>,
         call_arguments: &CallArguments<'_, 'db>,
         call_expression_tcx: TypeContext<'db>,
+        discard_downstream_constructors: bool,
     ) {
         for item in &mut self.items {
-            item.check_types(db, constraints, call_arguments, call_expression_tcx);
+            item.check_types(
+                db,
+                constraints,
+                call_arguments,
+                call_expression_tcx,
+                discard_downstream_constructors,
+            );
         }
     }
 
@@ -1155,6 +1145,7 @@ impl<'db> Bindings<'db> {
             call_arguments,
             call_expression_tcx,
             dataclass_field_specifiers,
+            true,
         ) {
             Ok(()) => Ok(self),
             Err(err) => Err(CallError(err, Box::new(self))),
@@ -1168,10 +1159,23 @@ impl<'db> Bindings<'db> {
         call_arguments: &CallArguments<'_, 'db>,
         call_expression_tcx: TypeContext<'db>,
         dataclass_field_specifiers: &[Type<'db>],
+        discard_downstream_constructors: bool,
     ) -> Result<(), CallErrorKind> {
         // Check types for each element (union variant)
         for element in &mut self.elements {
-            element.check_types(db, constraints, call_arguments, call_expression_tcx);
+            element.check_types(
+                db,
+                constraints,
+                call_arguments,
+                call_expression_tcx,
+                discard_downstream_constructors,
+            );
+        }
+
+        // Generic-call fixpoint rounds must retain the original callable structure so every
+        // potential downstream constructor can continue to contribute argument context.
+        if !discard_downstream_constructors {
+            return Ok(());
         }
 
         self.evaluate_known_cases(db, call_arguments, dataclass_field_specifiers);
@@ -1195,30 +1199,6 @@ impl<'db> Bindings<'db> {
         }
 
         self.as_result(db)
-    }
-
-    /// Checks every callable that can contribute argument context without pruning the callable
-    /// structure or conditionally discarding downstream constructors.
-    ///
-    /// Generic-call fixpoint inference uses this for speculative rounds so the overload candidate
-    /// set remains identical to the set captured before type inference.
-    pub(crate) fn check_types_for_argument_inference(
-        &mut self,
-        db: &'db dyn Db,
-        constraints: &ConstraintSetBuilder<'db>,
-        call_arguments: &CallArguments<'_, 'db>,
-        call_expression_tcx: TypeContext<'db>,
-    ) {
-        for element in &mut self.elements {
-            for item in &mut element.items {
-                item.check_types_for_argument_inference(
-                    db,
-                    constraints,
-                    call_arguments,
-                    call_expression_tcx,
-                );
-            }
-        }
     }
 
     /// Applies the non-inference effects of [`Self::check_types_impl`] after a candidate-preserving
@@ -6174,6 +6154,7 @@ impl<'db> Binding<'db> {
             arguments_types,
             call_expression_tcx,
             &[],
+            true,
         );
 
         let Type::Callable(callable) = specialized_bindings
@@ -6235,6 +6216,7 @@ impl<'db> Binding<'db> {
             &sub_arguments,
             call_expression_tcx,
             &[],
+            true,
         );
 
         let specialized_binding = specialized_bindings.single_element()?;
