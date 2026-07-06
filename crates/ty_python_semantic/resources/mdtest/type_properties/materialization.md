@@ -963,6 +963,16 @@ def class_reads(top: Top[ClassVarAny], bottom: Bottom[ClassVarAny]) -> None:
     reveal_type(type(top).value)  # revealed: object
     reveal_type(type(bottom).value)  # revealed: Never
 
+def class_union_order(
+    plain: ClassVarAny,
+    top: Top[ClassVarAny],
+    flag: bool,
+) -> None:
+    plain_first = type(plain) if flag else type(top)
+    top_first = type(top) if flag else type(plain)
+    reveal_type(plain_first.value)  # revealed: object
+    reveal_type(top_first.value)  # revealed: object
+
 class InstanceOnlyAny(Protocol):
     value: Any
 

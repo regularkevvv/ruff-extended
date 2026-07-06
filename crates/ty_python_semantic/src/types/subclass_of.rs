@@ -367,12 +367,20 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         source: SubclassOfType<'db>,
         target: SubclassOfType<'db>,
     ) -> ConstraintSet<'db, 'c> {
-        if let (Some(source), Some(target)) = (source.protocol, target.protocol) {
-            return self.check_type_pair(
-                db,
-                Type::ProtocolInstance(source),
-                Type::ProtocolInstance(target),
-            );
+        if source.protocol.is_some() || target.protocol.is_some() {
+            let source_protocol = source.protocol.or_else(|| {
+                Type::instance(db, source.subclass_of.into_class(db)?).as_protocol_instance()
+            });
+            let target_protocol = target.protocol.or_else(|| {
+                Type::instance(db, target.subclass_of.into_class(db)?).as_protocol_instance()
+            });
+            if let (Some(source), Some(target)) = (source_protocol, target_protocol) {
+                return self.check_type_pair(
+                    db,
+                    Type::ProtocolInstance(source),
+                    Type::ProtocolInstance(target),
+                );
+            }
         }
 
         match (source.subclass_of, target.subclass_of) {
