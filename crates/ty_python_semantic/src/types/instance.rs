@@ -850,6 +850,21 @@ impl<'db> ProtocolInstanceType<'db> {
         }
     }
 
+    pub(super) fn materialized_origin_property(
+        self,
+        db: &'db dyn Db,
+        name: &str,
+    ) -> Option<ProtocolClass<'db>> {
+        let Protocol::Materialized(materialized) = self.inner else {
+            return None;
+        };
+        let origin = materialized.origin(db);
+        origin
+            .interface(db)
+            .member_is_property(db, name)
+            .then_some(origin)
+    }
+
     // Keep this method private, so that the only way of constructing `ProtocolInstanceType`
     // instances is through the `Type::instance` constructor function.
     fn from_class(class: ProtocolClass<'db>) -> Self {

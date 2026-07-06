@@ -995,6 +995,24 @@ def descriptor_methods(
         reveal_type(value.make())  # revealed: int
         reveal_type(value.parse())  # revealed: str
 
+class ReadOnlyProperty(Protocol):
+    @property
+    def property(self) -> Any: ...
+
+def is_read_only_property(value: object) -> TypeIs[ReadOnlyProperty]:
+    return True
+
+def property_deletion(
+    plain: ReadOnlyProperty,
+    top: Top[ReadOnlyProperty],
+    value: object,
+) -> None:
+    reveal_type(top.property)  # revealed: object
+    del plain.property  # error: [invalid-assignment]
+    del top.property  # error: [invalid-assignment]
+    if is_read_only_property(value):
+        del value.property  # error: [invalid-assignment]
+
 class OriginGeneric[T](Protocol):
     value: Any
 

@@ -332,6 +332,11 @@ impl<'db> ProtocolInterface<'db> {
             .is_some_and(|member| member.has_todo_type())
     }
 
+    pub(super) fn member_is_property(self, db: &'db dyn Db, name: &str) -> bool {
+        self.member_by_name(db, name)
+            .is_some_and(|member| member.is_property())
+    }
+
     /// Returns the declared instance-write requirement for a protocol member.
     ///
     /// `None` means that the protocol does not declare `name`; `Some((None, _))` means that the

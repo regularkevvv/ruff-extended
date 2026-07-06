@@ -523,7 +523,13 @@ pub(super) fn assignment_attribute_members<'db>(
     object_ty: Type<'db>,
     attribute: &str,
 ) -> Option<(PlaceAndQualifiers<'db>, Option<PlaceAndQualifiers<'db>>)> {
-    let meta_attr = object_ty.class_member(db, attribute.into());
+    let meta_attr = if let Type::ProtocolInstance(protocol) = object_ty
+        && let Some(origin) = protocol.materialized_origin_property(db, attribute)
+    {
+        Type::instance(db, *origin).class_member(db, attribute.into())
+    } else {
+        object_ty.class_member(db, attribute.into())
+    };
     let needs_fallback = matches!(
         meta_attr.place,
         Place::Defined(DefinedPlace {
