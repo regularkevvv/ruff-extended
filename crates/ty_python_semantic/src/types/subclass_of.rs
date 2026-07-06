@@ -18,8 +18,6 @@ use ty_python_core::definition::Definition;
 pub struct SubclassOfType<'db> {
     // Keep this field private, so that the only way of constructing the struct is through the `from` method.
     subclass_of: SubclassOfInner<'db>,
-    // Retain the effective interface when this is the meta-type of a materialized protocol.
-    protocol: Option<ProtocolInstanceType<'db>>,
 }
 
 pub(super) fn walk_subclass_of_type<'db, V: super::visitor::TypeVisitor<'db> + ?Sized>(
@@ -51,28 +49,20 @@ impl<'db> SubclassOfType<'db> {
                 } else if class.is_object(db) {
                     Self::subclass_of_object(db)
                 } else {
-                    Type::SubclassOf(Self {
-                        subclass_of,
-                        protocol: None,
-                    })
+                    Type::SubclassOf(Self { subclass_of })
                 }
             }
-            SubclassOfInner::Dynamic(_) | SubclassOfInner::TypeVar(_) => Type::SubclassOf(Self {
-                subclass_of,
-                protocol: None,
-            }),
+            SubclassOfInner::Dynamic(_)
+            | SubclassOfInner::Protocol(_)
+            | SubclassOfInner::TypeVar(_) => Type::SubclassOf(Self { subclass_of }),
         }
     }
 
     /// Constructs the meta-type of a class-backed protocol while retaining its effective
     /// materialized interface for class-member lookup.
-    pub(super) fn from_protocol(
-        protocol: ProtocolInstanceType<'db>,
-        origin: ProtocolClass<'db>,
-    ) -> Type<'db> {
+    pub(super) fn from_protocol(protocol: ProtocolInstanceType<'db>) -> Type<'db> {
         Type::SubclassOf(Self {
-            subclass_of: SubclassOfInner::Class(*origin),
-            protocol: Some(protocol),
+            subclass_of: SubclassOfInner::Protocol(protocol),
         })
     }
 
@@ -116,7 +106,6 @@ impl<'db> SubclassOfType<'db> {
     pub(crate) const fn subclass_of_unknown() -> Type<'db> {
         Type::SubclassOf(SubclassOfType {
             subclass_of: SubclassOfInner::unknown(),
-            protocol: None,
         })
     }
 
@@ -125,7 +114,6 @@ impl<'db> SubclassOfType<'db> {
     pub(crate) const fn subclass_of_any() -> Type<'db> {
         Type::SubclassOf(SubclassOfType {
             subclass_of: SubclassOfInner::Dynamic(DynamicType::Any),
-            protocol: None,
         })
     }
 
@@ -141,23 +129,22 @@ impl<'db> SubclassOfType<'db> {
     }
 
     pub(super) const fn materialized_protocol(self) -> Option<ProtocolInstanceType<'db>> {
-        self.protocol
+        match self.subclass_of {
+            SubclassOfInner::Protocol(protocol) => Some(protocol),
+            SubclassOfInner::Class(_)
+            | SubclassOfInner::Dynamic(_)
+            | SubclassOfInner::TypeVar(_) => None,
+        }
     }
 
     pub(crate) const fn is_dynamic(self) -> bool {
         // Unpack `self` so that we're forced to update this method if any more fields are added in the future.
-        let Self {
-            subclass_of,
-            protocol: _,
-        } = self;
+        let Self { subclass_of } = self;
         subclass_of.is_dynamic()
     }
 
     pub(crate) const fn is_type_var(self) -> bool {
-        let Self {
-            subclass_of,
-            protocol: _,
-        } = self;
+        let Self { subclass_of } = self;
         subclass_of.is_type_var()
     }
 
@@ -185,22 +172,17 @@ impl<'db> SubclassOfType<'db> {
         visitor: &ApplyTypeMappingVisitor<'db>,
     ) -> Type<'db> {
         match self.subclass_of {
-            SubclassOfInner::Class(class) => {
-                if let Some(protocol) = self.protocol {
-                    return protocol
-                        .apply_type_mapping_impl(db, type_mapping, tcx, visitor)
-                        .to_meta_type(db);
-                }
-                Type::SubclassOf(Self {
-                    subclass_of: SubclassOfInner::Class(class.apply_type_mapping_impl(
-                        db,
-                        type_mapping,
-                        tcx,
-                        visitor,
-                    )),
-                    protocol: None,
-                })
-            }
+            SubclassOfInner::Class(class) => Type::SubclassOf(Self {
+                subclass_of: SubclassOfInner::Class(class.apply_type_mapping_impl(
+                    db,
+                    type_mapping,
+                    tcx,
+                    visitor,
+                )),
+            }),
+            SubclassOfInner::Protocol(protocol) => protocol
+                .apply_type_mapping_impl(db, type_mapping, tcx, visitor)
+                .to_meta_type(db),
             SubclassOfInner::Dynamic(_) => match type_mapping {
                 TypeMapping::Materialize(materialization_kind) => match materialization_kind {
                     MaterializationKind::Top => KnownClass::Type.to_instance(db),
@@ -225,11 +207,10 @@ impl<'db> SubclassOfType<'db> {
         match self.subclass_of {
             SubclassOfInner::Dynamic(_) => {}
             SubclassOfInner::Class(class) => {
-                if let Some(protocol) = self.protocol {
-                    protocol.find_legacy_typevars_impl(db, binding_context, typevars, visitor);
-                } else {
-                    class.find_legacy_typevars_impl(db, binding_context, typevars, visitor);
-                }
+                class.find_legacy_typevars_impl(db, binding_context, typevars, visitor);
+            }
+            SubclassOfInner::Protocol(protocol) => {
+                protocol.find_legacy_typevars_impl(db, binding_context, typevars, visitor);
             }
             SubclassOfInner::TypeVar(typevar) => {
                 Type::TypeVar(typevar).find_legacy_typevars_impl(
@@ -248,7 +229,7 @@ impl<'db> SubclassOfType<'db> {
         name: &str,
         policy: MemberLookupPolicy,
     ) -> Option<PlaceAndQualifiers<'db>> {
-        if let Some(protocol) = self.protocol
+        if let SubclassOfInner::Protocol(protocol) = self.subclass_of
             && let Some(member) = protocol.interface(db).class_member(db, name)
         {
             return Some(member);
@@ -257,6 +238,7 @@ impl<'db> SubclassOfType<'db> {
         let class_like = match self.subclass_of.with_transposed_type_var(db) {
             SubclassOfInner::Class(class) => Type::from(class),
             SubclassOfInner::Dynamic(dynamic) => Type::Dynamic(dynamic),
+            SubclassOfInner::Protocol(protocol) => Type::from(*protocol.class_origin(db)?),
             SubclassOfInner::TypeVar(bound_typevar) => {
                 match bound_typevar.typevar(db).bound_or_constraints(db) {
                     None => unreachable!(),
@@ -281,20 +263,14 @@ impl<'db> SubclassOfType<'db> {
             subclass_of: self
                 .subclass_of
                 .recursive_type_normalized_impl(db, div, nested)?,
-            protocol: match self.protocol {
-                Some(protocol) => Some(protocol.recursive_type_normalized_impl(db, div, nested)?),
-                None => None,
-            },
         })
     }
 
     pub(crate) fn to_instance(self, db: &'db dyn Db) -> Type<'db> {
-        if let Some(protocol) = self.protocol {
-            return Type::ProtocolInstance(protocol);
-        }
         match self.subclass_of {
             SubclassOfInner::Class(class) => Type::instance(db, class),
             SubclassOfInner::Dynamic(dynamic_type) => Type::Dynamic(dynamic_type),
+            SubclassOfInner::Protocol(protocol) => Type::ProtocolInstance(protocol),
             SubclassOfInner::TypeVar(bound_typevar) => Type::TypeVar(bound_typevar),
         }
     }
@@ -323,6 +299,13 @@ impl<'db> SubclassOfType<'db> {
             }
             SubclassOfInner::Class(class) => SubclassOfType::try_from_type(db, class.metaclass(db))
                 .unwrap_or(SubclassOfType::subclass_of_unknown()),
+            SubclassOfInner::Protocol(protocol) => protocol.class_origin(db).map_or_else(
+                SubclassOfType::subclass_of_unknown,
+                |origin| {
+                    SubclassOfType::try_from_type(db, origin.metaclass(db))
+                        .unwrap_or(SubclassOfType::subclass_of_unknown())
+                },
+            ),
             // For `type[T]` where `T` is a TypeVar, `with_transposed_type_var` transforms
             // the bounds from instance types to `type[]` types. For example, `type[T]` where
             // `T: A | B` becomes a TypeVar with bound `type[A] | type[B]`. The metatype is
@@ -349,11 +332,9 @@ impl<'db> SubclassOfType<'db> {
 
 impl<'db> VarianceInferable<'db> for SubclassOfType<'db> {
     fn variance_of(self, db: &dyn Db, typevar: BoundTypeVarInstance<'_>) -> TypeVarVariance {
-        if let Some(protocol) = self.protocol {
-            return protocol.variance_of(db, typevar);
-        }
         match self.subclass_of {
             SubclassOfInner::Class(class) => class.variance_of(db, typevar),
+            SubclassOfInner::Protocol(protocol) => protocol.variance_of(db, typevar),
             SubclassOfInner::Dynamic(_) | SubclassOfInner::TypeVar(_) => TypeVarVariance::Bivariant,
         }
     }
@@ -367,13 +348,15 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         source: SubclassOfType<'db>,
         target: SubclassOfType<'db>,
     ) -> ConstraintSet<'db, 'c> {
-        if source.protocol.is_some() || target.protocol.is_some() {
-            let source_protocol = source.protocol.or_else(|| {
-                Type::instance(db, source.subclass_of.into_class(db)?).as_protocol_instance()
-            });
-            let target_protocol = target.protocol.or_else(|| {
-                Type::instance(db, target.subclass_of.into_class(db)?).as_protocol_instance()
-            });
+        if matches!(source.subclass_of, SubclassOfInner::Protocol(_))
+            || matches!(target.subclass_of, SubclassOfInner::Protocol(_))
+        {
+            let to_protocol = |subclass_of: SubclassOfInner<'db>| match subclass_of {
+                SubclassOfInner::Protocol(protocol) => Some(protocol),
+                _ => Type::instance(db, subclass_of.into_class(db)?).as_protocol_instance(),
+            };
+            let source_protocol = to_protocol(source.subclass_of);
+            let target_protocol = to_protocol(target.subclass_of);
             if let (Some(source), Some(target)) = (source_protocol, target_protocol) {
                 return self.check_type_pair(
                     db,
@@ -383,7 +366,13 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
             }
         }
 
-        match (source.subclass_of, target.subclass_of) {
+        let Some(source) = source.subclass_of.with_protocol_origin(db) else {
+            return self.never();
+        };
+        let Some(target) = target.subclass_of.with_protocol_origin(db) else {
+            return self.never();
+        };
+        match (source, target) {
             (SubclassOfInner::Dynamic(_), SubclassOfInner::Dynamic(_)) => {
                 ConstraintSet::from_bool(self.constraints, !self.relation.is_subtyping())
             }
@@ -407,6 +396,9 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
             (SubclassOfInner::TypeVar(_), _) | (_, SubclassOfInner::TypeVar(_)) => {
                 unreachable!()
             }
+            (SubclassOfInner::Protocol(_), _) | (_, SubclassOfInner::Protocol(_)) => {
+                unreachable!("materialized protocol meta-types were replaced by their origins")
+            }
         }
     }
 }
@@ -421,7 +413,13 @@ impl<'c, 'db> DisjointnessChecker<'_, 'c, 'db> {
         left: SubclassOfType<'db>,
         right: SubclassOfType<'db>,
     ) -> ConstraintSet<'db, 'c> {
-        match (left.subclass_of, right.subclass_of) {
+        let Some(left) = left.subclass_of.with_protocol_origin(db) else {
+            return ConstraintSet::from_bool(self.constraints, false);
+        };
+        let Some(right) = right.subclass_of.with_protocol_origin(db) else {
+            return ConstraintSet::from_bool(self.constraints, false);
+        };
+        match (left, right) {
             (SubclassOfInner::Dynamic(_), _) | (_, SubclassOfInner::Dynamic(_)) => {
                 ConstraintSet::from_bool(self.constraints, false)
             }
@@ -434,6 +432,9 @@ impl<'c, 'db> DisjointnessChecker<'_, 'c, 'db> {
             (SubclassOfInner::TypeVar(_), _) | (_, SubclassOfInner::TypeVar(_)) => {
                 unreachable!()
             }
+            (SubclassOfInner::Protocol(_), _) | (_, SubclassOfInner::Protocol(_)) => {
+                unreachable!("materialized protocol meta-types were replaced by their origins")
+            }
         }
     }
 }
@@ -442,7 +443,8 @@ impl<'c, 'db> DisjointnessChecker<'_, 'c, 'db> {
 ///
 /// 1. A "subclass of a class": `type[C]` for any class object `C`
 /// 2. A "subclass of a dynamic type": `type[Any]`, `type[Unknown]` and `type[@Todo]`
-/// 3. A "subclass of a type variable": `type[T]` for any type variable `T`
+/// 3. The meta-type of a materialized class-based protocol
+/// 4. A "subclass of a type variable": `type[T]` for any type variable `T`
 ///
 /// In the long term, we may want to implement <https://github.com/astral-sh/ruff/issues/15381>.
 /// Doing this would allow us to get rid of this enum,
@@ -457,6 +459,7 @@ impl<'c, 'db> DisjointnessChecker<'_, 'c, 'db> {
 pub(crate) enum SubclassOfInner<'db> {
     Class(ClassType<'db>),
     Dynamic(DynamicType<'db>),
+    Protocol(ProtocolInstanceType<'db>),
     TypeVar(BoundTypeVarInstance<'db>),
 }
 
@@ -477,6 +480,7 @@ impl<'db> SubclassOfInner<'db> {
         match self {
             Self::Dynamic(_) => None,
             Self::Class(class) => Some(class),
+            Self::Protocol(protocol) => protocol.class_origin(db).map(|origin| *origin),
             Self::TypeVar(bound_typevar) => {
                 match bound_typevar.typevar(db).bound_or_constraints(db) {
                     None => Some(ClassType::object(db)),
@@ -493,15 +497,24 @@ impl<'db> SubclassOfInner<'db> {
 
     pub(crate) const fn into_dynamic(self) -> Option<DynamicType<'db>> {
         match self {
-            Self::Class(_) | Self::TypeVar(_) => None,
+            Self::Class(_) | Self::Protocol(_) | Self::TypeVar(_) => None,
             Self::Dynamic(dynamic) => Some(dynamic),
         }
     }
 
     pub(crate) const fn into_type_var(self) -> Option<BoundTypeVarInstance<'db>> {
         match self {
-            Self::Class(_) | Self::Dynamic(_) => None,
+            Self::Class(_) | Self::Dynamic(_) | Self::Protocol(_) => None,
             Self::TypeVar(bound_typevar) => Some(bound_typevar),
+        }
+    }
+
+    fn with_protocol_origin(self, db: &'db dyn Db) -> Option<Self> {
+        match self {
+            Self::Protocol(protocol) => {
+                protocol.class_origin(db).map(|origin| Self::Class(*origin))
+            }
+            _ => Some(self),
         }
     }
 
@@ -573,6 +586,9 @@ impl<'db> SubclassOfInner<'db> {
                 class.recursive_type_normalized_impl(db, div, nested)?,
             )),
             Self::Dynamic(dynamic) => Some(Self::Dynamic(dynamic.recursive_type_normalized())),
+            Self::Protocol(protocol) => Some(Self::Protocol(
+                protocol.recursive_type_normalized_impl(db, div, nested)?,
+            )),
             Self::TypeVar(_) => Some(self),
         }
     }
@@ -604,12 +620,10 @@ impl<'db> From<BoundTypeVarInstance<'db>> for SubclassOfInner<'db> {
 
 impl<'db> From<SubclassOfType<'db>> for Type<'db> {
     fn from(value: SubclassOfType<'db>) -> Self {
-        if let Some(protocol) = value.protocol {
-            return Type::ProtocolInstance(protocol);
-        }
         match value.subclass_of {
             SubclassOfInner::Class(class) => class.into(),
             SubclassOfInner::Dynamic(dynamic) => Type::Dynamic(dynamic),
+            SubclassOfInner::Protocol(protocol) => Type::ProtocolInstance(protocol),
             SubclassOfInner::TypeVar(bound_typevar) => Type::TypeVar(bound_typevar),
         }
     }

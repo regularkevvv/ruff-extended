@@ -2795,6 +2795,12 @@ pub(crate) fn report_undeclared_protocol_member(
             Type::ProtocolInstance(protocol) if protocol.class_origin(db).is_some() => return true,
             Type::SubclassOf(subclass_of) => match subclass_of.subclass_of() {
                 SubclassOfInner::Class(class) => class,
+                SubclassOfInner::Protocol(protocol) => {
+                    let Some(origin) = protocol.class_origin(db) else {
+                        return false;
+                    };
+                    *origin
+                }
                 SubclassOfInner::Dynamic(DynamicType::Any) => return true,
                 SubclassOfInner::Dynamic(_) | SubclassOfInner::TypeVar(_) => return false,
             },

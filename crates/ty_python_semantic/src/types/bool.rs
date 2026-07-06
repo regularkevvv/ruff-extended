@@ -268,6 +268,11 @@ impl<'db> Type<'db> {
                     SubclassOfInner::Class(class) => {
                         Type::from(class).try_bool_impl(db, allow_short_circuit, visitor)?
                     }
+                    SubclassOfInner::Protocol(protocol) => protocol
+                        .class_origin(db)
+                        .map(Type::from)
+                        .unwrap_or_else(Type::unknown)
+                        .try_bool_impl(db, allow_short_circuit, visitor)?,
                     SubclassOfInner::TypeVar(bound_typevar) => Type::TypeVar(bound_typevar)
                         .try_bool_impl(db, allow_short_circuit, visitor)?,
                 }

@@ -624,6 +624,21 @@ impl<'db> BoundSuperType<'db> {
                         None,
                     )?)
                 }
+                SubclassOfInner::Protocol(protocol) => {
+                    let Some(origin) = protocol.class_origin(db) else {
+                        return delegate_to(Type::unknown());
+                    };
+                    let class = *origin;
+                    SuperOwnerKind::Resolved(Self::resolve_class_super_owner(
+                        db,
+                        pivot_class,
+                        pivot_class_type,
+                        owner_type,
+                        Type::from(class),
+                        class,
+                        None,
+                    )?)
+                }
                 SubclassOfInner::Dynamic(dynamic) => SuperOwnerKind::Dynamic(dynamic),
                 SubclassOfInner::TypeVar(bound_typevar) => {
                     let typevar = bound_typevar.typevar(db);

@@ -2060,6 +2060,9 @@ fn extract_class_literal<'db>(db: &'db dyn Db, ty: Type<'db>) -> Option<ClassLit
                 crate::types::SubclassOfInner::Class(class_type) => {
                     Some(class_type.class_literal(db))
                 }
+                crate::types::SubclassOfInner::Protocol(protocol) => protocol
+                    .class_origin(db)
+                    .map(|origin| origin.class_literal(db)),
                 crate::types::SubclassOfInner::Dynamic(_)
                 | crate::types::SubclassOfInner::TypeVar(_) => None,
             }

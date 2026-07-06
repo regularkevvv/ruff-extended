@@ -32,7 +32,7 @@ use crate::types::typevar::BoundTypeVarIdentity;
 use crate::types::visitor::TypeVisitor;
 use crate::types::{
     CallableType, IntersectionType, KnownBoundMethodType, KnownClass, KnownInstanceType,
-    LiteralValueType, LiteralValueTypeKind, MaterializationKind, PropertyInstanceType, Protocol,
+    LiteralValueType, LiteralValueTypeKind, MaterializationKind, PropertyInstanceType,
     SpecialFormType, StringLiteralType, SubclassOfInner, SubclassOfType, Type, TypeAliasType,
     TypeGuardLike, TypedDictModule, TypedDictType, UnionType, WrapperDescriptorKind, visitor,
 };
@@ -976,30 +976,23 @@ impl<'db> FmtDetailed<'db> for DisplayRepresentation<'db> {
                     (ClassType::Generic(alias), _) => alias.display_with(self.db, self.settings.clone()).fmt_detailed(f),
                 }
             }
-            Type::ProtocolInstance(protocol) => match protocol.inner {
-                Protocol::FromClass(class) => match *class {
-                    ClassType::NonGeneric(class) => class
-                        .display_with(self.db, self.settings.clone())
-                        .fmt_detailed(f),
-                    ClassType::Generic(alias) => alias
-                        .display_with(self.db, self.settings.clone())
-                        .fmt_detailed(f),
-                },
-                Protocol::Materialized(materialized) => match *materialized.origin(self.db) {
-                    ClassType::NonGeneric(class) => class
-                        .display_with(self.db, self.settings.clone())
-                        .fmt_detailed(f),
-                    ClassType::Generic(alias) => alias
-                        .display_with(self.db, self.settings.clone())
-                        .fmt_detailed(f),
-                },
-                Protocol::Synthesized(synthetic) => {
+            Type::ProtocolInstance(protocol) => {
+                if let Some(class) = protocol.class_origin(self.db) {
+                    match *class {
+                        ClassType::NonGeneric(class) => class
+                            .display_with(self.db, self.settings.clone())
+                            .fmt_detailed(f),
+                        ClassType::Generic(alias) => alias
+                            .display_with(self.db, self.settings.clone())
+                            .fmt_detailed(f),
+                    }
+                } else {
                     f.set_invalid_type_annotation();
                     f.write_char('<')?;
                     f.with_type(Type::SpecialForm(SpecialFormType::Protocol))
                         .write_str("Protocol")?;
                     f.write_str(" with members ")?;
-                    let interface = synthetic.interface(self.db);
+                    let interface = protocol.interface(self.db);
                     let member_list = interface.members(self.db);
                     let num_members = member_list.len();
                     for (i, member) in member_list.enumerate() {
@@ -1011,7 +1004,7 @@ impl<'db> FmtDetailed<'db> for DisplayRepresentation<'db> {
                     }
                     f.write_char('>')
                 }
-            },
+            }
             Type::PropertyInstance(property) => f
                 .with_type(self.ty)
                 .write_str(property_display_name(self.db, property)),
@@ -1060,6 +1053,21 @@ impl<'db> FmtDetailed<'db> for DisplayRepresentation<'db> {
                     alias
                         .display_with(self.db, self.settings.clone())
                         .fmt_detailed(f)?;
+                    f.write_char(']')
+                }
+                SubclassOfInner::Protocol(protocol) => {
+                    f.with_type(KnownClass::Type.to_class_literal(self.db))
+                        .write_str("type")?;
+                    f.write_char('[')?;
+                    match protocol.class_origin(self.db).map(|origin| *origin) {
+                        Some(ClassType::NonGeneric(class)) => class
+                            .display_with(self.db, self.settings.clone())
+                            .fmt_detailed(f)?,
+                        Some(ClassType::Generic(alias)) => alias
+                            .display_with(self.db, self.settings.clone())
+                            .fmt_detailed(f)?,
+                        None => f.write_str("Unknown")?,
+                    }
                     f.write_char(']')
                 }
                 SubclassOfInner::Dynamic(dynamic) => {
@@ -2762,6 +2770,21 @@ impl<'db> FmtDetailed<'db> for DisplaySubclassOfGroup<'db> {
                 }
                 SubclassOfInner::Class(ClassType::Generic(alias)) => {
                     join.entry(&alias.display_with(self.db, self.settings.singleline()));
+                }
+                SubclassOfInner::Protocol(protocol) => {
+                    match protocol.class_origin(self.db).map(|origin| *origin) {
+                        Some(ClassType::NonGeneric(class)) => {
+                            join.entry(&class.display_with(self.db, self.settings.singleline()));
+                        }
+                        Some(ClassType::Generic(alias)) => {
+                            join.entry(&alias.display_with(self.db, self.settings.singleline()));
+                        }
+                        None => {
+                            let rep =
+                                Type::unknown().representation(self.db, self.settings.singleline());
+                            join.entry(&rep);
+                        }
+                    }
                 }
                 SubclassOfInner::Dynamic(dynamic) => {
                     let rep =

@@ -477,6 +477,12 @@ impl ClassInfoConstraintFunction {
                     // It's not valid to use a generic alias as the second argument to `isinstance()` or `issubclass()`,
                     // e.g. `isinstance(x, list[int])` fails at runtime.
                     SubclassOfInner::Class(ClassType::Generic(_)) => None,
+                    SubclassOfInner::Protocol(protocol) => match *protocol.class_origin(db)? {
+                        ClassType::NonGeneric(class_literal) => {
+                            Some(constraint_from_class_literal(class_literal))
+                        }
+                        ClassType::Generic(_) => None,
+                    },
                     SubclassOfInner::Dynamic(dynamic) => Some(Type::Dynamic(dynamic)),
                     SubclassOfInner::TypeVar(bound_typevar) => match self {
                         ClassInfoConstraintFunction::IsSubclass => Some(classinfo),
@@ -2813,6 +2819,10 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
                         SubclassOfInner::Class(ClassType::NonGeneric(class)) => Some(class),
                         SubclassOfInner::Class(ClassType::Generic(_))
                         | SubclassOfInner::Dynamic(_) => None,
+                        SubclassOfInner::Protocol(protocol) => match *protocol.class_origin(db)? {
+                            ClassType::NonGeneric(class) => Some(class),
+                            ClassType::Generic(_) => None,
+                        },
                         SubclassOfInner::TypeVar(tvar) => {
                             find_underlying_class(db, tvar.typevar(db).upper_bound(db)?)
                         }

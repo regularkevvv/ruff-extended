@@ -2930,6 +2930,19 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
                             self,
                         ),
                     ),
+                    SubclassOfInner::Protocol(protocol) => protocol.class_origin(db).map_or_else(
+                        || self.never(),
+                        |class_a| {
+                            ConstraintSet::from_bool(
+                                self.constraints,
+                                !class_a.could_exist_in_mro_of_with_disjointness_checker(
+                                    db,
+                                    ClassType::NonGeneric(class_b),
+                                    self,
+                                ),
+                            )
+                        },
+                    ),
                     SubclassOfInner::TypeVar(_) => unreachable!(),
                 }
             }
@@ -2945,6 +2958,19 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
                             ClassType::Generic(alias_b),
                             self,
                         ),
+                    ),
+                    SubclassOfInner::Protocol(protocol) => protocol.class_origin(db).map_or_else(
+                        || self.never(),
+                        |class_a| {
+                            ConstraintSet::from_bool(
+                                self.constraints,
+                                !class_a.could_exist_in_mro_of_with_disjointness_checker(
+                                    db,
+                                    ClassType::Generic(alias_b),
+                                    self,
+                                ),
+                            )
+                        },
                     ),
                     SubclassOfInner::TypeVar(_) => unreachable!(),
                 }
@@ -2964,6 +2990,10 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
                 SubclassOfInner::Class(class) => {
                     self.check_type_pair(db, class.metaclass_instance_type(db), other)
                 }
+                SubclassOfInner::Protocol(protocol) => protocol.class_origin(db).map_or_else(
+                    || self.never(),
+                    |class| self.check_type_pair(db, class.metaclass_instance_type(db), other),
+                ),
                 SubclassOfInner::TypeVar(_) => unreachable!(),
             },
 

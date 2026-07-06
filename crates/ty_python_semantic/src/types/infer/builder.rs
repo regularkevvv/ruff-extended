@@ -9412,6 +9412,11 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                                 SubclassOfInner::Class(class) => {
                                     !class.instance_member(db, attr).is_undefined()
                                 }
+                                SubclassOfInner::Protocol(protocol) => protocol
+                                    .class_origin(db)
+                                    .is_some_and(|origin| {
+                                        !origin.instance_member(db, attr).is_undefined()
+                                    }),
                                 SubclassOfInner::Dynamic(_) => unreachable!(
                                     "Attribute lookup on a dynamic `SubclassOf` type \
                                     should always return a bound symbol"

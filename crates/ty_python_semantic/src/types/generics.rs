@@ -2875,7 +2875,7 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
             (
                 formal @ Type::ProtocolInstance(_),
                 actual @ Type::ProtocolInstance(actual_protocol),
-            ) if actual_protocol.is_materialized() => {
+            ) if actual_protocol.is_materialized(self.db) => {
                 let when = actual.when_constraint_set_assignable_to_owned(self.db, formal);
                 let when = self.constraints.load(self.db, &when);
                 if self.add_type_mappings_from_constraint_set(when).is_ok() {
