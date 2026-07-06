@@ -489,25 +489,12 @@ pub(crate) struct Bindings<'db> {
     enclosing_binding_contexts: Option<Box<[BindingContext<'db>]>>,
 }
 
-/// The overload indexes that matched parameter shape before argument type inference.
+/// The set of overloads that matched the arguments at a given call-site, before argument type
+/// inference.
 ///
-/// Call-argument inference keeps this candidate set stable while each candidate is inferred and,
-/// for generic calls, while its specialization evolves between fixpoint rounds. This ensures that
-/// every fresh type check can retrieve an argument type inferred for its own declared parameter
-/// type.
-#[derive(Debug)]
-pub(crate) struct CallArgumentInferenceCandidates {
-    overload_indices: SmallVec<[SmallVec<[usize; 1]>; 1]>,
-}
-
-impl CallArgumentInferenceCandidates {
-    /// Returns `true` when argument type inference must consider multiple overload candidates.
-    pub(crate) fn requires_overload_selection(&self) -> bool {
-        self.overload_indices
-            .iter()
-            .any(|indices| indices.len() > 1)
-    }
-}
+/// This set is kept stable across fixpoint iterations during generic call inference, ensuring
+/// that all inferred argument types are available during overload evaluation.
+pub(crate) type MatchingOverloadSet = SmallVec<[SmallVec<[usize; 1]>; 1]>;
 
 impl<'db> Bindings<'db> {
     fn as_result(&self, db: &'db dyn Db) -> Result<(), CallErrorKind> {
@@ -822,101 +809,31 @@ impl<'db> Bindings<'db> {
         }
     }
 
-    /// Visits the overloads that matched parameter shape before argument type inference.
-    ///
-    /// `self` may contain specializations inferred by a later fixpoint round, but it must retain
-    /// the same callable structure as the bindings from which `candidates` was created.
-    pub(crate) fn visit_call_argument_inference_candidates<'a>(
+    /// Visits the given set of overload candidates, invoking the provided callback for each
+    /// binding.
+    pub(crate) fn visit_matching_overload_set<'a>(
         &'a self,
-        candidates: &'a CallArgumentInferenceCandidates,
+        candidates: &'a MatchingOverloadSet,
         visit: &mut impl FnMut(&'a Binding<'db>, &'a CallableBinding<'db>),
     ) {
-        let mut candidate_indices = candidates.overload_indices.iter();
+        let mut matching_overloads = candidates.iter();
         self.visit_type_context_callables(&mut |binding| {
-            let Some(indices) = candidate_indices.next() else {
-                debug_assert!(false, "checked bindings added an inference candidate");
-                return;
-            };
+            let overloads = matching_overloads
+                .next()
+                .expect("checked bindings are stable across fixpoint iterations");
 
-            if indices.is_empty() {
-                // Preserve the existing single-signature fallback used to infer arguments for
-                // better diagnostics when parameter matching itself failed.
+            if overloads.is_empty() {
+                // If there is a single non-matching overload, we infer against it for better
+                // diagnostics.
                 if let [overload] = binding.overloads() {
                     visit(overload, binding);
                 }
             } else {
-                for &index in indices {
-                    visit(&binding.overloads()[index], binding);
+                for &overload in overloads {
+                    visit(&binding.overloads()[overload], binding);
                 }
             }
         });
-        let remaining_candidates = candidate_indices.next();
-        debug_assert!(remaining_candidates.is_none());
-    }
-
-    /// Returns whether any overload is generic, the source arguments whose type context can change
-    /// when that generic call is specialized, the maximum number of inferable type-variable
-    /// occurrences in any one matching overload's parameter contexts, and the fixed overload
-    /// candidates for argument inference.
-    pub(crate) fn generic_context_arguments(
-        &self,
-        db: &'db dyn Db,
-        arguments: &CallArguments<'_, 'db>,
-    ) -> (
-        bool,
-        SmallVec<[usize; 4]>,
-        usize,
-        CallArgumentInferenceCandidates,
-    ) {
-        let mut generic_arguments = SmallVec::<[bool; 8]>::with_capacity(arguments.len());
-        generic_arguments.resize(arguments.len(), false);
-        let mut has_generic_context = false;
-        let mut max_typevar_occurrences = 0;
-        let mut candidate_overload_indices = SmallVec::new();
-
-        self.visit_type_context_callables(&mut |binding| {
-            has_generic_context |= binding
-                .overloads()
-                .iter()
-                .any(|overload| overload.signature.generic_context.is_some());
-            let matching_overload_indices: SmallVec<[usize; 1]> = binding
-                .matching_overloads()
-                .map(|(index, _)| index)
-                .collect();
-            for &overload_index in &matching_overload_indices {
-                let overload = &binding.overloads()[overload_index];
-                if overload.signature.generic_context.is_none() {
-                    continue;
-                }
-                let mut overload_typevar_occurrences = 0;
-                for (argument_index, is_generic) in generic_arguments.iter_mut().enumerate() {
-                    if arguments.is_variadic(argument_index) {
-                        continue;
-                    }
-                    let occurrences =
-                        overload.generic_argument_typevar_occurrences(db, binding, argument_index);
-                    *is_generic |= occurrences > 0;
-                    overload_typevar_occurrences += occurrences;
-                }
-                // Overloads are alternative inference paths. Their dependency depths do not
-                // compose, so the fixpoint bound only needs the deepest matching overload.
-                max_typevar_occurrences = max_typevar_occurrences.max(overload_typevar_occurrences);
-            }
-            candidate_overload_indices.push(matching_overload_indices);
-        });
-
-        (
-            has_generic_context,
-            generic_arguments
-                .into_iter()
-                .enumerate()
-                .filter_map(|(index, is_generic)| is_generic.then_some(index))
-                .collect(),
-            max_typevar_occurrences,
-            CallArgumentInferenceCandidates {
-                overload_indices: candidate_overload_indices,
-            },
-        )
     }
 
     /// Returns `true` if every element of the union contains an intersection element with a matching
@@ -1201,9 +1118,7 @@ impl<'db> Bindings<'db> {
         self.as_result(db)
     }
 
-    /// Applies the non-inference effects of [`Self::check_types_impl`] after a candidate-preserving
-    /// fixpoint check is committed.
-    pub(crate) fn finalize_argument_inference_check(
+    pub(crate) fn discard_downstream_constructors(
         &mut self,
         db: &'db dyn Db,
         call_arguments: &CallArguments<'_, 'db>,
@@ -1212,10 +1127,10 @@ impl<'db> Bindings<'db> {
         self.evaluate_known_cases(db, call_arguments, dataclass_field_specifiers);
 
         for constructor in self.iter_constructor_items_mut() {
-            if constructor.finalize_argument_inference_check(db)
+            if constructor.discard_downstream_constructor(db)
                 && let Some(downstream) = constructor.downstream_constructor_mut()
             {
-                let _ = downstream.finalize_argument_inference_check(
+                let _ = downstream.discard_downstream_constructors(
                     db,
                     call_arguments,
                     dataclass_field_specifiers,
@@ -3751,9 +3666,8 @@ impl<'db> CallableBinding<'db> {
                                 .apply_optional_specialization(db, overload.specialization);
                             OverloadFilterSlot {
                                 parameter: parameter_type,
-                                // Contextual argument types are stored under the raw declared
-                                // parameter type. The specialized type is still used for overload
-                                // filtering below.
+                                // Argument types are cached by the raw parameter type, even when
+                                // they were inferred using a return-context specialization.
                                 argument: argument_types.get_for_declared_type(raw_parameter_type),
                                 variadic_argument: matched_parameter.argument_type,
                             }
@@ -5909,23 +5823,19 @@ fn collect_typevar_variances<'db>(
     variances
 }
 
-/// Counts occurrences of type variables from `inferable_typevars` in `ty`.
-///
-/// Type variables are counted before consulting the recursion guard so repeated occurrences of the
-/// same variable in distinct positions are retained. Their bounds and defaults are deliberately not
-/// visited: those are not part of the parameter context being applied to an argument expression.
+/// Counts occurrences of inferable type variables in the provided type.
 fn count_inferable_typevar_occurrences<'db>(
     db: &'db dyn Db,
     ty: Type<'db>,
-    inferable_typevars: InferableTypeVars<'db>,
+    inferable: InferableTypeVars<'db>,
 ) -> usize {
-    struct InferableTypeVarOccurrenceCounter<'db> {
-        inferable_typevars: InferableTypeVars<'db>,
-        occurrences: Cell<usize>,
-        recursion_path: RefCell<SmallVec<[Type<'db>; 8]>>,
+    struct InferableTypeVarOccurrences<'db> {
+        inferable: InferableTypeVars<'db>,
+        count: Cell<usize>,
+        stack: RefCell<SmallVec<[Type<'db>; 8]>>,
     }
 
-    impl<'db> TypeVisitor<'db> for InferableTypeVarOccurrenceCounter<'db> {
+    impl<'db> TypeVisitor<'db> for InferableTypeVarOccurrences<'db> {
         fn should_visit_lazy_type_attributes(&self) -> bool {
             false
         }
@@ -5937,8 +5847,8 @@ fn count_inferable_typevar_occurrences<'db>(
                 } else {
                     typevar.identity(db)
                 };
-                if identity.is_inferable(db, self.inferable_typevars) {
-                    self.occurrences.set(self.occurrences.get() + 1);
+                if identity.is_inferable(db, self.inferable) {
+                    self.count.set(self.count.get() + 1);
                 }
                 return;
             }
@@ -5946,23 +5856,23 @@ fn count_inferable_typevar_occurrences<'db>(
             let TypeKind::NonAtomic(non_atomic_type) = TypeKind::from(ty) else {
                 return;
             };
-            if self.recursion_path.borrow().contains(&ty) {
+            if self.stack.borrow().contains(&ty) {
                 return;
             }
-            self.recursion_path.borrow_mut().push(ty);
+
+            self.stack.borrow_mut().push(ty);
             walk_non_atomic_type(db, non_atomic_type, self);
-            let popped = self.recursion_path.borrow_mut().pop();
-            debug_assert_eq!(popped, Some(ty));
+            self.stack.borrow_mut().pop();
         }
     }
 
-    let counter = InferableTypeVarOccurrenceCounter {
-        inferable_typevars,
-        occurrences: Cell::new(0),
-        recursion_path: RefCell::default(),
+    let visitor = InferableTypeVarOccurrences {
+        inferable,
+        count: Cell::new(0),
+        stack: RefCell::default(),
     };
-    counter.visit_type(db, ty);
-    counter.occurrences.get()
+    visitor.visit_type(db, ty);
+    visitor.count.get()
 }
 
 /// Binding information for one of the overloads of a callable.
@@ -6045,9 +5955,9 @@ impl<'db> Binding<'db> {
             .get(argument_index + usize::from(binding.bound_type.is_some()))
     }
 
-    /// Returns the number of inferable type-variable occurrences in the parameter contexts matched
-    /// to the given source argument.
-    fn generic_argument_typevar_occurrences(
+    /// Returns the number of occurences of inferable type variables in the parameter matching the
+    /// provided argument index.
+    pub(crate) fn typevar_occurrences_for_argument(
         &self,
         db: &'db dyn Db,
         binding: &CallableBinding<'db>,
@@ -6056,13 +5966,13 @@ impl<'db> Binding<'db> {
         let Some(generic_context) = self.signature.generic_context else {
             return 0;
         };
-        let Some(argument_match) = self.matched_argument_for_call_argument(binding, argument_index)
+        let Some(argument) = self.matched_argument_for_call_argument(binding, argument_index)
         else {
             return 0;
         };
 
         let inferable_typevars = generic_context.inferable_typevars(db);
-        argument_match
+        argument
             .parameters
             .iter()
             .map(|parameter| {
@@ -6129,6 +6039,7 @@ impl<'db> Binding<'db> {
         arguments_types: &CallArguments<'_, 'db>,
         call_expression_tcx: TypeContext<'db>,
     ) -> Option<CallableType<'db>> {
+        // The specialization was already inferred from a previous round of fixpoint iteration.
         if let Some(Type::Callable(callable)) = self
             .specialization
             .and_then(|specialization| specialization.get(db, paramspec))
@@ -6204,10 +6115,12 @@ impl<'db> Binding<'db> {
             self.signature_type,
             callable.signatures(db).iter().cloned(),
         );
+
         let mut sub_arguments = arguments_types.select(&paramspec_argument_indices);
         // The current argument is being re-inferred from this projected parameter. Treating its
         // previous-round type as an input can reject the sub-call before its context is available.
         sub_arguments.clear_types(sub_argument_index);
+
         let mut specialized_bindings =
             Bindings::from(specialized_binding).match_parameters(db, &sub_arguments);
         let _ = specialized_bindings.check_types_impl(
@@ -6335,8 +6248,7 @@ impl<'db> Binding<'db> {
             ));
         }
 
-        // If this is a generic call, apply the argument-context specialization computed once for
-        // this overload snapshot. ParamSpec components still require per-argument handling below.
+        // If this is a generic call, specialize the parameter type using the computed constraints.
         if self.signature.generic_context.is_some() {
             let paramspec = if let Type::TypeVar(typevar) = original_parameter_type
                 && typevar.is_paramspec(db)
@@ -6375,7 +6287,6 @@ impl<'db> Binding<'db> {
                 ));
             }
 
-            debug_assert!(specialization.is_some());
             parameter_type = parameter_type.apply_optional_specialization(db, specialization);
         }
 
@@ -6387,9 +6298,9 @@ impl<'db> Binding<'db> {
 
     /// Computes the specialization used as type context for every argument of this overload.
     ///
-    /// This depends on the overload's current fixpoint specialization and the call expression's
-    /// declared return context, but not on an individual argument. Call argument inference can
-    /// therefore compute it once per overload snapshot instead of once per argument.
+    /// Parameter types are specialized based on the constraints from the declared type of the
+    /// call expression, as well as the argument types inferred from the previous round of
+    /// fixpoint iteration.
     pub(crate) fn argument_type_context_specialization(
         &self,
         db: &'db dyn Db,
@@ -6429,15 +6340,12 @@ impl<'db> Binding<'db> {
             }
         }
 
-        // Default specialize any type variables to a marker type, which will be ignored during
-        // argument inference, allowing the concrete subset of the parameter type to still affect
-        // argument inference.
-        let unspecialized = Type::Dynamic(DynamicType::UnspecializedTypeVar);
         Some(generic_context.specialize_recursive(
             db,
             generic_context.variables(db).map(|typevar| {
                 let identity = typevar.identity(db);
                 let return_type_solution = return_type_solutions.get(&identity).copied();
+
                 // This is the specialization inferred from the argument types during the previous
                 // fixpoint round. Preserve it when it is a compatible covariant refinement of the
                 // declared return type. For non-covariant occurrences, the declared return type
@@ -6471,7 +6379,10 @@ impl<'db> Binding<'db> {
                 Some(
                     return_type_solution
                         .or(inferred_solution)
-                        .unwrap_or(unspecialized),
+                        // Default specialize any type variables to a marker type, which will be ignored during
+                        // argument inference, allowing the concrete subset of the parameter type to still affect
+                        // argument inference.
+                        .unwrap_or(Type::Dynamic(DynamicType::UnspecializedTypeVar)),
                 )
             }),
         ))

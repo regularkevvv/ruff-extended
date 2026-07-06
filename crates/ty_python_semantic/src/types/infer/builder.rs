@@ -41,7 +41,7 @@ use crate::place::{
 use crate::reachability::{ReachabilityEvaluationCache, evaluate_reachability_with_cache};
 use crate::types::add_inferred_python_version_hint_to_diagnostic;
 use crate::types::attribute_write::assignment_attribute_members;
-use crate::types::call::bind::{ArgumentTypeContext, CallArgumentInferenceCandidates};
+use crate::types::call::bind::{ArgumentTypeContext, MatchingOverloadSet};
 use crate::types::call::{Binding, Bindings, CallArguments, CallError, CallErrorKind};
 use crate::types::callable::{CallableFunctionProvenance, CallableTypeKind};
 use crate::types::class::{ClassLiteral, CodeGeneratorKind, MethodDecorator};
@@ -5119,19 +5119,62 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
         // Return-context attempts all start from the same parameter matches, so their generic
         // argument indices are identical. Compute them once for the complete call inference.
-        let (has_generic_context, argument_indices, typevar_occurrences, candidates) =
-            bindings.generic_context_arguments(db, argument_types);
-        let requires_overload_selection = candidates.requires_overload_selection();
-        let generic_fixpoint = GenericCallFixpoint {
-            argument_indices,
-            typevar_occurrences,
-            candidates,
-        };
+        let mut generic_arguments = SmallVec::<[bool; 8]>::with_capacity(argument_types.len());
+        generic_arguments.resize(argument_types.len(), false);
+
+        let mut has_generic_context = false;
+        let mut max_typevar_occurrences = 0;
+        let mut candidate_overload_indices = MatchingOverloadSet::new();
+
+        bindings.visit_type_context_callables(&mut |binding| {
+            has_generic_context |= binding
+                .overloads()
+                .iter()
+                .any(|overload| overload.signature.generic_context.is_some());
+
+            let matching_overload_indices: SmallVec<[usize; 1]> = binding
+                .matching_overloads()
+                .map(|(index, _)| index)
+                .collect();
+
+            for &overload_index in &matching_overload_indices {
+                let overload = &binding.overloads()[overload_index];
+                if overload.signature.generic_context.is_none() {
+                    continue;
+                }
+                let mut overload_typevar_occurrences = 0;
+                for (argument_index, is_generic) in generic_arguments.iter_mut().enumerate() {
+                    if argument_types.is_variadic(argument_index) {
+                        continue;
+                    }
+
+                    let occurrences =
+                        overload.typevar_occurrences_for_argument(db, binding, argument_index);
+                    *is_generic |= occurrences > 0;
+                    overload_typevar_occurrences += occurrences;
+                }
+
+                // Overloads are alternative inference paths. Their dependency depths do not
+                // compose, so the fixpoint bound only needs the deepest matching overload.
+                max_typevar_occurrences = max_typevar_occurrences.max(overload_typevar_occurrences);
+            }
+            candidate_overload_indices.push(matching_overload_indices);
+        });
+
+        let argument_indices: SmallVec<_> = generic_arguments
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, is_generic)| is_generic.then_some(index))
+            .collect();
+
+        let requires_overload_selection = candidate_overload_indices
+            .iter()
+            .any(|indices| indices.len() > 1);
 
         // Keep one cache active across return-context narrowing attempts and the final full-context
         // attempt. If this call is itself part of multi-inference, reuse the surrounding cache so
         // deeply nested generic calls can share complete inference results.
-        let teardown_expression_cache = (!generic_fixpoint.argument_indices.is_empty()
+        let teardown_expression_cache = (!argument_indices.is_empty()
             || requires_overload_selection)
             && self.setup_expression_cache();
 
@@ -5161,17 +5204,13 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             }
 
             let narrowed_tcx = TypeContext::new(Some(narrowed_ty));
-            let inference_params = CallArgumentInferenceParams {
-                constraints: &constraints,
-                call_expression_tcx: narrowed_tcx,
-            };
 
             let mut speculative_bindings = bindings.clone();
             let mut speculative_builder = self.speculate();
             let mut speculative_argument_types = baseline_argument_types.clone();
 
             // Attempt to infer the argument types using the narrowed type context.
-            let checked_result = if generic_fixpoint.argument_indices.is_empty() {
+            let checked_result = if argument_indices.is_empty() {
                 if requires_overload_selection {
                     speculative_builder.infer_overloaded_argument_types(
                         ast_arguments.clone(),
@@ -5179,10 +5218,9 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                         &baseline_argument_types,
                         infer_argument_ty,
                         &mut speculative_bindings,
-                        OverloadedCallArgumentInferenceParams {
-                            shared: inference_params,
-                            candidates: &generic_fixpoint.candidates,
-                        },
+                        &constraints,
+                        narrowed_tcx,
+                        &candidate_overload_indices,
                     )
                 } else {
                     speculative_builder.infer_all_argument_types(
@@ -5191,8 +5229,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                         &baseline_argument_types,
                         infer_argument_ty,
                         &speculative_bindings,
-                        inference_params,
+                        &constraints,
+                        narrowed_tcx,
                     );
+
                     speculative_bindings.check_types_impl(
                         db,
                         &constraints,
@@ -5208,8 +5248,11 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     &mut speculative_argument_types,
                     infer_argument_ty,
                     &mut speculative_bindings,
-                    inference_params,
-                    &generic_fixpoint,
+                    &constraints,
+                    narrowed_tcx,
+                    &argument_indices,
+                    max_typevar_occurrences,
+                    &candidate_overload_indices,
                 )
             };
             if checked_result.is_err() {
@@ -5263,22 +5306,23 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         }
 
         *argument_types = baseline_argument_types.clone();
-        let inference_params = CallArgumentInferenceParams {
-            constraints: &constraints,
-            call_expression_tcx,
-        };
-        if !generic_fixpoint.argument_indices.is_empty() {
+        if !argument_indices.is_empty() {
             let result = self.infer_argument_types_to_fixpoint(
                 &ast_arguments,
                 argument_types,
                 infer_argument_ty,
                 bindings,
-                inference_params,
-                &generic_fixpoint,
+                &constraints,
+                call_expression_tcx,
+                &argument_indices,
+                max_typevar_occurrences,
+                &candidate_overload_indices,
             );
+
             if teardown_expression_cache {
                 self.teardown_expression_cache();
             }
+
             return result;
         }
 
@@ -5289,10 +5333,9 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 &baseline_argument_types,
                 infer_argument_ty,
                 bindings,
-                OverloadedCallArgumentInferenceParams {
-                    shared: inference_params,
-                    candidates: &generic_fixpoint.candidates,
-                },
+                &constraints,
+                call_expression_tcx,
+                &candidate_overload_indices,
             );
 
             if teardown_expression_cache {
@@ -5307,7 +5350,8 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             &baseline_argument_types,
             infer_argument_ty,
             bindings,
-            inference_params,
+            &constraints,
+            call_expression_tcx,
         );
 
         let result = bindings.check_types_impl(
@@ -5334,13 +5378,16 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         baseline_argument_types: &CallArguments<'call, 'db>,
         infer_argument_ty: &mut dyn FnMut(&mut Self, ArgExpr<'db, '_>) -> Type<'db>,
         bindings: &mut Bindings<'db>,
-        params: OverloadedCallArgumentInferenceParams<'_, 'db>,
+        constraints: &ConstraintSetBuilder<'db>,
+        call_expression_tcx: TypeContext<'db>,
+        candidates: &MatchingOverloadSet,
     ) -> Result<(), CallErrorKind> {
         let inference_contexts = self.collect_call_argument_inference_contexts(
             baseline_argument_types,
             bindings,
-            Some(params.candidates),
-            params.shared,
+            Some(candidates),
+            &constraints,
+            call_expression_tcx,
         );
         let mut speculative_builder = self.speculate();
         speculative_builder.infer_all_argument_types_with_contexts(
@@ -5353,9 +5400,9 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
         let result = bindings.check_types_impl(
             self.db(),
-            params.shared.constraints,
+            constraints,
             argument_types,
-            params.shared.call_expression_tcx,
+            call_expression_tcx,
             &self.dataclass_field_specifiers,
             true,
         );
@@ -5368,7 +5415,8 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             &checked_argument_types,
             infer_argument_ty,
             bindings,
-            params.shared,
+            constraints,
+            call_expression_tcx,
         );
         self.union_expected_types(&speculative_builder.expected_types);
 
@@ -5390,22 +5438,26 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         argument_types: &mut CallArguments<'_, 'db>,
         infer_argument_ty: &mut dyn FnMut(&mut Self, ArgExpr<'db, '_>) -> Type<'db>,
         bindings: &mut Bindings<'db>,
-        inference_params: CallArgumentInferenceParams<'_, 'db>,
-        generic_fixpoint: &GenericCallFixpoint,
+        constraints: &ConstraintSetBuilder<'db>,
+        call_expression_tcx: TypeContext<'db>,
+        argument_indices: &SmallVec<[usize; 4]>,
+        typevar_occurrences: usize,
+        candidates: &MatchingOverloadSet,
     ) -> Result<(), CallErrorKind> {
         let db = self.db();
         let baseline_argument_types = argument_types.clone();
 
-        debug_assert!(!generic_fixpoint.argument_indices.is_empty());
-        debug_assert!(generic_fixpoint.typevar_occurrences > 0);
-        let requires_overload_selection = generic_fixpoint.candidates.requires_overload_selection();
+        debug_assert!(!argument_indices.is_empty());
+        debug_assert!(typevar_occurrences > 0);
+        let requires_overload_selection = candidates.iter().any(|indices| indices.len() > 1);
 
         let mut context_argument_types = baseline_argument_types.clone();
         let mut round_inference_contexts = self.collect_call_argument_inference_contexts(
             &context_argument_types,
             bindings,
-            Some(&generic_fixpoint.candidates),
-            inference_params,
+            Some(&candidates),
+            constraints,
+            call_expression_tcx,
         );
         let mut next_argument_types;
         let mut next_bindings = bindings.clone();
@@ -5434,10 +5486,8 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 },
             );
 
-            let converged = next_argument_types.inferred_types_equal_at(
-                &context_argument_types,
-                &generic_fixpoint.argument_indices,
-            );
+            let converged = next_argument_types
+                .inferred_types_equal_at(&context_argument_types, &argument_indices);
             if converged {
                 if has_previous_checked_bindings {
                     break 'fixpoint (CheckedArgumentTypes::Context, round_builder);
@@ -5445,9 +5495,9 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 next_bindings = bindings.clone();
                 let _ = next_bindings.check_types_impl(
                     db,
-                    inference_params.constraints,
+                    constraints,
                     &next_argument_types,
-                    inference_params.call_expression_tcx,
+                    call_expression_tcx,
                     &self.dataclass_field_specifiers,
                     false,
                 );
@@ -5457,26 +5507,25 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             next_bindings = bindings.clone();
             let _ = next_bindings.check_types_impl(
                 db,
-                inference_params.constraints,
+                constraints,
                 &next_argument_types,
-                inference_params.call_expression_tcx,
+                call_expression_tcx,
                 &self.dataclass_field_specifiers,
                 false,
             );
 
-            if round == generic_fixpoint.typevar_occurrences {
+            if round == typevar_occurrences {
                 break 'fixpoint (CheckedArgumentTypes::Next, round_builder);
             }
 
             let next_inference_contexts = self.collect_call_argument_inference_contexts(
                 &next_argument_types,
                 &next_bindings,
-                Some(&generic_fixpoint.candidates),
-                inference_params,
+                Some(&candidates),
+                constraints,
+                call_expression_tcx,
             );
-            if round_inference_contexts
-                .equal_at(&next_inference_contexts, &generic_fixpoint.argument_indices)
-            {
+            if round_inference_contexts.equal_at(&next_inference_contexts, &argument_indices) {
                 break 'fixpoint (CheckedArgumentTypes::Next, round_builder);
             }
 
@@ -5490,7 +5539,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             CheckedArgumentTypes::Context => &context_argument_types,
             CheckedArgumentTypes::Next => &next_argument_types,
         };
-        let checked_result = next_bindings.finalize_argument_inference_check(
+        let checked_result = next_bindings.discard_downstream_constructors(
             db,
             checked_argument_types,
             &self.dataclass_field_specifiers,
@@ -5508,7 +5557,8 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 checked_argument_types,
                 infer_argument_ty,
                 &next_bindings,
-                inference_params,
+                constraints,
+                call_expression_tcx,
             );
             self.union_expected_types(&final_round_builder.expected_types);
         } else {
@@ -5531,8 +5581,9 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         &self,
         argument_types: &CallArguments<'_, 'db>,
         bindings: &'bindings Bindings<'db>,
-        candidates: Option<&'bindings CallArgumentInferenceCandidates>,
-        inference_params: CallArgumentInferenceParams<'_, 'db>,
+        candidates: Option<&'bindings MatchingOverloadSet>,
+        constraints: &ConstraintSetBuilder<'db>,
+        call_expression_tcx: TypeContext<'db>,
     ) -> CallArgumentInferenceContexts<'db> {
         fn add_overloads_from_binding<'a, 'db>(
             overloads_with_binding: &mut Vec<(&'a Binding<'db>, &'a CallableBinding<'db>)>,
@@ -5552,12 +5603,9 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         let db = self.db();
         let mut overloads_with_binding: Vec<(&Binding<'db>, &CallableBinding<'db>)> = Vec::new();
         if let Some(candidates) = candidates {
-            bindings.visit_call_argument_inference_candidates(
-                candidates,
-                &mut |overload, binding| {
-                    overloads_with_binding.push((overload, binding));
-                },
-            );
+            bindings.visit_matching_overload_set(candidates, &mut |overload, binding| {
+                overloads_with_binding.push((overload, binding));
+            });
         } else {
             bindings.visit_type_context_callables(&mut |binding| {
                 add_overloads_from_binding(&mut overloads_with_binding, binding);
@@ -5569,8 +5617,8 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             .map(|(overload, binding)| {
                 let specialization = overload.argument_type_context_specialization(
                     db,
-                    inference_params.constraints,
-                    inference_params.call_expression_tcx,
+                    constraints,
+                    call_expression_tcx,
                 );
                 (overload, binding, specialization)
             })
@@ -5596,11 +5644,11 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                                          specialization| {
                     overload.argument_type_context(
                         db,
-                        inference_params.constraints,
+                        constraints,
                         binding,
                         argument_types,
                         argument_index,
-                        inference_params.call_expression_tcx,
+                        call_expression_tcx,
                         specialization,
                     )
                 };
@@ -5819,14 +5867,17 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         context_argument_types: &CallArguments<'_, 'db>,
         infer_argument_ty: &mut dyn FnMut(&mut Self, ArgExpr<'db, '_>) -> Type<'db>,
         bindings: &'bindings Bindings<'db>,
-        inference_params: CallArgumentInferenceParams<'_, 'db>,
+        constraints: &ConstraintSetBuilder<'db>,
+        call_expression_tcx: TypeContext<'db>,
     ) {
         let inference_contexts = self.collect_call_argument_inference_contexts(
             context_argument_types,
             bindings,
             None,
-            inference_params,
+            constraints,
+            call_expression_tcx,
         );
+
         self.infer_all_argument_types_with_contexts(
             ast_arguments,
             arguments_types,
@@ -11432,32 +11483,6 @@ impl Drop for MultiInferenceGuard<'_, '_, '_> {
 /// An expression representing the function argument at the given index, along with its type
 /// context.
 type ArgExpr<'db, 'ast> = (usize, &'ast ast::Expr, TypeContext<'db>);
-
-/// Immutable parameters shared while inferring call arguments for one return-type context.
-#[derive(Clone, Copy)]
-struct CallArgumentInferenceParams<'a, 'db> {
-    constraints: &'a ConstraintSetBuilder<'db>,
-    call_expression_tcx: TypeContext<'db>,
-}
-
-#[derive(Clone, Copy)]
-struct OverloadedCallArgumentInferenceParams<'a, 'db> {
-    shared: CallArgumentInferenceParams<'a, 'db>,
-    candidates: &'a CallArgumentInferenceCandidates,
-}
-
-/// The source arguments whose contexts participate in generic-call fixpoint inference.
-///
-/// The maximum number of inferable type-variable occurrences in any matching overload provides the
-/// safety ceiling for synchronous rounds. Unlike the source-argument count, it accounts for
-/// dependency chains packaged inside a single tuple or other structural argument without composing
-/// alternative overload paths. The overload candidates are captured before type inference and
-/// remain fixed while their specializations evolve between rounds.
-struct GenericCallFixpoint {
-    argument_indices: SmallVec<[usize; 4]>,
-    typevar_occurrences: usize,
-    candidates: CallArgumentInferenceCandidates,
-}
 
 enum CheckedArgumentTypes {
     Context,

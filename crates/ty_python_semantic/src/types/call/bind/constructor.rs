@@ -142,8 +142,8 @@ impl<'db> ConstructorBinding<'db> {
         })
     }
 
-    /// Discards an inactive downstream constructor after a fixpoint round is committed.
-    pub(super) fn finalize_argument_inference_check(&mut self, db: &'db dyn Db) -> bool {
+    /// Discards an inactive downstream constructor.
+    pub(super) fn discard_downstream_constructor(&mut self, db: &'db dyn Db) -> bool {
         if self.should_check_downstream(db) {
             true
         } else {

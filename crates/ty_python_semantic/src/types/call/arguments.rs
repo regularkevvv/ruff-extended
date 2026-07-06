@@ -229,7 +229,7 @@ impl<'a, 'db> CallArguments<'a, 'db> {
         self.items.iter().map(|item| &item.types)
     }
 
-    /// Returns `true` if the inferred types at each given argument index are equal.
+    /// Returns `true` if the inferred types are equal for the given set of argument indices.
     pub(crate) fn inferred_types_equal_at(&self, other: &Self, argument_indices: &[usize]) -> bool {
         argument_indices.iter().all(|&index| {
             self.items.get(index).map(|item| &item.types)
