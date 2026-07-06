@@ -774,6 +774,12 @@ pub(super) fn walk_protocol_instance_type<'db, V: super::visitor::TypeVisitor<'d
             }
         }
     }
+
+    if let Protocol::Materialized(materialized) = protocol.inner
+        && let Some((_, Some(specialization))) = materialized.origin(db).static_class_literal(db)
+    {
+        walk_specialization(db, specialization, visitor);
+    }
 }
 
 fn interface_references_protocol_origin<'db>(

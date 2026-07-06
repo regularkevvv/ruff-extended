@@ -884,7 +884,7 @@ python-version = "3.12"
 ```
 
 ```py
-from typing import Any, ClassVar, Never, Protocol
+from typing import Any, ClassVar, Never, Protocol, Self
 from ty_extensions import Bottom, Top, is_equivalent_to, is_subtype_of, static_assert
 
 class MutableAny(Protocol):
@@ -961,6 +961,18 @@ class OriginOnlyInit(Protocol):
 def origin_only_init(plain: OriginOnlyInit, top: Top[OriginOnlyInit]) -> None:
     reveal_type(plain.__init__)  # revealed: bound method OriginOnlyInit.__init__(value: int) -> None
     reveal_type(top.__init__)  # revealed: bound method OriginOnlyInit.__init__(value: int) -> None
+
+class OriginGeneric[T](Protocol):
+    value: Any
+
+class SelfContainer:
+    member: Top[OriginGeneric[Self]]
+
+class SelfContainerChild(SelfContainer):
+    pass
+
+reveal_type(SelfContainer().member)  # revealed: OriginGeneric[SelfContainer]
+reveal_type(SelfContainerChild().member)  # revealed: OriginGeneric[SelfContainerChild]
 
 class GenericMutable[T](Protocol):
     value: T
