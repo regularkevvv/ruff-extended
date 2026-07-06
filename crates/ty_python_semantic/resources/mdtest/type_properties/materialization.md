@@ -941,6 +941,18 @@ def class_reads(top: Top[ClassVarAny], bottom: Bottom[ClassVarAny]) -> None:
     reveal_type(type(top).value)  # revealed: object
     reveal_type(type(bottom).value)  # revealed: Never
 
+class InstanceOnlyAny(Protocol):
+    value: Any
+
+def instance_only_class_writes(
+    plain: InstanceOnlyAny,
+    top: Top[InstanceOnlyAny],
+    bottom: Bottom[InstanceOnlyAny],
+) -> None:
+    type(plain).value = 1
+    type(top).value = 1
+    type(bottom).value = 1
+
 class OriginOnlyInit(Protocol):
     value: Any
 

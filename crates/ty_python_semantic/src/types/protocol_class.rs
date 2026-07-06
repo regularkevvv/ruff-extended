@@ -361,15 +361,18 @@ impl<'db> ProtocolInterface<'db> {
         receiver_ty: Type<'db>,
         name: &str,
     ) -> Option<(Option<Type<'db>>, TypeQualifiers)> {
-        self.member_by_name(db, name).map(|member| {
+        self.member_by_name(db, name).and_then(|member| {
             let capabilities = member.capabilities(db);
-            (
+            if capabilities.class.read.is_none() && capabilities.class.write.is_none() {
+                return None;
+            }
+            Some((
                 capabilities
                     .class
                     .write
                     .and_then(|write| write.bind_self(db, receiver_ty)),
                 member.qualifiers(),
-            )
+            ))
         })
     }
 
