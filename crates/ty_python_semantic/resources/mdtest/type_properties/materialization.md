@@ -902,8 +902,16 @@ class BottomMutableAny(Protocol):
     @value.setter
     def value(self, value: object) -> None: ...
 
+class WritablePropertyAny(Protocol):
+    @property
+    def value(self) -> Any: ...
+    @value.setter
+    def value(self, value: Any) -> None: ...
+
 static_assert(is_equivalent_to(Top[MutableAny], TopMutableAny))
 static_assert(is_equivalent_to(Bottom[MutableAny], BottomMutableAny))
+static_assert(is_equivalent_to(Top[WritablePropertyAny], TopMutableAny))
+static_assert(is_equivalent_to(Bottom[WritablePropertyAny], BottomMutableAny))
 static_assert(is_subtype_of(Bottom[MutableAny], Top[MutableAny]))
 static_assert(not is_subtype_of(Top[MutableAny], Bottom[MutableAny]))
 

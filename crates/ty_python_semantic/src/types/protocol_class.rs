@@ -606,6 +606,24 @@ impl<'db> ProtocolMemberType<'db> {
             .apply_type_mapping_impl(db, type_mapping, tcx, visitor);
         self.with_ty(ty)
     }
+
+    /// Maps a writable capability contravariantly.
+    ///
+    /// A stored property setter is still a callable, so its value parameter already introduces
+    /// the contravariance required by a write. Other writable capabilities store the exposed
+    /// value type directly and therefore require an explicit polarity flip.
+    fn apply_write_type_mapping_impl<'a>(
+        self,
+        db: &'db dyn Db,
+        type_mapping: &TypeMapping<'a, 'db>,
+        tcx: TypeContext<'db>,
+        visitor: &ApplyTypeMappingVisitor<'db>,
+    ) -> Self {
+        match self {
+            Self::PropertySetter(_) => self.apply_type_mapping_impl(db, type_mapping, tcx, visitor),
+            _ => self.apply_type_mapping_impl(db, &type_mapping.flip(), tcx, visitor),
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, salsa::Update, get_size2::GetSize)]
@@ -681,7 +699,7 @@ impl<'db> ProtocolMemberAccess<'db> {
                 .map(|read| read.apply_type_mapping_impl(db, type_mapping, tcx, visitor)),
             write: self
                 .write
-                .map(|write| write.apply_type_mapping_impl(db, &type_mapping.flip(), tcx, visitor)),
+                .map(|write| write.apply_write_type_mapping_impl(db, type_mapping, tcx, visitor)),
         }
     }
 }
