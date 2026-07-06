@@ -5371,6 +5371,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
     /// Infers arguments for every overload candidate, checks them, then commits only the selected
     /// overload contexts and diagnostics.
+    #[expect(clippy::too_many_arguments)]
     fn infer_overloaded_argument_types<'call>(
         &mut self,
         ast_arguments: ArgumentsIter<'_>,
@@ -5386,7 +5387,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             baseline_argument_types,
             bindings,
             Some(candidates),
-            &constraints,
+            constraints,
             call_expression_tcx,
         );
         let mut speculative_builder = self.speculate();
@@ -5432,6 +5433,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     ///
     /// After convergence, one final pass uses the selected overloads and their stable
     /// specializations to commit expression inference and diagnostics.
+    #[expect(clippy::too_many_arguments)]
     fn infer_argument_types_to_fixpoint(
         &mut self,
         ast_arguments: &ArgumentsIter<'_>,
@@ -5455,7 +5457,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         let mut round_inference_contexts = self.collect_call_argument_inference_contexts(
             &context_argument_types,
             bindings,
-            Some(&candidates),
+            Some(candidates),
             constraints,
             call_expression_tcx,
         );
@@ -5487,7 +5489,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             );
 
             let converged = next_argument_types
-                .inferred_types_equal_at(&context_argument_types, &argument_indices);
+                .inferred_types_equal_at(&context_argument_types, argument_indices);
             if converged {
                 if has_previous_checked_bindings {
                     break 'fixpoint (CheckedArgumentTypes::Context, round_builder);
@@ -5521,11 +5523,11 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             let next_inference_contexts = self.collect_call_argument_inference_contexts(
                 &next_argument_types,
                 &next_bindings,
-                Some(&candidates),
+                Some(candidates),
                 constraints,
                 call_expression_tcx,
             );
-            if round_inference_contexts.equal_at(&next_inference_contexts, &argument_indices) {
+            if round_inference_contexts.equal_at(&next_inference_contexts, argument_indices) {
                 break 'fixpoint (CheckedArgumentTypes::Next, round_builder);
             }
 
@@ -5630,15 +5632,6 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     return None;
                 }
 
-                let mut seen_binder_types = FxHashSet::default();
-                let paramspec_binder_types = overloads_with_binding
-                    .iter()
-                    .filter_map(|(overload, binding, _)| {
-                        overload.paramspec_binder_parameter_type(db, binding, argument_index)
-                    })
-                    .filter(|declared_type| seen_binder_types.insert(*declared_type))
-                    .collect();
-
                 let parameter_context = |overload: &'bindings Binding<'db>,
                                          binding: &CallableBinding<'db>,
                                          specialization| {
@@ -5672,53 +5665,11 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     )
                 };
 
-                Some(ArgumentInferenceContexts {
-                    paramspec_binder_types,
-                    parameter_contexts,
-                })
+                Some(parameter_contexts)
             })
             .collect();
 
         CallArgumentInferenceContexts { arguments }
-    }
-
-    /// Infers call arguments that bind a `ParamSpec` before inferring the remaining arguments.
-    ///
-    /// A forwarded `P.args` or `P.kwargs` argument can precede the callable argument that binds
-    /// `P` in source order. Inferring binder arguments first makes the resulting parameter context
-    /// independent of that order.
-    fn infer_paramspec_binder_argument_types(
-        &mut self,
-        ast_arguments: ArgumentsIter<'_>,
-        arguments_types: &mut CallArguments<'_, 'db>,
-        inference_contexts: &CallArgumentInferenceContexts<'db>,
-        infer_argument_ty: &mut dyn FnMut(&mut Self, ArgExpr<'db, '_>) -> Type<'db>,
-    ) {
-        // A keyword argument matched to `**P.kwargs` can appear before the keyword argument that
-        // binds `P`, e.g. `wrapper(TagSet=[...], func=put_object)`. Seed those binder argument
-        // types first so the normal ParamSpec context path below is not source-order dependent.
-        for (argument_index, ast_argument) in ast_arguments.enumerate() {
-            if ast_argument.is_variadic() {
-                continue;
-            }
-            let ast_argument = ast_argument.value();
-
-            let Some(argument_contexts) = &inference_contexts.arguments[argument_index] else {
-                continue;
-            };
-            for &declared_type in &argument_contexts.paramspec_binder_types {
-                let mut speculative_builder = self.speculate_without_diagnostics();
-                let inferred_ty = infer_argument_ty(
-                    &mut speculative_builder,
-                    (
-                        argument_index,
-                        ast_argument,
-                        TypeContext::new(Some(declared_type)),
-                    ),
-                );
-                arguments_types.insert_type(argument_index, declared_type, inferred_ty);
-            }
-        }
     }
 
     /// Infers one non-variadic call argument under its applicable parameter contexts.
@@ -5731,12 +5682,12 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         &mut self,
         argument_index: usize,
         ast_argument: &ast::Expr,
-        argument_contexts: &ArgumentInferenceContexts<'db>,
+        argument_contexts: &ParameterInferenceContexts<'db>,
         arguments_types: &mut CallArguments<'_, 'db>,
         infer_argument_ty: &mut dyn FnMut(&mut Self, ArgExpr<'db, '_>) -> Type<'db>,
         mode: CallArgumentInferenceMode,
     ) {
-        match &argument_contexts.parameter_contexts {
+        match argument_contexts {
             ParameterInferenceContexts::Unique(parameter_context) => {
                 if let Some(parameter_context) = *parameter_context {
                     let inferred_ty = infer_argument_ty(
@@ -5857,9 +5808,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
     /// Infers every non-variadic call argument for all applicable bindings.
     ///
-    /// This first collects an immutable snapshot of all call-argument contexts, seeds `ParamSpec`
-    /// binder arguments, and then infers each argument from that snapshot. An argument expression
-    /// may be inferred multiple times when overloads provide distinct contexts.
+    /// This first collects an immutable snapshot of all call-argument contexts and then infers each
+    /// argument from that snapshot. An argument expression may be inferred multiple times when
+    /// overloads provide distinct contexts.
+    #[expect(clippy::too_many_arguments)]
     fn infer_all_argument_types<'bindings>(
         &mut self,
         ast_arguments: ArgumentsIter<'_>,
@@ -5899,13 +5851,6 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         infer_argument_ty: &mut dyn FnMut(&mut Self, ArgExpr<'db, '_>) -> Type<'db>,
         mode: CallArgumentInferenceMode,
     ) {
-        self.infer_paramspec_binder_argument_types(
-            ast_arguments.clone(),
-            arguments_types,
-            inference_contexts,
-            infer_argument_ty,
-        );
-
         for (argument_index, ast_argument) in ast_arguments.enumerate() {
             // Splatted arguments are inferred before parameter matching to
             // determine their length.
@@ -5916,14 +5861,14 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             }
             let ast_argument = ast_argument.value();
 
-            let Some(argument_contexts) = &inference_contexts.arguments[argument_index] else {
+            let Some(parameter_contexts) = &inference_contexts.arguments[argument_index] else {
                 continue;
             };
 
             self.infer_call_argument_type(
                 argument_index,
                 ast_argument,
-                argument_contexts,
+                parameter_contexts,
                 arguments_types,
                 infer_argument_ty,
                 mode,
@@ -11504,7 +11449,7 @@ enum CallArgumentInferenceMode {
 /// iteration has reached a state where another round would use the same contexts.
 #[derive(Debug, PartialEq, Eq)]
 struct CallArgumentInferenceContexts<'db> {
-    arguments: Vec<Option<ArgumentInferenceContexts<'db>>>,
+    arguments: Vec<Option<ParameterInferenceContexts<'db>>>,
 }
 
 impl CallArgumentInferenceContexts<'_> {
@@ -11513,15 +11458,6 @@ impl CallArgumentInferenceContexts<'_> {
             .iter()
             .all(|&index| self.arguments.get(index) == other.arguments.get(index))
     }
-}
-
-/// All inference contexts for one non-variadic source argument of a call.
-#[derive(Debug, PartialEq, Eq)]
-struct ArgumentInferenceContexts<'db> {
-    /// Declared callable types used to infer an argument that binds a `ParamSpec`.
-    paramspec_binder_types: Vec<Type<'db>>,
-    /// Parameter contexts contributed by the applicable call bindings and overloads.
-    parameter_contexts: ParameterInferenceContexts<'db>,
 }
 
 /// The parameter contexts under which one call argument is inferred.

@@ -5955,7 +5955,7 @@ impl<'db> Binding<'db> {
             .get(argument_index + usize::from(binding.bound_type.is_some()))
     }
 
-    /// Returns the number of occurences of inferable type variables in the parameter matching the
+    /// Returns the number of occurrences of inferable type variables in the parameter matching the
     /// provided argument index.
     pub(crate) fn typevar_occurrences_for_argument(
         &self,
@@ -6017,67 +6017,6 @@ impl<'db> Binding<'db> {
                     .then_some(matched_argument_index - bound_argument_offset)
             })
             .collect()
-    }
-
-    /// Infers the callable value that a `ParamSpec` maps to for this overload.
-    ///
-    /// The wrapper's current arguments are rechecked against this single overload so that a binder
-    /// argument such as `func: Callable[P, R]` can specialize `P` before forwarded arguments are
-    /// inferred.
-    ///
-    /// ```py
-    /// def put_tags(tags: list[Tag], /) -> None: ...
-    /// def wrapper[**P, R](func: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs) -> R: ...
-    /// wrapper(put_tags, [{"Key": "k", "Value": "v"}])  # infers `P` from `put_tags`
-    /// ```
-    fn inferred_paramspec_callable(
-        &self,
-        db: &'db dyn Db,
-        constraints: &ConstraintSetBuilder<'db>,
-        binding: &CallableBinding<'db>,
-        paramspec: BoundTypeVarInstance<'db>,
-        arguments_types: &CallArguments<'_, 'db>,
-        call_expression_tcx: TypeContext<'db>,
-    ) -> Option<CallableType<'db>> {
-        // The specialization was already inferred from a previous round of fixpoint iteration.
-        if let Some(Type::Callable(callable)) = self
-            .specialization
-            .and_then(|specialization| specialization.get(db, paramspec))
-            && callable.kind(db) == CallableTypeKind::ParamSpecValue
-        {
-            return Some(callable);
-        }
-
-        let mut specialized_binding =
-            CallableBinding::from_overloads(self.signature_type, [self.signature.clone()]);
-        if let Some(bound_type) = binding.bound_type {
-            specialized_binding = specialized_binding.with_bound_type(bound_type);
-        }
-
-        // Reuse the normal binding checker to infer `P` from the arguments that have already
-        // been inferred. This avoids duplicating specialization logic here; the current
-        // `P.args`/`P.kwargs` argument is still uninferred, so it only contributes `Unknown`.
-        let mut specialized_bindings =
-            Bindings::from(specialized_binding).match_parameters(db, arguments_types);
-        let _ = specialized_bindings.check_types_impl(
-            db,
-            constraints,
-            arguments_types,
-            call_expression_tcx,
-            &[],
-            true,
-        );
-
-        let Type::Callable(callable) = specialized_bindings
-            .single_element()
-            .and_then(|binding| binding.matching_overloads().exactly_one().ok())
-            .and_then(|(_, overload)| overload.specialization())
-            .and_then(|specialization| specialization.get(db, paramspec))?
-        else {
-            return None;
-        };
-
-        (callable.kind(db) == CallableTypeKind::ParamSpecValue).then_some(callable)
     }
 
     /// Returns the specialized wrapped-call parameter type for a forwarded argument.
@@ -6149,14 +6088,6 @@ impl<'db> Binding<'db> {
         let parameter_type = specialized_overload.signature.parameters()
             [specialized_parameter.index]
             .annotated_type();
-        // A context like `list[Unknown]` or `list[T@g]` is worse than no context here:
-        // it can erase the concrete literal type that should later specialize the wrapped
-        // callable. Check the parameter before applying the sub-call specialization so an
-        // earlier forwarded argument cannot turn `list[T@g]` into apparently-safe `list[int]`.
-        if parameter_type.has_dynamic(db) || parameter_type.has_typevar_or_typevar_instance(db) {
-            return None;
-        }
-
         let parameter_type = specialized_overload
             .specialization()
             .map_or(parameter_type, |specialization| {
@@ -6167,46 +6098,11 @@ impl<'db> Binding<'db> {
             .then_some(parameter_type)
     }
 
-    /// Returns the wrapper parameter type that can bind the `ParamSpec` used by forwarded arguments.
+    /// Returns the type context to use for bidirectional inference of a source call argument,
+    /// using the provided argument specialization.
     ///
-    /// This is used before normal source-order inference so a keyword forwarded through `P.kwargs`
-    /// can still use a later binder argument such as `func=put_object`.
-    ///
-    /// ```py
-    /// def put_object(*, TagSet: list[Tag]) -> None: ...
-    /// def wrapper[**P, R](func: Callable[P, R], **kwargs: P.kwargs) -> R: ...
-    /// wrapper(TagSet=[{"Key": "k", "Value": "v"}], func=put_object)
-    /// ```
-    pub(crate) fn paramspec_binder_parameter_type(
-        &self,
-        db: &'db dyn Db,
-        binding: &CallableBinding<'db>,
-        argument_index: usize,
-    ) -> Option<Type<'db>> {
-        let (prefix, paramspec) = self.signature.parameters().as_paramspec_with_prefix()?;
-        let [parameter] = self
-            .matched_argument_for_call_argument(binding, argument_index)?
-            .parameters
-            .as_slice()
-        else {
-            return None;
-        };
-
-        if parameter.index >= prefix.len() {
-            return None;
-        }
-
-        let parameter_type = self.signature.parameters()[parameter.index].annotated_type();
-        parameter_type
-            .references_typevar(db, paramspec.typevar(db).identity(db))
-            .then_some(parameter_type)
-    }
-
-    /// Returns the type context to use for bidirectional inference of a source call argument.
-    ///
-    /// This covers the normal parameter annotation path, generic return-context specialization, and
-    /// the `ParamSpec` forwarding path where a wrapper argument receives context from the wrapped
-    /// callable's parameter.
+    /// This method also handles `ParamSpec` forwarding, where a wrapper argument receives context
+    /// from the wrapped callable's parameter.
     ///
     /// ```py
     /// def put_tags(tags: list[Tag], /) -> None: ...
@@ -6232,6 +6128,18 @@ impl<'db> Binding<'db> {
         let parameter = &self.signature.parameters()[parameter.index];
         let mut parameter_type = parameter.annotated_type();
         let original_parameter_type = parameter_type;
+        let paramspec_callable = |paramspec| {
+            let Type::Callable(callable) = self
+                .specialization
+                .and_then(|specialization| specialization.get(db, paramspec))
+                .or_else(|| {
+                    specialization.and_then(|specialization| specialization.get(db, paramspec))
+                })?
+            else {
+                return None;
+            };
+            (callable.kind(db) == CallableTypeKind::ParamSpecValue).then_some(callable)
+        };
 
         // If the parameter is a single non-ParamSpec type variable with an upper bound,
         // e.g., `typing.Self`, use the upper bound as type context. ParamSpec components
@@ -6259,17 +6167,10 @@ impl<'db> Binding<'db> {
                 None
             };
 
-            // A `P.args`/`P.kwargs` parameter has a useful context only after another
-            // argument, usually a `Callable[P, R]`, specializes `P`.
+            // A `P.args`/`P.kwargs` parameter receives context from the `ParamSpec` specialization
+            // checked during the previous fixpoint round.
             if let Some(paramspec) = paramspec
-                && let Some(callable) = self.inferred_paramspec_callable(
-                    db,
-                    constraints,
-                    binding,
-                    paramspec,
-                    arguments_types,
-                    call_expression_tcx,
-                )
+                && let Some(callable) = paramspec_callable(paramspec)
                 && let Some(specialized_parameter_type) =
                     self.paramspec_argument_context(ParamSpecArgumentContext {
                         db,
@@ -6340,6 +6241,13 @@ impl<'db> Binding<'db> {
             }
         }
 
+        // Note that specializing parameter types for type context using this specialization is
+        // not strictly correct, as it requires eagerly choosing a solution for a given type variable,
+        // which may conflate upper and lower bounds when applied transitively to parameter types
+        // in which the type variable may be in invariant or contravariant position. A more correct
+        // approach would be to propagate constraint sets as type context, making bidirectional
+        // inference constraint-set-aware, or to infer constraint sets directly for argument types,
+        // and avoid the need to construct type context before call inference has completed.
         Some(generic_context.specialize_recursive(
             db,
             generic_context.variables(db).map(|typevar| {
@@ -6376,12 +6284,11 @@ impl<'db> Binding<'db> {
                 // without the declared type after finding incompatible arguments. For example,
                 // `result: list[int] = f("a")` retries with `T = str`, but the return context still
                 // supplies `T = int` for the diagnostic pass.
+                // Unresolved variables use a marker that argument inference ignores, allowing the
+                // concrete part of the parameter type to remain useful.
                 Some(
                     return_type_solution
                         .or(inferred_solution)
-                        // Default specialize any type variables to a marker type, which will be ignored during
-                        // argument inference, allowing the concrete subset of the parameter type to still affect
-                        // argument inference.
                         .unwrap_or(Type::Dynamic(DynamicType::UnspecializedTypeVar)),
                 )
             }),
