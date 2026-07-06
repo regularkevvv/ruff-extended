@@ -3,15 +3,16 @@ use std::fmt::Formatter;
 
 use ruff_db::diagnostic::LintName;
 use ruff_db::display::FormatterJoinExtension;
+use ruff_db::parsed::{VersionedFile, parsed_module};
 use ruff_db::source::source_text;
 use ruff_diagnostics::{Edit, Fix};
 use ruff_python_ast::token::TokenKind;
 use ruff_text_size::{Ranged, TextLen, TextRange, TextSize};
 use smallvec::SmallVec;
 
+use crate::Db;
 use crate::lint::LintId;
 use crate::suppression::{SuppressionKind, SuppressionTarget, Suppressions, suppressions};
-use crate::{AnalysisFile, Db};
 
 /// Creates fixes to suppress all violations in `ids_with_range`.
 ///
@@ -20,19 +21,19 @@ use crate::{AnalysisFile, Db};
 /// suppression with possibly multiple codes instead of adding multiple suppression comments.
 pub fn suppress_all(
     db: &dyn Db,
-    analysis_file: AnalysisFile<'_>,
+    versioned_file: VersionedFile<'_>,
     ids_with_range: &[(LintName, TextRange)],
 ) -> Vec<SuppressFix> {
-    let file = analysis_file.file(db);
-    let suppressions = suppressions(db, analysis_file);
+    let file = versioned_file.file(db);
+    let suppressions = suppressions(db, versioned_file);
     let source = source_text(db, file);
-    let parsed = analysis_file.parsed(db).load(db);
+    let parsed = parsed_module(db, versioned_file).load(db);
     let tokens = parsed.tokens();
 
     // Compute the full suppression ranges for each diagnostic.
     let mut ids_full_range: Vec<_> = ids_with_range
         .iter()
-        .map(|&(id, range)| (id, suppression_range(db, analysis_file, range)))
+        .map(|&(id, range)| (id, suppression_range(db, versioned_file, range)))
         .collect();
 
     // Sort the suppression ranges by their start position and length (end position).
@@ -161,14 +162,14 @@ pub struct SuppressFix {
 /// Creates a fix to suppress a single lint.
 pub fn suppress_single(
     db: &dyn Db,
-    analysis_file: AnalysisFile<'_>,
+    versioned_file: VersionedFile<'_>,
     id: LintId,
     range: TextRange,
 ) -> Fix {
-    let suppression_range = suppression_range(db, analysis_file, range);
+    let suppression_range = suppression_range(db, versioned_file, range);
 
-    let file = analysis_file.file(db);
-    let suppressions = suppressions(db, analysis_file);
+    let file = versioned_file.file(db);
+    let suppressions = suppressions(db, versioned_file);
     let source = source_text(db, file);
     let codes = &[id.name()];
 
@@ -199,10 +200,14 @@ pub fn suppress_single(
 /// * If `range` is within a single-line interpolated expression, then the start and end are extended to the start and end of the enclosing interpolated string.
 /// * If there's a line continuation, then the suppression range is extended to include the following line too.
 /// * If there's a multiline string, then the suppression range is extended to cover the starting and ending line of the multiline string.
-fn suppression_range(db: &dyn Db, analysis_file: AnalysisFile<'_>, range: TextRange) -> TextRange {
+fn suppression_range(
+    db: &dyn Db,
+    versioned_file: VersionedFile<'_>,
+    range: TextRange,
+) -> TextRange {
     // Always insert a new suppression at the end of the range to avoid having to deal with multiline strings
     // etc. Also make sure to not pass a sub-token range to `Tokens::after`.
-    let parsed = analysis_file.parsed(db).load(db);
+    let parsed = parsed_module(db, versioned_file).load(db);
     let line_start = line_start(parsed.tokens(), range.start());
 
     let after_token_range = match parsed.tokens().at_offset(range.end()) {

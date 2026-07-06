@@ -24,7 +24,7 @@ use ty_python_core::{definition::Definition, scope::ScopeId};
 /// generic context in the synthesized `__new__` signature.
 pub(super) fn synthesize_namedtuple_class_member<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     name: &str,
     instance_ty: Type<'db>,
     fields: impl Iterator<Item = NamedTupleField<'db>>,
@@ -202,7 +202,7 @@ impl<'db> DynamicNamedTupleLiteral<'db> {
         }
     }
 
-    fn program(self, db: &'db dyn Db) -> crate::Program<'db> {
+    fn program(self, db: &'db dyn Db) -> crate::Program {
         self.scope(db).program(db)
     }
 
@@ -607,7 +607,7 @@ impl<'db> NamedTupleSpec<'db> {
     pub(crate) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {

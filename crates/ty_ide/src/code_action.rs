@@ -42,7 +42,13 @@ pub fn code_actions(
     // Suggest just suppressing the lint (always a valid option, but never ideal)
     actions.push(QuickFix {
         title: format!("Ignore '{}' for this line", lint_id.name()),
-        edits: suppress_single(db, analysis_file, lint_id, diagnostic_range).into_edits(),
+        edits: suppress_single(
+            db,
+            analysis_file.versioned_file(db),
+            lint_id,
+            diagnostic_range,
+        )
+        .into_edits(),
         preferred: false,
     });
 

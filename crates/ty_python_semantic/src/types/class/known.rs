@@ -13,8 +13,6 @@ use crate::{
         known_instance::DeprecatedInstance,
     },
 };
-#[cfg(test)]
-use ruff_db::files::File;
 use ruff_python_ast as ast;
 use ruff_python_ast::PythonVersion;
 use rustc_hash::FxHashSet;
@@ -837,7 +835,7 @@ impl KnownClass {
         }
     }
 
-    pub(crate) fn name(self, db: &dyn Db, program: Program<'_>) -> &'static str {
+    pub(crate) fn name(self, db: &dyn Db, program: Program) -> &'static str {
         self.name_for_version(program.python_version(db))
     }
 
@@ -958,14 +956,10 @@ impl KnownClass {
         }
     }
 
-    pub(crate) fn display<'db>(
-        self,
-        db: &'db dyn Db,
-        program: Program<'db>,
-    ) -> impl std::fmt::Display + 'db {
+    pub(crate) fn display(self, db: &dyn Db, program: Program) -> impl std::fmt::Display + '_ {
         struct KnownClassDisplay<'db> {
             db: &'db dyn Db,
-            program: Program<'db>,
+            program: Program,
             class: KnownClass,
         }
 
@@ -998,7 +992,7 @@ impl KnownClass {
     ///
     /// If the class cannot be found, a debug-level log message will be emitted stating this.
     #[track_caller]
-    pub fn to_instance<'db>(self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    pub fn to_instance(self, db: &dyn Db, program: Program) -> Type<'_> {
         debug_assert_ne!(
             self,
             KnownClass::Tuple,
@@ -1013,11 +1007,7 @@ impl KnownClass {
     /// Similar to [`KnownClass::to_instance`], but returns the Unknown-specialization where each type
     /// parameter is specialized to `Unknown`.
     #[track_caller]
-    pub(crate) fn to_instance_unknown<'db>(
-        self,
-        db: &'db dyn Db,
-        program: Program<'db>,
-    ) -> Type<'db> {
+    pub(crate) fn to_instance_unknown(self, db: &dyn Db, program: Program) -> Type<'_> {
         debug_assert_ne!(
             self,
             KnownClass::Tuple,
@@ -1036,7 +1026,7 @@ impl KnownClass {
     pub(crate) fn to_specialized_class_type<'t, 'db, T>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         specialization: T,
     ) -> Option<ClassType<'db>>
     where
@@ -1095,7 +1085,7 @@ impl KnownClass {
     pub(crate) fn to_specialized_instance<'t, 'db, T>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         specialization: T,
     ) -> Type<'db>
     where
@@ -1117,11 +1107,11 @@ impl KnownClass {
     ///
     /// Return an error if the symbol cannot be found in the expected module, if the symbol is not a
     /// class definition, or if the symbol is possibly unbound.
-    fn try_to_class_literal_without_logging<'db>(
+    fn try_to_class_literal_without_logging(
         self,
-        db: &'db dyn Db,
-        program: Program<'db>,
-    ) -> Result<StaticClassLiteral<'db>, KnownClassLookupError<'db>> {
+        db: &dyn Db,
+        program: Program,
+    ) -> Result<StaticClassLiteral<'_>, KnownClassLookupError<'_>> {
         let python_version = program.python_version(db);
         let module = self.canonical_module_for_version(python_version);
         let third_party = module.is_third_party();
@@ -1155,14 +1145,14 @@ impl KnownClass {
     /// class literal.
     ///
     /// If the class cannot be found, a debug-level log message will be emitted stating this.
-    pub(crate) fn try_to_class_literal<'db>(
+    pub(crate) fn try_to_class_literal(
         self,
-        db: &'db dyn Db,
-        program: Program<'db>,
-    ) -> Option<StaticClassLiteral<'db>> {
+        db: &dyn Db,
+        program: Program,
+    ) -> Option<StaticClassLiteral<'_>> {
         #[salsa::interned(heap_size=ruff_memory_usage::heap_size)]
         struct KnownClassArgument<'db> {
-            program: Program<'db>,
+            program: Program,
             class: KnownClass,
         }
 
@@ -1210,7 +1200,7 @@ impl KnownClass {
     /// class literal.
     ///
     /// If the class cannot be found, a debug-level log message will be emitted stating this.
-    pub(crate) fn to_class_literal<'db>(self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    pub(crate) fn to_class_literal(self, db: &dyn Db, program: Program) -> Type<'_> {
         self.try_to_class_literal(db, program)
             .map(|class| Type::ClassLiteral(ClassLiteral::Static(class)))
             .unwrap_or_else(Type::unknown)
@@ -1220,7 +1210,7 @@ impl KnownClass {
     /// class and all possible subclasses of the class.
     ///
     /// If the class cannot be found, a debug-level log message will be emitted stating this.
-    pub fn to_subclass_of<'db>(self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    pub fn to_subclass_of(self, db: &dyn Db, program: Program) -> Type<'_> {
         self.to_class_literal(db, program)
             .to_class_type(db)
             .map(|class| SubclassOfType::from(db, program, class))
@@ -1230,7 +1220,7 @@ impl KnownClass {
     pub(crate) fn to_specialized_subclass_of<'db>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         specialization: &[Type<'db>],
     ) -> Type<'db> {
         self.to_specialized_class_type(db, program, specialization)
@@ -1243,7 +1233,7 @@ impl KnownClass {
     pub(crate) fn is_subclass_of<'db>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         other: ClassType<'db>,
     ) -> bool {
         self.try_to_class_literal_without_logging(db, program)
@@ -1253,7 +1243,7 @@ impl KnownClass {
     pub(crate) fn when_subclass_of<'db, 'c>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         other: ClassType<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
     ) -> ConstraintSet<'db, 'c> {
@@ -1261,7 +1251,7 @@ impl KnownClass {
     }
 
     /// Return the module in which we should look up the definition for this class
-    pub(super) fn canonical_module(self, db: &dyn Db, program: Program<'_>) -> KnownModule {
+    pub(super) fn canonical_module(self, db: &dyn Db, program: Program) -> KnownModule {
         self.canonical_module_for_version(program.python_version(db))
     }
 
@@ -1600,16 +1590,6 @@ impl KnownClass {
             | Self::FunctoolsPartial
             | Self::PydanticBaseModel => false,
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn try_from_file_and_name(
-        db: &dyn Db,
-        program: Program<'_>,
-        file: File,
-        class_name: &str,
-    ) -> Option<Self> {
-        Self::try_from_analysis_file_and_name(db, AnalysisFile::new(db, program, file), class_name)
     }
 
     pub(crate) fn try_from_analysis_file_and_name(
@@ -2012,13 +1992,13 @@ impl<'db> KnownClassLookupError<'db> {
     fn display(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         class: KnownClass,
         python_version: PythonVersion,
     ) -> impl std::fmt::Display + 'db {
         struct ErrorDisplay<'db> {
             db: &'db dyn Db,
-            program: Program<'db>,
+            program: Program,
             class: KnownClass,
             python_version: PythonVersion,
             error: KnownClassLookupError<'db>,
@@ -2104,10 +2084,9 @@ mod tests {
             .unwrap();
 
             assert_eq!(
-                KnownClass::try_from_file_and_name(
+                KnownClass::try_from_analysis_file_and_name(
                     &db,
-                    program,
-                    class_module.file(&db).unwrap(),
+                    AnalysisFile::new(&db, program, class_module.file(&db).unwrap()),
                     class_name
                 ),
                 Some(class),

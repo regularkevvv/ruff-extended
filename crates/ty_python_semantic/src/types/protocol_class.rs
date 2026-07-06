@@ -89,7 +89,7 @@ impl<'db> ProtocolClass<'db> {
     pub(super) fn has_member_declaration(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         name: &str,
     ) -> bool {
         self.iter_mro(db)
@@ -153,24 +153,27 @@ impl<'db> ProtocolClass<'db> {
     pub(super) fn apply_type_mapping_impl<'a>(
         self,
         db: &'db dyn Db,
+        program: crate::Program,
         type_mapping: &TypeMapping<'a, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
     ) -> Self {
         Self(
             self.0
-                .apply_type_mapping_impl(db, type_mapping, tcx, visitor),
+                .apply_type_mapping_impl(db, program, type_mapping, tcx, visitor),
         )
     }
 
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
         Some(Self(
-            self.0.recursive_type_normalized_impl(db, div, nested)?,
+            self.0
+                .recursive_type_normalized_impl(db, program, div, nested)?,
         ))
     }
 }
@@ -200,7 +203,7 @@ impl get_size2::GetSize for ProtocolInterface<'_> {}
 
 pub(super) fn walk_protocol_interface<'db, V: super::visitor::TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     interface: ProtocolInterface<'db>,
     visitor: &V,
 ) {
@@ -273,7 +276,7 @@ impl<'db> ProtocolInterface<'db> {
     fn cycle_normalized(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         previous: Self,
         cycle: &salsa::Cycle,
     ) -> Self {
@@ -344,7 +347,7 @@ impl<'db> ProtocolInterface<'db> {
     pub(super) fn instance_member(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         name: &str,
     ) -> PlaceAndQualifiers<'db> {
         self.member_by_name(db, name)
@@ -359,7 +362,7 @@ impl<'db> ProtocolInterface<'db> {
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -380,7 +383,7 @@ impl<'db> ProtocolInterface<'db> {
     pub(super) fn apply_type_mapping_impl<'a>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'a, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
@@ -402,7 +405,7 @@ impl<'db> ProtocolInterface<'db> {
     pub(super) fn find_legacy_typevars_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         binding_context: Option<Definition<'db>>,
         typevars: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
         visitor: &FindLegacyTypeVarsVisitor<'db>,
@@ -415,11 +418,11 @@ impl<'db> ProtocolInterface<'db> {
     pub(super) fn display(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> impl std::fmt::Display {
         struct ProtocolInterfaceDisplay<'db> {
             db: &'db dyn Db,
-            program: crate::Program<'db>,
+            program: crate::Program,
             interface: ProtocolInterface<'db>,
         }
 
@@ -452,7 +455,7 @@ impl<'db> VarianceInferable<'db> for ProtocolInterface<'db> {
     fn variance_of(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         typevar: BoundTypeVarInstance<'db>,
     ) -> TypeVarVariance {
         self.members(db)
@@ -473,7 +476,7 @@ impl<'db> ProtocolMemberData<'db> {
     fn cycle_normalized(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         previous: &Self,
         cycle: &salsa::Cycle,
     ) -> Self {
@@ -489,7 +492,7 @@ impl<'db> ProtocolMemberData<'db> {
     fn recursive_type_normalized_impl(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -517,7 +520,7 @@ impl<'db> ProtocolMemberData<'db> {
     fn apply_type_mapping_impl<'a>(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'a, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
@@ -534,7 +537,7 @@ impl<'db> ProtocolMemberData<'db> {
     fn find_legacy_typevars_impl(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         binding_context: Option<Definition<'db>>,
         typevars: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
         visitor: &FindLegacyTypeVarsVisitor<'db>,
@@ -543,10 +546,10 @@ impl<'db> ProtocolMemberData<'db> {
             .find_legacy_typevars_impl(db, program, binding_context, typevars, visitor);
     }
 
-    fn display(&self, db: &'db dyn Db, program: crate::Program<'db>) -> impl std::fmt::Display {
+    fn display(&self, db: &'db dyn Db, program: crate::Program) -> impl std::fmt::Display {
         struct ProtocolMemberDataDisplay<'db> {
             db: &'db dyn Db,
-            program: crate::Program<'db>,
+            program: crate::Program,
             data: ProtocolMemberKind<'db>,
             qualifiers: TypeQualifiers,
         }
@@ -609,7 +612,7 @@ impl<'db> ProtocolMemberKind<'db> {
     fn cycle_normalized(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         previous: &Self,
         cycle: &salsa::Cycle,
     ) -> Self {
@@ -663,7 +666,7 @@ impl<'db> ProtocolMemberKind<'db> {
     fn apply_type_mapping_impl<'a>(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'a, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
@@ -688,7 +691,7 @@ impl<'db> ProtocolMemberKind<'db> {
     fn find_legacy_typevars_impl(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         binding_context: Option<Definition<'db>>,
         typevars: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
         visitor: &FindLegacyTypeVarsVisitor<'db>,
@@ -718,7 +721,7 @@ pub(super) struct ProtocolMember<'a, 'db> {
 
 fn walk_protocol_member<'db, V: super::visitor::TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     member: &ProtocolMember<'_, 'db>,
     visitor: &V,
 ) {
@@ -1217,7 +1220,7 @@ fn proto_interface_cycle_recover<'db>(
 /// of the `__call__` method will be function-like but a `Callable` type is not.
 fn protocol_bind_self<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     callable: CallableType<'db>,
     self_type: Option<Type<'db>>,
 ) -> CallableType<'db> {
@@ -1235,7 +1238,7 @@ fn protocol_bind_self<'db>(
 /// `Never` could satisfy otherwise-incompatible signatures, so it must not establish disjointness.
 fn non_never_callable_return_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     callable: CallableType<'db>,
 ) -> Option<Type<'db>> {
     callable
@@ -1255,7 +1258,7 @@ fn non_never_callable_return_type<'db>(
 /// comparisons and generic protocol solving when the actual type is plainly missing a member.
 pub(super) fn has_all_protocol_members_defined<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     ty: Type<'db>,
     protocol: ProtocolInstanceType<'db>,
 ) -> bool {

@@ -640,7 +640,7 @@ fn type_hint_is_excessive_for_expr(expr: &Expr) -> bool {
 
 fn should_skip_import(
     db: &dyn Db,
-    program: Program<'_>,
+    program: Program,
     module: ty_module_resolver::Module,
     ty: Type,
 ) -> bool {

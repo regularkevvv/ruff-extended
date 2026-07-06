@@ -270,7 +270,7 @@ impl<'a, 'db> CallArguments<'a, 'db> {
     pub(crate) fn functools_partial_bound_arguments(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Option<(Self, bool)> {
         let bound_call_arguments = self.start_from(1);
         let mut can_synthesize_signature = true;
@@ -311,7 +311,7 @@ impl<'a, 'db> CallArguments<'a, 'db> {
     pub(super) fn expand(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> impl Iterator<Item = Expansion<'a, 'db>> + '_ {
         /// Represents the state of the expansion process.
         enum State<'a, 'db> {
@@ -413,11 +413,11 @@ impl<'a, 'db> CallArguments<'a, 'db> {
         })
     }
 
-    pub(super) fn display(&self, db: &'db dyn Db, program: crate::Program<'db>) -> impl Display {
+    pub(super) fn display(&self, db: &'db dyn Db, program: crate::Program) -> impl Display {
         struct DisplayCallArgumentTypes<'a, 'db> {
             types: &'a CallArgumentTypes<'db>,
             db: &'db dyn Db,
-            program: crate::Program<'db>,
+            program: crate::Program,
         }
 
         impl std::fmt::Display for DisplayCallArgumentTypes<'_, '_> {
@@ -438,7 +438,7 @@ impl<'a, 'db> CallArguments<'a, 'db> {
         struct DisplayCallArguments<'a, 'db> {
             call_arguments: &'a CallArguments<'a, 'db>,
             db: &'db dyn Db,
-            program: crate::Program<'db>,
+            program: crate::Program,
         }
 
         impl std::fmt::Display for DisplayCallArguments<'_, '_> {
@@ -558,7 +558,7 @@ impl<'a, 'db> FromIterator<(Argument<'a>, Option<Type<'db>>)> for CallArguments<
 /// In other words, it returns `true` if [`expand_type`] returns [`Some`] for the given type.
 pub(crate) fn is_expandable_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     ty: Type<'db>,
 ) -> bool {
     match ty {

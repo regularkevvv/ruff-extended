@@ -141,7 +141,7 @@ impl CompletionCapabilities {
 /// A collection of completions built up from various sources.
 struct Completions<'db> {
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     context: CollectionContext<'db>,
     items: BinaryHeap<CompletionRanker<'db>>,
     /// The query used to match against candidate completions.
@@ -167,7 +167,7 @@ impl<'db> Completions<'db> {
     /// add completions that match it.
     fn new(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         context: CollectionContext<'db>,
         query: UserQuery,
     ) -> Completions<'db> {
@@ -423,7 +423,7 @@ impl<'db> CompletionBuilder<'db> {
 
     fn from_semantic_completion(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         semantic: SemanticCompletion<'db>,
     ) -> CompletionBuilder<'db> {
         let definition = semantic
@@ -467,7 +467,7 @@ impl<'db> CompletionBuilder<'db> {
     fn build(
         mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         ctx: &CollectionContext<'db>,
         query: &UserQuery,
     ) -> Completion<'db> {
@@ -594,7 +594,7 @@ impl<'db> CompletionBuilder<'db> {
 
     /// Returns true when this completion refers to the
     /// `NotImplemented` builtin.
-    fn is_notimplemented(&self, db: &dyn Db, program: Program<'_>) -> bool {
+    fn is_notimplemented(&self, db: &dyn Db, program: Program) -> bool {
         let Some(ty) = self.ty else { return false };
         ty.is_notimplemented(db, program)
     }
@@ -1307,7 +1307,7 @@ impl<'m> ContextCursor<'m> {
     ///
     /// The return value is always `None` if the cursor is not
     /// inside a `raise` or `except` context.
-    fn exception_ty<'db>(&self, db: &'db dyn Db, program: Program<'db>) -> Option<Type<'db>> {
+    fn exception_ty<'db>(&self, db: &'db dyn Db, program: Program) -> Option<Type<'db>> {
         let base_exception_ty = KnownClass::BaseException.to_subclass_of(db, program);
         let base_exception_instance = KnownClass::BaseException.to_instance(db, program);
         let raise_ty =
@@ -1602,7 +1602,7 @@ impl<'db> CollectionContext<'db> {
     ///
     /// This only returns `true` when it is definitively known that the
     /// completion would never be valid for this context.
-    fn exclude(&self, db: &dyn Db, program: Program<'_>, builder: &CompletionBuilder<'_>) -> bool {
+    fn exclude(&self, db: &dyn Db, program: Program, builder: &CompletionBuilder<'_>) -> bool {
         if self.is_raising_exception && builder.is_notimplemented(db, program) {
             return true;
         }
@@ -2123,7 +2123,7 @@ pub(crate) fn unresolved_fixes(
 /// and general language keywords (like `raise`).
 fn add_keyword_completions<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     completions: &mut Completions<'db>,
 ) {
     let keyword_values = [
@@ -10899,7 +10899,7 @@ raise <CURSOR>
 
     struct CompletionTest<'db> {
         db: &'db ty_project::TestDb,
-        program: Program<'db>,
+        program: Program,
         /// The original completions returned before any additional
         /// test-specific filtering. We keep this around in order to
         /// slightly modify the test snapshot generated. This

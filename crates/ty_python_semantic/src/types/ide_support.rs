@@ -604,7 +604,7 @@ pub struct CallSignatureParameter<'db> {
 impl<'db> CallSignatureDetails<'db> {
     fn from_binding(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         binding: &crate::types::call::Binding<'db>,
     ) -> Self {
         let argument_to_parameter_mapping = binding.argument_matches().to_vec();
@@ -1117,11 +1117,7 @@ pub fn definitions_for_unary_op<'db>(
 /// Promotes types in `self` positions.
 ///
 /// This is so that we show e.g. `int.__add__` instead of `Literal[4].__add__`.
-fn promote_for_self<'db>(
-    db: &'db dyn Db,
-    program: crate::Program<'db>,
-    ty: Type<'db>,
-) -> Type<'db> {
+fn promote_for_self<'db>(db: &'db dyn Db, program: crate::Program, ty: Type<'db>) -> Type<'db> {
     match ty {
         Type::BoundMethod(method) => Type::BoundMethod(method.map_self_type(db, |self_ty| {
             self_ty
@@ -1723,7 +1719,7 @@ mod resolve_definition {
     #[tracing::instrument(skip_all)]
     pub fn map_stub_definition<'db>(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         def: &ResolvedDefinition<'db>,
         cached_vendored_typeshed: Option<&SystemPath>,
     ) -> Option<Vec<ResolvedDefinition<'db>>> {
@@ -1801,7 +1797,8 @@ mod resolve_definition {
         let stub_ref;
         match *def {
             ResolvedDefinition::Definition(definition) => {
-                stub_parsed = AnalysisFile::new(db, program, stub_file).parsed(db);
+                let stub_analysis_file = definition.analysis_file(db);
+                stub_parsed = stub_analysis_file.parsed(db);
                 stub_ref = stub_parsed.load(db);
 
                 // Get the leaf of the path (the definition itself)
@@ -1813,7 +1810,7 @@ mod resolve_definition {
                 path.push(leaf);
 
                 // Get the ancestors of the path (all the definitions we're nested under)
-                let index = semantic_index(db, AnalysisFile::new(db, program, stub_file));
+                let index = semantic_index(db, stub_analysis_file);
                 for (_scope_id, scope) in index.ancestor_scopes(definition.file_scope(db)) {
                     let node = scope.node();
                     let component = definition_path_component_for_node(&stub_ref, node)
@@ -2000,7 +1997,7 @@ pub struct TypeHierarchyClass {
 /// subsequent requests for supertypes or subtypes.
 pub fn type_hierarchy_prepare(
     db: &dyn Db,
-    program: crate::Program<'_>,
+    program: crate::Program,
     ty: Type<'_>,
 ) -> Option<TypeHierarchyClass> {
     let class_literal = extract_class_literal(db, program, ty)?;
@@ -2015,7 +2012,7 @@ pub fn type_hierarchy_prepare(
 /// This includes `object` when the given class has no direct base classes.
 pub fn type_hierarchy_supertypes<'db>(
     db: &'db dyn Db,
-    program: ty_python_core::program::Program<'db>,
+    program: ty_python_core::program::Program,
     ty: Type<'db>,
 ) -> Vec<TypeHierarchyClass> {
     let Some(class_literal) = extract_class_literal(db, program, ty) else {
@@ -2055,7 +2052,7 @@ pub fn type_hierarchy_supertypes<'db>(
 /// projects.
 pub fn type_hierarchy_subtypes<'db>(
     db: &'db dyn Db,
-    program: ty_python_core::program::Program<'db>,
+    program: ty_python_core::program::Program,
     ty: Type<'db>,
 ) -> Vec<TypeHierarchyClass> {
     let Some(target_class) = extract_class_literal(db, program, ty) else {
@@ -2138,7 +2135,7 @@ pub fn type_hierarchy_subtypes<'db>(
 /// Extract a `ClassLiteral` from a `Type`, handling various type forms.
 fn extract_class_literal<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     ty: Type<'db>,
 ) -> Option<ClassLiteral<'db>> {
     match ty {

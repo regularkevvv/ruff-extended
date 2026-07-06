@@ -19,7 +19,7 @@ pub trait Db: PythonCoreDb {
 
     fn analysis_settings(&self, file: File) -> &AnalysisSettings;
 
-    fn python_version_source(&self, _program: Program<'_>) -> PythonVersionSource {
+    fn python_version_source(&self, _program: Program) -> PythonVersionSource {
         PythonVersionSource::Default
     }
 
@@ -62,15 +62,22 @@ pub(crate) mod tests {
         events: Events,
         rule_selection: Arc<RuleSelection>,
         analysis_settings: Arc<AnalysisSettings>,
-        program_settings: ProgramSettings,
-        inference_settings: ty_python_core::environment::InferenceSettings,
+        program: Option<Program>,
     }
 
     impl TestDb {
         pub(crate) fn new() -> Self {
             let events = Events::default();
             let vendored = ty_vendored::file_system().clone();
-            Self {
+            let settings = ProgramSettings {
+                python_version: PythonVersionWithSource {
+                    version: PythonVersion::default(),
+                    source: PythonVersionSource::default(),
+                },
+                python_platform: PythonPlatform::default(),
+                search_paths: SearchPaths::empty(&vendored),
+            };
+            let mut db = Self {
                 storage: salsa::Storage::new(Some(Box::new({
                     let events = events.clone();
                     move |event| {
@@ -80,29 +87,32 @@ pub(crate) mod tests {
                     }
                 }))),
                 system: TestSystem::default(),
-                program_settings: ProgramSettings {
-                    python_version: PythonVersionWithSource {
-                        version: PythonVersion::default(),
-                        source: PythonVersionSource::default(),
-                    },
-                    python_platform: PythonPlatform::default(),
-                    search_paths: SearchPaths::empty(&vendored),
-                },
-                inference_settings: ty_python_core::environment::InferenceSettings::default(),
+                program: None,
                 vendored,
                 events,
                 files: Files::default(),
                 rule_selection: Arc::new(RuleSelection::from_registry(default_lint_registry())),
                 analysis_settings: AnalysisSettings::default().into(),
-            }
+            };
+            db.program = Some(Program::create(&db, &settings));
+            db
         }
 
-        pub(crate) fn program(&self) -> Program<'_> {
-            Program::from_settings(self, &self.program_settings, &self.inference_settings)
+        pub(crate) fn program(&self) -> Program {
+            self.program.expect("test database has a program")
         }
 
         pub(crate) fn set_python_version(&mut self, version: PythonVersion) {
-            self.program_settings.python_version.version = version;
+            let program = self.program();
+            let settings = ProgramSettings {
+                python_version: PythonVersionWithSource {
+                    version,
+                    source: program.python_version_source(self).clone(),
+                },
+                python_platform: program.python_platform(self).clone(),
+                search_paths: program.search_paths(self).clone(),
+            };
+            program.update_from_settings(self, settings);
         }
 
         /// Takes the salsa events.
@@ -146,7 +156,7 @@ pub(crate) mod tests {
         }
 
         fn python_version(&self) -> PythonVersion {
-            self.program_settings.python_version.version
+            self.program().python_version(self)
         }
     }
 
@@ -180,8 +190,8 @@ pub(crate) mod tests {
             &self.analysis_settings
         }
 
-        fn python_version_source(&self, _program: Program<'_>) -> PythonVersionSource {
-            self.program_settings.python_version.source.clone()
+        fn python_version_source(&self, program: Program) -> PythonVersionSource {
+            program.python_version_source(self).clone()
         }
 
         fn verbose(&self) -> bool {
@@ -245,7 +255,7 @@ pub(crate) mod tests {
             db.write_files(self.files)
                 .context("Failed to write test files")?;
 
-            db.program_settings = ProgramSettings {
+            let settings = ProgramSettings {
                 python_version: PythonVersionWithSource {
                     version: self.python_version,
                     source: PythonVersionSource::default(),
@@ -255,6 +265,7 @@ pub(crate) mod tests {
                     .to_search_paths(db.system(), db.vendored(), &FallibleStrategy)
                     .context("Invalid search path settings")?,
             };
+            db.program().update_from_settings(&mut db, settings);
 
             Ok(db)
         }

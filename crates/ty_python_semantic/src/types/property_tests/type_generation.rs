@@ -291,7 +291,7 @@ fn divergent(db: &TestDb, id_bits: u64, materialization: Option<MaterializationK
     }
 }
 
-fn newtype_instance<'db>(db: &'db TestDb, program: Program<'db>, name: &str) -> Type<'db> {
+fn newtype_instance<'db>(db: &'db TestDb, program: Program, name: &str) -> Type<'db> {
     let file = system_path_to_file(db, super::setup::PROPERTY_TEST_MODULE_PATH)
         .expect("Property-test module must exist");
     let Place::Defined(DefinedPlace { ty, .. }) =

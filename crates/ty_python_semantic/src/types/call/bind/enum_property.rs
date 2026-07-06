@@ -11,7 +11,7 @@ impl<'db> Bindings<'db> {
     pub(super) fn evaluate_enum_property_calls(
         &mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         call_arguments: &CallArguments<'_, 'db>,
     ) {
         let property_instance =

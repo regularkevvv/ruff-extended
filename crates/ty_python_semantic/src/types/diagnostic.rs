@@ -1432,7 +1432,7 @@ fn report_invalid_assignment_with_message<'db, 'ctx: 'db, T: Ranged>(
 
 pub(super) fn note_numbers_module_not_supported<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     diag: &mut Diagnostic,
     target_ty: Type<'db>,
     value_ty: Type<'db>,
@@ -1500,7 +1500,7 @@ fn covariant_supertype_hint<'db>(
 /// that fails due to invariance.
 pub(super) fn add_invariant_generic_hints<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     diag: &mut Diagnostic,
     expected_ty: Type<'db>,
     provided_ty: Type<'db>,
@@ -2837,7 +2837,7 @@ pub(crate) fn report_undeclared_protocol_member(
     /// We want to avoid suggesting an annotation for e.g. `x = None`,
     /// because the user almost certainly doesn't want to write `x: None = None`.
     /// We also want to avoid suggesting invalid syntax such as `x: <class 'int'> = int`.
-    fn should_give_hint<'db>(db: &'db dyn Db, program: crate::Program<'db>, ty: Type<'db>) -> bool {
+    fn should_give_hint<'db>(db: &'db dyn Db, program: crate::Program, ty: Type<'db>) -> bool {
         let class = match ty {
             Type::ProtocolInstance(ProtocolInstanceType {
                 inner: Protocol::FromClass(_),
@@ -4562,7 +4562,7 @@ pub(super) fn report_invalid_total_ordering_call(
 /// The function returns `true` if a hint was added, `false` otherwise.
 pub(super) fn hint_if_stdlib_submodule_exists_on_other_versions(
     db: &dyn Db,
-    program: Program<'_>,
+    program: Program,
     diagnostic: &mut Diagnostic,
     full_submodule_name: &ModuleName,
     parent_module: Module,

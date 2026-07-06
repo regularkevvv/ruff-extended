@@ -32,13 +32,20 @@ pub(crate) struct Db {
     system: MdtestSystem,
     vendored: VendoredFileSystem,
     settings: Option<Settings>,
-    program_settings: ProgramSettings,
-    inference_settings: InferenceSettings,
+    program: Option<Program>,
 }
 
 impl Db {
     pub(crate) fn setup() -> Self {
         let vendored = ty_vendored::file_system().clone();
+        let program_settings = ProgramSettings {
+            python_version: PythonVersionWithSource {
+                version: ruff_python_ast::PythonVersion::default(),
+                source: PythonVersionSource::default(),
+            },
+            python_platform: PythonPlatform::default(),
+            search_paths: SearchPaths::empty(&vendored),
+        };
         let mut db = Self {
             system: MdtestSystem::in_memory(),
             storage: salsa::Storage::new(Some(Box::new({
@@ -46,20 +53,13 @@ impl Db {
                     tracing::trace!("event: {:?}", event);
                 }
             }))),
-            program_settings: ProgramSettings {
-                python_version: PythonVersionWithSource {
-                    version: ruff_python_ast::PythonVersion::default(),
-                    source: PythonVersionSource::default(),
-                },
-                python_platform: PythonPlatform::default(),
-                search_paths: SearchPaths::empty(&vendored),
-            },
-            inference_settings: InferenceSettings::default(),
+            program: None,
             vendored,
             files: Files::default(),
             settings: None,
         };
 
+        db.program = Some(Program::create(&db, &program_settings));
         db.settings = Some(Settings::new(&db));
         db
     }
@@ -68,12 +68,12 @@ impl Db {
         self.settings.unwrap()
     }
 
-    pub(crate) fn program(&self) -> Program<'_> {
-        Program::from_settings(self, &self.program_settings, &self.inference_settings)
+    pub(crate) fn program(&self) -> Program {
+        self.program.expect("mdtest database has a program")
     }
 
     pub(crate) fn set_program_settings(&mut self, settings: ProgramSettings) {
-        self.program_settings = settings;
+        self.program().update_from_settings(self, settings);
     }
 
     pub(crate) fn set_verbosity(&mut self, verbose: bool) {
@@ -134,7 +134,8 @@ impl Db {
         if settings.analysis(self) != &analysis {
             settings.set_analysis(self).to(analysis);
         }
-        self.inference_settings = inference_settings;
+        self.program()
+            .update_inference_settings(self, inference_settings);
     }
 
     pub(crate) fn update_mdtest_rule_selection(
@@ -182,7 +183,7 @@ impl SourceDb for Db {
     }
 
     fn python_version(&self) -> ruff_python_ast::PythonVersion {
-        self.program_settings.python_version.version
+        self.program().python_version(self)
     }
 }
 
@@ -226,8 +227,8 @@ impl SemanticDb for Db {
         self.settings().analysis(self)
     }
 
-    fn python_version_source(&self, _program: Program<'_>) -> PythonVersionSource {
-        self.program_settings.python_version.source.clone()
+    fn python_version_source(&self, program: Program) -> PythonVersionSource {
+        program.python_version_source(self).clone()
     }
 
     fn dyn_clone(&self) -> Box<dyn SemanticDb> {

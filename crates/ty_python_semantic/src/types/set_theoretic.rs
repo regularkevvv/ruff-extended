@@ -27,7 +27,7 @@ pub struct UnionType<'db> {
 
 pub(crate) fn walk_union<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     union: UnionType<'db>,
     visitor: &V,
 ) {
@@ -46,7 +46,7 @@ impl<'db> UnionType<'db> {
     ///
     /// For performance reasons, consider using [`UnionType::from_two_elements`] if
     /// the union is constructed from exactly two elements.
-    pub fn from_elements<I, T>(db: &'db dyn Db, program: Program<'db>, elements: I) -> Type<'db>
+    pub fn from_elements<I, T>(db: &'db dyn Db, program: Program, elements: I) -> Type<'db>
     where
         I: IntoIterator<Item = T>,
         T: Into<Type<'db>>,
@@ -79,7 +79,7 @@ impl<'db> UnionType<'db> {
     )]
     pub fn from_two_elements(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         a: Type<'db>,
         b: Type<'db>,
     ) -> Type<'db> {
@@ -89,7 +89,7 @@ impl<'db> UnionType<'db> {
     /// Create a union from a list of elements without unpacking type aliases.
     pub(crate) fn from_elements_leave_aliases<I, T>(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         elements: I,
     ) -> Type<'db>
     where
@@ -115,14 +115,14 @@ impl<'db> UnionType<'db> {
     /// Recursively expands aliases that expose top-level union elements.
     ///
     /// Aliases nested inside non-union elements remain part of those elements.
-    pub(crate) fn expand_aliases(self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    pub(crate) fn expand_aliases(self, db: &'db dyn Db, program: Program) -> Type<'db> {
         // Rebuild the union so that `UnionBuilder` simplifies any redundancies exposed.
         Self::from_elements(db, program, self.elements(db).iter().copied())
     }
 
     pub(crate) fn from_elements_cycle_recovery<I, T>(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         elements: I,
     ) -> Type<'db>
     where
@@ -145,7 +145,7 @@ impl<'db> UnionType<'db> {
     /// the function short-circuits and returns `None`.
     pub(crate) fn try_from_elements<I, T>(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         elements: I,
     ) -> Option<Type<'db>>
     where
@@ -164,7 +164,7 @@ impl<'db> UnionType<'db> {
     pub(crate) fn map(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         mut transform_fn: impl FnMut(&Type<'db>) -> Type<'db>,
     ) -> Type<'db> {
         let Ok(mapped) = self.try_map_impl(db, program, |element| {
@@ -177,7 +177,7 @@ impl<'db> UnionType<'db> {
     pub(crate) fn map_leave_aliases(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         mut transform_fn: impl FnMut(&Type<'db>) -> Type<'db>,
     ) -> Type<'db> {
         let elements = self.elements(db);
@@ -212,7 +212,7 @@ impl<'db> UnionType<'db> {
     pub(crate) fn try_map(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         mut transform_fn: impl FnMut(&Type<'db>) -> Option<Type<'db>>,
     ) -> Option<Type<'db>> {
         self.try_map_impl(db, program, |element| transform_fn(element).ok_or(()))
@@ -222,7 +222,7 @@ impl<'db> UnionType<'db> {
     fn try_map_impl<E>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         mut transform_fn: impl FnMut(&Type<'db>) -> Result<Type<'db>, E>,
     ) -> Result<Type<'db>, E> {
         let elements = self.elements(db);
@@ -247,7 +247,7 @@ impl<'db> UnionType<'db> {
         Ok(Type::Union(self))
     }
 
-    pub(crate) fn to_instance(self, db: &'db dyn Db, program: Program<'db>) -> Option<Type<'db>> {
+    pub(crate) fn to_instance(self, db: &'db dyn Db, program: Program) -> Option<Type<'db>> {
         self.try_map(db, program, |element| element.to_instance(db, program))
     }
 
@@ -258,7 +258,7 @@ impl<'db> UnionType<'db> {
     pub(crate) fn common_literal_supertype(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
     ) -> Option<Type<'db>> {
         // Do not use `Type::literal_fallback_instance` here: it also falls back from function
         // literals to `FunctionType`. Since `FunctionType.__call__` is gradual, it can be
@@ -293,7 +293,7 @@ impl<'db> UnionType<'db> {
     pub(crate) fn map_with_boundness(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         mut transform_fn: impl FnMut(&Type<'db>) -> Place<'db>,
     ) -> Place<'db> {
         let mut builder = UnionBuilder::new(db, program);
@@ -349,7 +349,7 @@ impl<'db> UnionType<'db> {
     pub(crate) fn map_with_boundness_and_qualifiers(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         mut transform_fn: impl FnMut(&Type<'db>) -> PlaceAndQualifiers<'db>,
     ) -> PlaceAndQualifiers<'db> {
         let mut builder = UnionBuilder::new(db, program);
@@ -412,7 +412,7 @@ impl<'db> UnionType<'db> {
     pub(crate) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Type<'db>> {
@@ -479,7 +479,7 @@ pub(crate) enum KnownUnion {
 }
 
 impl KnownUnion {
-    pub(crate) fn to_type<'db>(self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    pub(crate) fn to_type(self, db: &dyn Db, program: Program) -> Type<'_> {
         match self {
             KnownUnion::Float => UnionType::from_two_elements(
                 db,
@@ -735,7 +735,7 @@ const MAX_INTERSECTION_DNF_TERMS: usize = 4;
 
 pub(crate) fn walk_intersection_type<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     intersection: IntersectionType<'db>,
     visitor: &V,
 ) {
@@ -753,7 +753,7 @@ impl<'db> IntersectionType<'db> {
     pub(crate) fn enum_complement(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Option<EnumComplement<'db>> {
         EnumComplement::from_intersection_parts(db, program, self.positive(db), self.negative(db))
     }
@@ -762,7 +762,7 @@ impl<'db> IntersectionType<'db> {
     pub fn finite_alternatives(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Option<Vec<Type<'db>>> {
         self.enum_complement(db, program)
             .map(|complement| complement.remaining_literal_types(db))
@@ -772,7 +772,7 @@ impl<'db> IntersectionType<'db> {
     pub(crate) fn finite_alternative_union(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Option<Type<'db>> {
         Some(
             self.enum_complement(db, program)?
@@ -784,7 +784,7 @@ impl<'db> IntersectionType<'db> {
     pub(crate) fn finite_alternatives_for_display(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         max_literals: usize,
     ) -> Option<Vec<Type<'db>>> {
         self.enum_complement(db, program)?
@@ -795,11 +795,7 @@ impl<'db> IntersectionType<'db> {
     ///
     /// For performance reasons, consider using [`IntersectionType::from_two_elements`] if
     /// the intersection is constructed from exactly two elements.
-    pub(crate) fn from_elements<I, T>(
-        db: &'db dyn Db,
-        program: Program<'db>,
-        elements: I,
-    ) -> Type<'db>
+    pub(crate) fn from_elements<I, T>(db: &'db dyn Db, program: Program, elements: I) -> Type<'db>
     where
         I: IntoIterator<Item = T>,
         T: Into<Type<'db>>,
@@ -834,7 +830,7 @@ impl<'db> IntersectionType<'db> {
     /// Like [`from_elements`][Self::from_elements], a successful result is exact.
     pub(crate) fn bounded_from_elements<I, T>(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         elements: I,
     ) -> Option<Type<'db>>
     where
@@ -914,7 +910,7 @@ impl<'db> IntersectionType<'db> {
     )]
     pub(crate) fn from_two_elements(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         a: Type<'db>,
         b: Type<'db>,
     ) -> Type<'db> {
@@ -926,7 +922,7 @@ impl<'db> IntersectionType<'db> {
     pub(crate) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -976,7 +972,7 @@ impl<'db> IntersectionType<'db> {
     pub(crate) fn map_positive(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         mut transform_fn: impl FnMut(&Type<'db>) -> Type<'db>,
     ) -> Type<'db> {
         let mut builder = IntersectionBuilder::new(db, program);
@@ -992,7 +988,7 @@ impl<'db> IntersectionType<'db> {
     pub(crate) fn map_with_boundness(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         mut transform_fn: impl FnMut(&Type<'db>) -> Place<'db>,
     ) -> Place<'db> {
         let mut builder = IntersectionBuilder::new(db, program);
@@ -1044,7 +1040,7 @@ impl<'db> IntersectionType<'db> {
     pub(crate) fn map_with_boundness_and_qualifiers(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         mut transform_fn: impl FnMut(&Type<'db>) -> PlaceAndQualifiers<'db>,
     ) -> PlaceAndQualifiers<'db> {
         let mut builder = IntersectionBuilder::new(db, program);
@@ -1107,7 +1103,7 @@ impl<'db> IntersectionType<'db> {
     pub(crate) fn with_expanded_typevars_and_newtypes(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
     ) -> Type<'db> {
         expand_intersection_typevars_and_newtypes(db, program, self.positive(db), self.negative(db))
     }
@@ -1131,7 +1127,7 @@ impl<'db> IntersectionType<'db> {
 
 fn expand_intersection_typevars_and_newtypes<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     positive: &FxOrderSet<Type<'db>>,
     negative: &NegativeIntersectionElements<'db>,
 ) -> Type<'db> {

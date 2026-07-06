@@ -36,15 +36,18 @@ pub struct VersionedFile<'db> {
     pub python_version: PythonVersion,
 }
 
+// The Salsa allocation is tracked separately.
+impl get_size2::GetSize for VersionedFile<'_> {}
+
 pub fn parsed_module<'db>(db: &'db dyn Db, file: VersionedFile<'db>) -> &'db ParsedModule {
-    contextual::parse_module(db, file)
+    contextual::parsed_module(db, file)
 }
 
 mod contextual {
     use super::*;
 
     #[salsa::tracked(returns(ref), no_eq, heap_size=ruff_memory_usage::heap_size, lru=200)]
-    pub(crate) fn parse_module(db: &dyn Db, file: VersionedFile<'_>) -> ParsedModule {
+    pub(crate) fn parsed_module(db: &dyn Db, file: VersionedFile<'_>) -> ParsedModule {
         let source_file = file.file(db);
         let _span = tracing::trace_span!(
             "parsed_module",
@@ -59,7 +62,7 @@ mod contextual {
     }
 
     pub(super) fn disable_lru(db: &mut dyn Db) {
-        parse_module::set_lru_capacity(db, 0);
+        parsed_module::set_lru_capacity(db, 0);
     }
 }
 

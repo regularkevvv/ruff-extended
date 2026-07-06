@@ -44,7 +44,7 @@ pub fn inferred_python_version_source_annotation(
 /// configuration files, or defaults.
 pub fn add_inferred_python_version_hint_to_diagnostic(
     db: &dyn Db,
-    program: Program<'_>,
+    program: Program,
     diagnostic: &mut Diagnostic,
     action: &str,
 ) {

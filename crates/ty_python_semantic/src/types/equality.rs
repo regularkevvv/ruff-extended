@@ -126,7 +126,7 @@ impl<'db> ComparisonResult<'db> {
 /// constrain `left`.
 pub(super) fn evaluate_type_equality<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     left: Type<'db>,
     right: Type<'db>,
     is_positive: bool,
@@ -179,7 +179,7 @@ pub(super) fn evaluate_type_equality<'db>(
 /// Return a constraint excluding every value known to compare equal to `ty`.
 pub(super) fn equality_exclusion_constraint<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     ty: Type<'db>,
 ) -> Option<Type<'db>> {
     let ty = ty.resolve_type_alias(db);
@@ -221,7 +221,7 @@ pub(super) fn equality_exclusion_constraint<'db>(
 /// ```
 pub(super) fn evaluate_type_inequality<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     left: Type<'db>,
     right: Type<'db>,
     is_positive: bool,
@@ -259,7 +259,7 @@ pub(super) fn evaluate_type_inequality<'db>(
 /// A result that only permits narrowing remains ambiguous because it can still evaluate either way.
 pub(crate) fn equality_truthiness<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     left: Type<'db>,
     right: Type<'db>,
 ) -> Truthiness {
@@ -271,7 +271,7 @@ pub(crate) fn equality_truthiness<'db>(
 /// A result that only permits narrowing remains ambiguous because it can still evaluate either way.
 pub(super) fn inequality_truthiness<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     left: Type<'db>,
     right: Type<'db>,
 ) -> Truthiness {
@@ -280,7 +280,7 @@ pub(super) fn inequality_truthiness<'db>(
 
 fn comparison_truthiness<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     left: Type<'db>,
     right: Type<'db>,
     operator: ComparisonOperator,
@@ -341,13 +341,13 @@ struct ComparisonKey<'db> {
 /// Tracks comparisons that are already in progress so recursive evaluation terminates.
 struct ComparisonEvaluator<'db> {
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     active: FxHashSet<ComparisonKey<'db>>,
     goal: ComparisonGoal,
 }
 
 impl<'db> ComparisonEvaluator<'db> {
-    fn new(db: &'db dyn Db, program: Program<'db>) -> Self {
+    fn new(db: &'db dyn Db, program: Program) -> Self {
         Self {
             db,
             program,
@@ -356,7 +356,7 @@ impl<'db> ComparisonEvaluator<'db> {
         }
     }
 
-    fn for_truthiness(db: &'db dyn Db, program: Program<'db>) -> Self {
+    fn for_truthiness(db: &'db dyn Db, program: Program) -> Self {
         Self {
             db,
             program,
@@ -667,7 +667,7 @@ fn is_builtin_literal_type(db: &dyn Db, ty: Type) -> bool {
 /// both `Literal[0]` and `Literal[False]`, while `x != 1` excludes `Literal[1]` and `Literal[True]`.
 fn builtin_literal_constraint<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     left: Type<'db>,
     right: Type<'db>,
     operator: ComparisonOperator,
@@ -716,7 +716,7 @@ fn builtin_literal_constraint<'db>(
 /// Add finite enum members in `ty` that are known to compare equal to `right`.
 fn add_equal_enum_literals<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     ty: Type<'db>,
     right: LiteralValueTypeKind<'db>,
     operator: ComparisonOperator,
@@ -770,7 +770,7 @@ fn add_equal_enum_literals<'db>(
 /// because those methods can change whether two members compare equal.
 fn enum_literal_constraint<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     left: Type<'db>,
     right: Type<'db>,
     operator: ComparisonOperator,
@@ -808,7 +808,7 @@ fn enum_literal_constraint<'db>(
 /// Return whether every possible value of `ty` belongs to the same enum as `right`.
 pub(super) fn is_same_enum_domain<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     ty: Type<'db>,
     right: EnumLiteralType<'db>,
 ) -> bool {
@@ -861,7 +861,7 @@ fn evaluate_union_left<'db>(
 /// negative constraints for removed arms so that the result still describes the branch predicate.
 fn evaluate_target_union<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     elements: &[Type<'db>],
     branch: ComparisonBranch,
     mut evaluate: impl FnMut(Type<'db>) -> ComparisonResult<'db>,
@@ -997,7 +997,7 @@ fn combine_definite_truthiness<'db>(
 /// truthiness is reported only when every alternative agrees.
 fn evaluate_against_results<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     target: Type<'db>,
     branch: ComparisonBranch,
     results: impl IntoIterator<Item = ComparisonResult<'db>>,
@@ -1101,7 +1101,7 @@ fn evaluate_intersection_left<'db>(
 /// may compare equal to values outside the enum domain.
 fn finite_alternatives<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     ty: Type<'db>,
     operator: ComparisonOperator,
 ) -> Option<Vec<Type<'db>>> {
@@ -1136,7 +1136,7 @@ fn finite_alternatives<'db>(
 /// or a string-valued enum member without having a single statically known runtime value.
 fn narrow_literal_comparison<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     left: Type<'db>,
     right: Type<'db>,
     left_literal: LiteralValueTypeKind<'db>,
@@ -1163,7 +1163,7 @@ fn narrow_literal_comparison<'db>(
 /// Narrow `LiteralString` against a string-valued enum member with inherited `str` semantics.
 fn narrow_literal_string_against_enum<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     enum_literal: EnumLiteralType<'db>,
     equality_is_positive: bool,
 ) -> ComparisonResult<'db> {
@@ -1197,7 +1197,7 @@ fn narrow_literal_string_against_enum<'db>(
 #[expect(clippy::too_many_arguments)]
 fn compare_literal_to_other<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     literal_type: Type<'db>,
     literal: LiteralValueTypeKind<'db>,
     other: Type<'db>,
@@ -1259,7 +1259,7 @@ fn compare_literal_to_other<'db>(
 /// denote the same singleton.
 fn compare_nominal_instances<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     left_instance: super::NominalInstanceType<'db>,
     right_instance: super::NominalInstanceType<'db>,
     operator: ComparisonOperator,
@@ -1342,7 +1342,7 @@ impl KnownComparisonSemantics {
     /// Returns `None` when dunder lookup finds custom or conflicting comparison behavior.
     fn of_type<'db>(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         ty: Type<'db>,
         operator: ComparisonOperator,
     ) -> Option<Self> {
@@ -1386,7 +1386,7 @@ impl KnownComparisonSemantics {
     /// Return the builtin comparison implementation used by a literal value.
     fn of_literal<'db>(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         literal: LiteralValueTypeKind<'db>,
         operator: ComparisonOperator,
     ) -> Option<Self> {
@@ -1407,7 +1407,7 @@ impl KnownComparisonSemantics {
     /// Returns `None` when lookup finds custom comparison behavior.
     fn of_instance<'db>(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         instance: Type<'db>,
         operator: ComparisonOperator,
     ) -> Option<Self> {
@@ -1462,7 +1462,7 @@ enum ComparisonDomain {
 /// analysis, which is only useful here when it can eliminate an arm from a union target.
 fn comparison_domain<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     target: Type<'db>,
     ty: Type<'db>,
     operator: ComparisonOperator,
@@ -1507,7 +1507,7 @@ fn comparison_domain<'db>(
 /// Return whether `ty` is a singleton whose comparison uses object identity semantics.
 fn has_known_identity_comparison_semantics<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     ty: Type<'db>,
     operator: ComparisonOperator,
 ) -> bool {
@@ -1532,7 +1532,7 @@ fn has_known_identity_comparison_semantics<'db>(
 /// Look up a comparison method without falling back to `object`.
 fn lookup_dunder<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     ty: Type<'db>,
     name: &'static str,
 ) -> PlaceAndQualifiers<'db> {
@@ -1550,7 +1550,7 @@ fn lookup_dunder<'db>(
 /// or insufficiently known comparison behavior prevents a definitive result.
 fn known_literal_equality<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     left: LiteralValueTypeKind<'db>,
     right: LiteralValueTypeKind<'db>,
     operator: ComparisonOperator,
@@ -1645,7 +1645,7 @@ fn known_literal_equality<'db>(
 /// Custom enum construction can replace the declared value, so members of such enums return `None`.
 fn enum_literal_value<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     literal: EnumLiteralType<'db>,
 ) -> Option<Type<'db>> {
     let enum_class_literal = literal.enum_class_literal(db);

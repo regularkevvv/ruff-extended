@@ -42,7 +42,7 @@ impl<'db> TypeVarOwnerContext<'db> {
     /// The bound or constraints of this typevar, as a type (i.e. constraints are unioned), wrapped
     /// in `SubclassOf` if this is a `SubclassOf` context. `object` if no bound/constraints.
     /// Used for error messages.
-    fn bound_or_constraints_type(self, db: &'db dyn Db, program: crate::Program<'db>) -> Type<'db> {
+    fn bound_or_constraints_type(self, db: &'db dyn Db, program: crate::Program) -> Type<'db> {
         match self {
             TypeVarOwnerContext::Bare(typevar) => typevar
                 .typevar(db)
@@ -197,7 +197,7 @@ impl<'db> BoundSuperError<'db> {
     /// and return the type variable's upper bound or the union of its constraints.
     fn describe_typevar(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         diagnostic: &mut Diagnostic,
         type_var_context: TypeVarOwnerContext<'db>,
     ) -> Type<'db> {
@@ -274,17 +274,17 @@ impl<'db> ResolvedSuperOwner<'db> {
     fn recursive_type_normalized_impl(
         &self,
         db: &'db dyn Db,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
-        let program = self.lookup_anchor.program(db);
         Some(Self {
             owner_type: self
                 .owner_type
                 .recursive_type_normalized_impl(db, program, div, nested)?,
             lookup_anchor: self
                 .lookup_anchor
-                .recursive_type_normalized_impl(db, div, nested)?,
+                .recursive_type_normalized_impl(db, program, div, nested)?,
             receiver: self.receiver,
         })
     }
@@ -312,6 +312,7 @@ impl<'db> SuperOwnerKind<'db> {
     fn recursive_type_normalized_impl(
         &self,
         db: &'db dyn Db,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -321,7 +322,7 @@ impl<'db> SuperOwnerKind<'db> {
             }
             SuperOwnerKind::Divergent(_) => Some(*self),
             SuperOwnerKind::Resolved(resolved_owner) => Some(SuperOwnerKind::Resolved(
-                resolved_owner.recursive_type_normalized_impl(db, div, nested)?,
+                resolved_owner.recursive_type_normalized_impl(db, program, div, nested)?,
             )),
         }
     }
@@ -329,7 +330,7 @@ impl<'db> SuperOwnerKind<'db> {
     fn iter_mro(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> impl Iterator<Item = ClassBase<'db>> + Clone {
         match self {
             SuperOwnerKind::Dynamic(dynamic) => {
@@ -373,7 +374,7 @@ impl get_size2::GetSize for BoundSuperType<'_> {}
 
 pub(super) fn walk_bound_super_type<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     bound_super: BoundSuperType<'db>,
     visitor: &V,
 ) {
@@ -506,7 +507,7 @@ impl<'db> BoundSuperType<'db> {
     /// However, the checking is skipped when any of the arguments is a dynamic type.
     pub(super) fn build(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         pivot_class_type: Type<'db>,
         owner_type: Type<'db>,
     ) -> Result<Type<'db>, BoundSuperError<'db>> {
@@ -897,7 +898,7 @@ impl<'db> BoundSuperType<'db> {
     fn skip_until_after_pivot(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         mro_iter: impl Iterator<Item = ClassBase<'db>> + Clone,
     ) -> impl Iterator<Item = ClassBase<'db>> + Clone {
         let Some(pivot_class) = self.pivot_class(db).into_class() else {
@@ -927,7 +928,7 @@ impl<'db> BoundSuperType<'db> {
     pub(super) fn try_call_dunder_get_on_attribute(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         attribute: PlaceAndQualifiers<'db>,
     ) -> Option<PlaceAndQualifiers<'db>> {
         let (instance, owner) = self.owner(db).descriptor_binding(db)?;
@@ -939,7 +940,7 @@ impl<'db> BoundSuperType<'db> {
     pub(super) fn find_name_in_mro_after_pivot(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         name: &str,
         policy: MemberLookupPolicy,
     ) -> PlaceAndQualifiers<'db> {
@@ -986,15 +987,16 @@ impl<'db> BoundSuperType<'db> {
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
         Some(Self::new(
             db,
             self.pivot_class(db)
-                .recursive_type_normalized_impl(db, div, nested)?,
+                .recursive_type_normalized_impl(db, program, div, nested)?,
             self.owner(db)
-                .recursive_type_normalized_impl(db, div, nested)?,
+                .recursive_type_normalized_impl(db, program, div, nested)?,
         ))
     }
 }

@@ -43,8 +43,8 @@ impl ProjectDatabase {
             project_options_overrides.and_then(|options| options.config_file_override.clone());
         let extra_configuration_paths = project.metadata(self).extra_configuration_paths().to_vec();
         let custom_stdlib_versions_path = project
-            .program_settings(self)
-            .search_paths
+            .program(self)
+            .search_paths(self)
             .custom_stdlib()
             .map(|path| path.join("VERSIONS"));
 

@@ -140,8 +140,8 @@ pub(crate) fn infer_definition_types<'db>(
     db: &'db dyn Db,
     definition: Definition<'db>,
 ) -> DefinitionInference<'db> {
-    let file = definition.file(db);
     let analysis_file = definition.analysis_file(db);
+    let file = analysis_file.file(db);
     let module = parsed_module(db, analysis_file.versioned_file(db)).load(db);
     let _span = tracing::trace_span!(
         "infer_definition_types",
@@ -285,8 +285,8 @@ pub(crate) fn infer_deferred_types<'db>(
     db: &'db dyn Db,
     definition: Definition<'db>,
 ) -> DefinitionInference<'db> {
-    let file = definition.file(db);
     let analysis_file = definition.analysis_file(db);
+    let file = analysis_file.file(db);
     let module = parsed_module(db, analysis_file.versioned_file(db)).load(db);
     let _span = tracing::trace_span!(
         "infer_deferred_types",
@@ -357,8 +357,8 @@ pub(crate) fn infer_scope_types_impl<'db>(
     input: InferScope<'db>,
 ) -> ScopeInference<'db> {
     let (scope, tcx) = input.into_inner(db);
-    let file = scope.file(db);
     let analysis_file = scope.analysis_file(db);
+    let file = analysis_file.file(db);
     let _span = tracing::trace_span!("infer_scope_types", scope=?scope.as_id(), ?file).entered();
 
     let module = parsed_module(db, analysis_file.versioned_file(db)).load(db);
@@ -396,8 +396,8 @@ pub(super) fn infer_expression_types_impl<'db>(
 ) -> ExpressionInference<'db> {
     let (expression, tcx) = input.into_inner(db);
 
-    let file = expression.file(db);
     let analysis_file = expression.analysis_file(db);
+    let file = analysis_file.file(db);
     let module = parsed_module(db, analysis_file.versioned_file(db)).load(db);
     let _span = tracing::trace_span!(
         "infer_expression_types",
@@ -513,8 +513,8 @@ fn infer_statement_types_impl<'db>(
     db: &'db dyn Db,
     statement: StatementInner<'db>,
 ) -> StatementInferenceInner<'db> {
-    let file = statement.file(db);
     let analysis_file = statement.analysis_file(db);
+    let file = analysis_file.file(db);
     let module = parsed_module(db, analysis_file.versioned_file(db)).load(db);
     let _span = tracing::trace_span!(
         "infer_statement_types",
@@ -547,7 +547,7 @@ pub(super) struct ExpressionWithContext<'db> {
 }
 
 impl<'db> InferExpression<'db> {
-    fn program(self, db: &'db dyn Db) -> crate::Program<'db> {
+    fn program(self, db: &'db dyn Db) -> crate::Program {
         match self {
             InferExpression::Bare(expression) => expression.analysis_file(db).program(db),
             InferExpression::WithContext(with_context) => {
@@ -593,7 +593,7 @@ pub(super) struct ScopeWithContext<'db> {
 }
 
 impl<'db> InferScope<'db> {
-    fn program(self, db: &'db dyn Db) -> crate::Program<'db> {
+    fn program(self, db: &'db dyn Db) -> crate::Program {
         match self {
             InferScope::Bare(scope) => scope.program(db),
             InferScope::WithContext(with_context) => with_context.scope(db).program(db),
@@ -642,7 +642,7 @@ impl<'db> TypeContext<'db> {
     fn known_specialization(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         known_class: KnownClass,
     ) -> Option<Specialization<'db>> {
         self.annotation
@@ -664,7 +664,7 @@ impl<'db> TypeContext<'db> {
     pub(crate) fn narrow_targets(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Option<Cow<'db, [Type<'db>]>> {
         let union = self.annotation?.as_union_like(db)?;
 
@@ -870,7 +870,7 @@ impl<'db> ScopeInference<'db> {
     fn cycle_normalized(
         mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         previous_inference: &ScopeInference<'db>,
         cycle: &salsa::Cycle,
     ) -> ScopeInference<'db> {
@@ -1059,7 +1059,7 @@ impl<'db> DefinitionTypes<'db> {
 
     fn normalize_binding(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         previous: &DefinitionTypes<'db>,
         cycle: &salsa::Cycle,
         owner: Definition<'db>,
@@ -1075,7 +1075,7 @@ impl<'db> DefinitionTypes<'db> {
 
     fn normalize_declaration(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         previous: &DefinitionTypes<'db>,
         cycle: &salsa::Cycle,
         owner: Definition<'db>,
@@ -1094,7 +1094,7 @@ impl<'db> DefinitionTypes<'db> {
     fn cycle_normalized(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         previous: &DefinitionTypes<'db>,
         cycle: &salsa::Cycle,
         owner: Definition<'db>,
@@ -1639,7 +1639,7 @@ impl<'db> ExpressionInference<'db> {
     fn cycle_normalized(
         mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         previous: &ExpressionInference<'db>,
         cycle: &salsa::Cycle,
     ) -> ExpressionInference<'db> {
@@ -1820,7 +1820,7 @@ impl<'db> StatementInferenceInner<'db> {
     fn cycle_normalized(
         mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         previous_inference: &StatementInferenceInner<'db>,
         cycle: &salsa::Cycle,
     ) -> StatementInferenceInner<'db> {

@@ -142,7 +142,7 @@ pub enum KnownInstanceType<'db> {
 
 pub(super) fn walk_known_instance_type<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     known_instance: KnownInstanceType<'db>,
     visitor: &V,
 ) {
@@ -208,7 +208,7 @@ impl<'db> VarianceInferable<'db> for KnownInstanceType<'db> {
     fn variance_of(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         typevar: BoundTypeVarInstance<'db>,
     ) -> TypeVarVariance {
         match self {
@@ -224,7 +224,7 @@ impl<'db> KnownInstanceType<'db> {
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -259,7 +259,7 @@ impl<'db> KnownInstanceType<'db> {
                 .recursive_type_normalized_impl(db, program, div, nested)
                 .map(Self::Callable),
             Self::NewType(newtype) => newtype
-                .recursive_type_normalized_impl(db, div, true)
+                .recursive_type_normalized_impl(db, program, div, true)
                 .map(Self::NewType),
             Self::Sentinel(sentinel) => Some(Self::Sentinel(sentinel)),
             Self::GenericContext(generic) => Some(Self::GenericContext(generic)),
@@ -305,7 +305,7 @@ impl<'db> KnownInstanceType<'db> {
         }
     }
 
-    pub(super) fn to_meta_type(self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    pub(super) fn to_meta_type(self, db: &'db dyn Db, program: Program) -> Type<'db> {
         self.class(db).to_class_literal(db, program)
     }
 
@@ -314,7 +314,7 @@ impl<'db> KnownInstanceType<'db> {
     /// For example, an alias created using the `type` statement is an instance of
     /// `typing.TypeAliasType`, so `KnownInstanceType::TypeAliasType(_).instance_fallback(db)`
     /// returns `Type::NominalInstance(NominalInstanceType { class: <typing.TypeAliasType> })`.
-    pub(super) fn instance_fallback(self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    pub(super) fn instance_fallback(self, db: &'db dyn Db, program: Program) -> Type<'db> {
         self.class(db).to_instance(db, program)
     }
 
@@ -325,7 +325,7 @@ impl<'db> KnownInstanceType<'db> {
     pub(crate) fn type_form_argument(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Option<Type<'db>> {
         match self {
             Self::TypeAliasType(alias) => Some(Type::TypeAlias(alias)),
@@ -366,18 +366,14 @@ impl<'db> KnownInstanceType<'db> {
     }
 
     /// Return the repr of the symbol at runtime
-    pub(super) fn repr(
-        self,
-        db: &'db dyn Db,
-        program: Program<'db>,
-    ) -> impl std::fmt::Display + 'db {
+    pub(super) fn repr(self, db: &'db dyn Db, program: Program) -> impl std::fmt::Display + 'db {
         self.display_with(db, program, DisplaySettings::default())
     }
 
     pub(super) fn apply_type_mapping_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'_, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
@@ -519,7 +515,7 @@ impl<'db> FieldInstance<'db> {
     fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -590,15 +586,21 @@ impl get_size2::GetSize for UnionTypeInstance<'_> {}
 impl<'db> UnionTypeInstance<'db> {
     pub(crate) fn from_value_expression_types(
         db: &'db dyn Db,
+        program: crate::Program,
         value_expr_types: [Type<'db>; 2],
         scope_id: ScopeId<'db>,
         typevar_binding_context: Option<Definition<'db>>,
         inference_flags: InferenceFlags,
     ) -> Type<'db> {
-        let program = scope_id.program(db);
         let mut builder = UnionBuilder::new(db, program);
         for ty in &value_expr_types {
-            match ty.in_type_expression(db, scope_id, typevar_binding_context, inference_flags) {
+            match ty.in_type_expression(
+                db,
+                program,
+                scope_id,
+                typevar_binding_context,
+                inference_flags,
+            ) {
                 Ok(ty) => builder.add_in_place(ty),
                 Err(error) => {
                     return Type::KnownInstance(KnownInstanceType::UnionType(
@@ -632,7 +634,7 @@ impl<'db> UnionTypeInstance<'db> {
     pub(super) fn apply_type_mapping_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'_, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
@@ -657,7 +659,7 @@ impl<'db> UnionTypeInstance<'db> {
     pub(crate) fn value_expression_types(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Result<impl Iterator<Item = Type<'db>> + 'db, InvalidTypeExpressionError<'db>> {
         let to_class_literal = move |ty: Type<'db>| {
             ty.as_nominal_instance()
@@ -687,7 +689,7 @@ impl<'db> UnionTypeInstance<'db> {
     fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -725,7 +727,7 @@ impl<'db> FunctoolsPartialInstance<'db> {
     fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -746,7 +748,7 @@ impl<'db> FunctoolsPartialInstance<'db> {
     fn apply_type_mapping_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'_, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
@@ -781,7 +783,7 @@ impl<'db> InternedType<'db> {
     fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {

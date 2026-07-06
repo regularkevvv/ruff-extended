@@ -1,7 +1,7 @@
 use crate::{SuppressFix, is_unused_ignore_comment_lint, suppress_all};
 use ruff_db::cancellation::{Canceled, CancellationToken};
 use ruff_db::diagnostic::{DisplayDiagnosticConfig, DisplayDiagnostics};
-use ruff_db::parsed::ParsedModuleRef;
+use ruff_db::parsed::{ParsedModuleRef, VersionedFile};
 use ruff_db::source::SourceText;
 use ruff_db::system::{SystemPath, SystemPathBuf, WritableSystem};
 use ruff_db::{
@@ -18,7 +18,7 @@ use std::sync::Mutex;
 use thiserror::Error;
 
 use crate::{AnalysisFile, Db};
-use ty_python_core::program::ProgramSnapshot;
+use ty_python_core::program::Program;
 
 pub struct FixAllResults {
     /// The non-lint diagnostics that can't be fixed or the diagnostics of files
@@ -38,7 +38,7 @@ pub struct FixAllResults {
 /// If the `db`'s system isn't [writable](WritableSystem).
 pub fn suppress_all_diagnostics(
     db: &mut dyn Db,
-    program: &ProgramSnapshot,
+    program: Program,
     diagnostics: Vec<Diagnostic>,
     cancellation_token: &CancellationToken,
 ) -> Result<FixAllResults, Canceled> {
@@ -48,7 +48,7 @@ pub fn suppress_all_diagnostics(
         diagnostics,
         FixMode::Suppress,
         cancellation_token,
-        |db, file| Db::check_file(db, AnalysisFile::new(db, program.program(db), file)),
+        |db, file| Db::check_file(db, AnalysisFile::new(db, program, file)),
     )
 }
 
@@ -60,7 +60,7 @@ pub fn suppress_all_diagnostics(
 /// If the `db`'s system isn't [writable](WritableSystem).
 pub fn fix_all_diagnostics(
     db: &mut dyn Db,
-    program: &ProgramSnapshot,
+    program: Program,
     diagnostics: Vec<Diagnostic>,
     applicability: Applicability,
     cancellation_token: &CancellationToken,
@@ -71,7 +71,7 @@ pub fn fix_all_diagnostics(
         diagnostics,
         FixMode::ApplyFixes(applicability),
         cancellation_token,
-        |db, file| Db::check_file(db, AnalysisFile::new(db, program.program(db), file)),
+        |db, file| Db::check_file(db, AnalysisFile::new(db, program, file)),
     )
 }
 
@@ -82,7 +82,7 @@ const MAX_ITERATIONS: usize = 10;
 /// `check_file` is a separate parameter so that tests can easily mock out a file's diagnostics.
 fn fix_all<F>(
     db: &mut dyn Db,
-    program: &ProgramSnapshot,
+    program: Program,
     mut diagnostics: Vec<Diagnostic>,
     fix_mode: FixMode,
     cancellation_token: &CancellationToken,
@@ -134,14 +134,14 @@ where
             continue;
         };
 
-        let analysis_file = AnalysisFile::new(db, program.program(db), file);
+        let analysis_file = AnalysisFile::new(db, program, file);
         let parsed = analysis_file.parsed(db);
         if parsed.load(db).has_syntax_errors() {
             tracing::warn!("Skipping file `{path}` with syntax errors");
             continue;
         }
 
-        let fixes = fix_mode.fixes(db, analysis_file, diagnostics);
+        let fixes = fix_mode.fixes(db, analysis_file.versioned_file(db), diagnostics);
 
         if fixes.is_empty() {
             tracing::debug!("Skipping file `{path}` without applicable fixes.");
@@ -390,7 +390,7 @@ impl FixMode {
     fn fixes(
         self,
         db: &dyn Db,
-        analysis_file: AnalysisFile<'_>,
+        versioned_file: VersionedFile<'_>,
         file_diagnostics: &[Diagnostic],
     ) -> Vec<ApplicableFix> {
         match self {
@@ -413,7 +413,7 @@ impl FixMode {
                     })
                     .collect();
 
-                suppress_all(db, analysis_file, &suppressable_diagnostics)
+                suppress_all(db, versioned_file, &suppressable_diagnostics)
                     .into_iter()
                     .map(
                         |SuppressFix {
@@ -756,7 +756,7 @@ enum CheckResult<'a> {
 
 fn recheck_files<'a, F>(
     db: &dyn Db,
-    program: &ProgramSnapshot,
+    program: Program,
     changes: Vec<(QueuedFile<'a>, usize)>,
     fix_mode: FixMode,
     cancellation_token: &CancellationToken,
@@ -782,7 +782,7 @@ where
 
                     let db = &*db;
 
-                    let analysis_file = AnalysisFile::new(db, program.program(db), file.file);
+                    let analysis_file = AnalysisFile::new(db, program, file.file);
                     let parsed = analysis_file.parsed(db).load(db);
 
                     let result = if parsed.has_syntax_errors() {
@@ -792,7 +792,8 @@ where
                         CheckResult::SyntaxError { diagnostic, file }
                     } else {
                         let diagnostics = check_file(db, file.file);
-                        let fixes = fix_mode.fixes(db, analysis_file, &diagnostics);
+                        let fixes =
+                            fix_mode.fixes(db, analysis_file.versioned_file(db), &diagnostics);
 
                         file.applied_fixes += applied_fixes;
                         file.diagnostics = Some(diagnostics);
@@ -1161,11 +1162,11 @@ class B(A):
 
         let initial_diagnostics = check_file(&db, file);
 
-        let program = db.program().snapshot(&db);
+        let program = db.program();
         let cancellation_token_source = CancellationTokenSource::new();
         let fixes = fix_all(
             &mut db,
-            &program,
+            program,
             initial_diagnostics,
             FixMode::ApplyFixes(Applicability::Safe),
             &cancellation_token_source.token(),
@@ -1240,11 +1241,11 @@ class B(A):
 
         let initial_diagnostics = check_file(&db, file);
 
-        let program = db.program().snapshot(&db);
+        let program = db.program();
         let cancellation_token_source = CancellationTokenSource::new();
         let fixes = fix_all(
             &mut db,
-            &program,
+            program,
             initial_diagnostics,
             FixMode::ApplyFixes(Applicability::Safe),
             &cancellation_token_source.token(),
@@ -1316,10 +1317,10 @@ class B(A):
             create_diagnostics(file)
         };
 
-        let program = db.program().snapshot(&db);
+        let program = db.program();
         let result = fix_all(
             &mut db,
-            &program,
+            program,
             initial_diagnostics,
             FixMode::ApplyFixes(Applicability::Safe),
             &cancellation_token_source.token(),
@@ -1419,11 +1420,11 @@ class B(A):
 
         let initial_diagnostics = check_file(&db, file);
 
-        let program = db.program().snapshot(&db);
+        let program = db.program();
         let cancellation_token_source = CancellationTokenSource::new();
         let fixes = fix_all(
             &mut db,
-            &program,
+            program,
             initial_diagnostics,
             FixMode::ApplyFixes(Applicability::Safe),
             &cancellation_token_source.token(),
@@ -1455,15 +1456,15 @@ class B(A):
 
         let file = system_path_to_file(&db, "test.py").unwrap();
 
-        let program = db.program().snapshot(&db);
-        let analysis_file = AnalysisFile::new(&db, program.program(&db), file);
+        let program = db.program();
+        let analysis_file = AnalysisFile::new(&db, program, file);
         let had_syntax_errors = analysis_file.parsed(&db).load(&db).has_syntax_errors();
         let diagnostics = db.check_file(analysis_file);
         let total_diagnostics = diagnostics.len();
         let cancellation_token_source = CancellationTokenSource::new();
         let fixes = suppress_all_diagnostics(
             &mut db,
-            &program,
+            program,
             diagnostics,
             &cancellation_token_source.token(),
         )
@@ -1475,7 +1476,7 @@ class B(A):
 
         let fixed = source_text(&db, file);
 
-        let analysis_file = AnalysisFile::new(&db, program.program(&db), file);
+        let analysis_file = AnalysisFile::new(&db, program, file);
         let parsed = analysis_file.parsed(&db).load(&db);
         let diagnostics_after_applying_fixes = db.check_file(analysis_file);
 

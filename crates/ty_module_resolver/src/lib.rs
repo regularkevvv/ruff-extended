@@ -38,10 +38,10 @@ mod typeshed;
 mod testing;
 
 /// Returns an iterator over all search paths pointing to a system path
-pub fn system_module_search_paths<'db>(
-    db: &'db dyn Db,
-    program: ResolverProgram<'db>,
-) -> SystemModuleSearchPathsIter<'db> {
+pub fn system_module_search_paths(
+    db: &dyn Db,
+    program: ResolverProgram,
+) -> SystemModuleSearchPathsIter<'_> {
     SystemModuleSearchPathsIter {
         // Always run in `StubsAllowed` mode because we want to include as much as possible
         // and we don't care about the "real" stdlib

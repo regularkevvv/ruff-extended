@@ -238,7 +238,7 @@ impl TestCase {
         system_path_to_file(self.db(), path.as_ref())
     }
 
-    fn resolver_program(&self) -> ResolverProgram<'_> {
+    fn resolver_program(&self) -> ResolverProgram {
         self.db().project().program(self.db()).resolver(self.db())
     }
 

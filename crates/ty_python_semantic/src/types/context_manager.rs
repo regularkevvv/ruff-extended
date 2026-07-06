@@ -13,7 +13,7 @@ impl<'db> Type<'db> {
     ///
     /// This method should only be used outside of type checking because it omits any errors.
     /// For type checking, use [`try_enter_with_mode`](Self::try_enter_with_mode) instead.
-    pub(super) fn enter(self, db: &'db dyn Db, program: crate::Program<'db>) -> Type<'db> {
+    pub(super) fn enter(self, db: &'db dyn Db, program: crate::Program) -> Type<'db> {
         self.try_enter_with_mode(db, program, EvaluationMode::Sync)
             .unwrap_or_else(|err| err.fallback_enter_type(db, program))
     }
@@ -22,7 +22,7 @@ impl<'db> Type<'db> {
     ///
     /// This method should only be used outside of type checking because it omits any errors.
     /// For type checking, use [`try_enter_with_mode`](Self::try_enter_with_mode) instead.
-    pub(super) fn aenter(self, db: &'db dyn Db, program: crate::Program<'db>) -> Type<'db> {
+    pub(super) fn aenter(self, db: &'db dyn Db, program: crate::Program) -> Type<'db> {
         self.try_enter_with_mode(db, program, EvaluationMode::Async)
             .unwrap_or_else(|err| err.fallback_enter_type(db, program))
     }
@@ -38,7 +38,7 @@ impl<'db> Type<'db> {
     pub(super) fn try_enter_with_mode(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         mode: EvaluationMode,
     ) -> Result<Type<'db>, ContextManagerError<'db>> {
         let (enter_method, exit_method) = match mode {
@@ -118,14 +118,14 @@ impl<'db> ContextManagerError<'db> {
     pub(super) fn fallback_enter_type(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Type<'db> {
         self.enter_type(db, program).unwrap_or(Type::unknown())
     }
 
     /// Returns the `__enter__` or `__aenter__` return type if it is known,
     /// or `None` if the type never has a callable `__enter__` or `__aenter__` attribute
-    fn enter_type(&self, db: &'db dyn Db, program: crate::Program<'db>) -> Option<Type<'db>> {
+    fn enter_type(&self, db: &'db dyn Db, program: crate::Program) -> Option<Type<'db>> {
         match self {
             Self::Exit {
                 enter_return_type,

@@ -144,11 +144,7 @@ impl<'db> CallableSignature<'db> {
         Self::single(Signature::bottom())
     }
 
-    pub(crate) fn cycle_initial(
-        db: &'db dyn Db,
-        program: crate::Program<'db>,
-        id: salsa::Id,
-    ) -> Self {
+    pub(crate) fn cycle_initial(db: &'db dyn Db, program: crate::Program, id: salsa::Id) -> Self {
         Self::single(Signature::new(
             Parameters::bottom(),
             Type::divergent(id).bottom_materialization(db, program),
@@ -185,7 +181,7 @@ impl<'db> CallableSignature<'db> {
     pub(crate) fn overload_return_type_or_unknown(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Type<'db> {
         match self.overloads.as_slice() {
             [] => Type::unknown(),
@@ -211,7 +207,7 @@ impl<'db> CallableSignature<'db> {
     /// Returns the reduced overloaded signature exposed by a `functools.partial(...)` object.
     pub(crate) fn partially_apply(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         overloads: impl IntoIterator<Item = PartialSignatureApplication<'db>>,
     ) -> Option<Self> {
         let mut new_overloads = Vec::new();
@@ -237,7 +233,7 @@ impl<'db> CallableSignature<'db> {
     pub(crate) fn cycle_normalized(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         previous: &Self,
         cycle: &salsa::Cycle,
     ) -> Self {
@@ -259,7 +255,7 @@ impl<'db> CallableSignature<'db> {
     pub(super) fn recursive_type_normalized_impl(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -275,7 +271,7 @@ impl<'db> CallableSignature<'db> {
     pub(crate) fn apply_type_mapping_impl<'a>(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'a, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
@@ -283,7 +279,7 @@ impl<'db> CallableSignature<'db> {
         #[expect(clippy::too_many_arguments)]
         fn try_apply_type_mapping_for_paramspec<'db>(
             db: &'db dyn Db,
-            program: crate::Program<'db>,
+            program: crate::Program,
             self_signature: &Signature<'db>,
             prefix_parameters: &[Parameter<'db>],
             paramspec_value: Type<'db>,
@@ -425,7 +421,7 @@ impl<'db> CallableSignature<'db> {
     pub(crate) fn find_legacy_typevars_impl(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         binding_context: Option<Definition<'db>>,
         typevars: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
         visitor: &FindLegacyTypeVarsVisitor<'db>,
@@ -441,7 +437,7 @@ impl<'db> CallableSignature<'db> {
     pub(crate) fn bind_self(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         self_type: Option<Type<'db>>,
     ) -> Self {
         Self {
@@ -459,7 +455,7 @@ impl<'db> CallableSignature<'db> {
     pub(crate) fn apply_self(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         self_type: Type<'db>,
     ) -> Self {
         Self {
@@ -494,7 +490,7 @@ impl<'db> CallableSignature<'db> {
     pub(crate) fn when_constraint_set_assignable_to<'c>(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         other: &Self,
         constraints: &'c ConstraintSetBuilder<'db>,
     ) -> ConstraintSet<'db, 'c> {
@@ -528,7 +524,7 @@ impl<'db> VarianceInferable<'db> for &CallableSignature<'db> {
     fn variance_of(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         typevar: BoundTypeVarInstance<'db>,
     ) -> TypeVarVariance {
         self.overloads
@@ -610,7 +606,7 @@ pub(crate) type SignatureRelationVisitor<'db> = ActiveRecursionDetector<Signatur
 
 pub(super) fn walk_signature<'db, V: super::visitor::TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     signature: &Signature<'db>,
     visitor: &V,
 ) {
@@ -766,7 +762,7 @@ impl<'db> Signature<'db> {
     pub(super) fn wrap_coroutine_return_type(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Self {
         let return_ty = KnownClass::CoroutineType.to_specialized_instance(
             db,
@@ -794,7 +790,7 @@ impl<'db> Signature<'db> {
     pub(crate) fn should_hide_self_from_display(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> bool {
         !self.return_ty.contains_self(db, program)
             && !self.parameters().iter().any(|p| {
@@ -821,7 +817,7 @@ impl<'db> Signature<'db> {
     fn cycle_normalized(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         previous: &Self,
         cycle: &salsa::Cycle,
     ) -> Self {
@@ -853,7 +849,7 @@ impl<'db> Signature<'db> {
     pub(super) fn recursive_type_normalized_impl(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -883,7 +879,7 @@ impl<'db> Signature<'db> {
     pub(crate) fn apply_type_mapping_impl<'a>(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'a, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
@@ -913,7 +909,7 @@ impl<'db> Signature<'db> {
     pub(crate) fn freshen_bound_typevars(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         delta: u32,
     ) -> Self {
         let Some(generic_context) = self.generic_context else {
@@ -935,7 +931,7 @@ impl<'db> Signature<'db> {
     pub(crate) fn max_typevar_freshness_matching_generic_context(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         generic_context: GenericContext<'db>,
     ) -> Option<TypeVarNonce> {
         let typevars = self
@@ -956,7 +952,7 @@ impl<'db> Signature<'db> {
     pub(crate) fn find_legacy_typevars_impl(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         binding_context: Option<Definition<'db>>,
         typevars: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
         visitor: &FindLegacyTypeVarsVisitor<'db>,
@@ -1046,7 +1042,7 @@ impl<'db> Signature<'db> {
     pub(crate) fn bind_self(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         self_type: Option<Type<'db>>,
     ) -> Self {
         let mut parameters = self.parameters.iter().cloned().peekable();
@@ -1093,7 +1089,7 @@ impl<'db> Signature<'db> {
     pub(crate) fn can_bind_self_to(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         self_type: Type<'db>,
     ) -> bool {
         // A dynamic receiver might be compatible with any explicit receiver annotation.
@@ -1168,7 +1164,7 @@ impl<'db> Signature<'db> {
     pub(crate) fn apply_self(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         self_type: Type<'db>,
     ) -> Self {
         if !self.needs_self_mapping(db, program, false) {
@@ -1203,7 +1199,7 @@ impl<'db> Signature<'db> {
     pub(crate) fn apply_specialization(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         specialization: Specialization<'db>,
     ) -> Self {
         let type_mapping =
@@ -1221,7 +1217,7 @@ impl<'db> Signature<'db> {
     pub(crate) fn partially_apply(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         partial_application: &PartialApplication<'db>,
         specialization: Option<Specialization<'db>>,
         unspecialized_return_ty: Type<'db>,
@@ -1309,7 +1305,7 @@ impl<'db> Signature<'db> {
     fn partial_application_specialization(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         partial_application: &PartialApplication<'db>,
         specialization: Option<Specialization<'db>>,
     ) -> Option<Specialization<'db>> {
@@ -1359,7 +1355,7 @@ impl<'db> Signature<'db> {
     fn needs_self_mapping(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         receiver_is_removed: bool,
     ) -> bool {
         // TODO: Expand type aliases here so `type Alias = Self` in parameters or returns
@@ -1393,7 +1389,7 @@ impl<'db> Signature<'db> {
     pub(crate) fn non_generic_implementation_parameters_consistency_with(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         overload: &Self,
     ) -> ParameterConsistency<'db> {
         debug_assert!(self.is_non_generic());
@@ -1431,7 +1427,7 @@ impl<'db> Signature<'db> {
     pub(crate) fn non_generic_implementation_return_type_consistency_with(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         overload: &Self,
     ) -> ReturnTypeConsistency<'db> {
         debug_assert!(self.is_non_generic());
@@ -1465,7 +1461,7 @@ impl<'db> Signature<'db> {
     pub(crate) fn when_constraint_set_assignable_to_signatures<'c>(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         other: &CallableSignature<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
     ) -> ConstraintSet<'db, 'c> {
@@ -1518,7 +1514,7 @@ impl<'db> Signature<'db> {
     fn when_constraint_set_assignable_to<'c>(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         other: &Self,
         constraints: &'c ConstraintSetBuilder<'db>,
     ) -> ConstraintSet<'db, 'c> {
@@ -1557,7 +1553,7 @@ impl<'db> VarianceInferable<'db> for &Signature<'db> {
     fn variance_of(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         typevar: BoundTypeVarInstance<'db>,
     ) -> TypeVarVariance {
         tracing::trace!(
@@ -3599,7 +3595,7 @@ impl<'db> Parameters<'db> {
 
     pub(crate) fn paramspec(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         typevar: BoundTypeVarInstance<'db>,
     ) -> Self {
         Self::from_parts(
@@ -3627,7 +3623,7 @@ impl<'db> Parameters<'db> {
     /// - `(<prefix_params>, /, *args: P.args, **kwargs: P.kwargs)` for the `ParamSpec` form.
     pub(crate) fn concatenate(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         mut prefix_params: Vec<Parameter<'db>>,
         concatenate_tail: ConcatenateTail<'db>,
     ) -> Self {
@@ -3816,7 +3812,7 @@ impl<'db> Parameters<'db> {
     fn apply_type_mapping_impl<'a>(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'a, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
@@ -4132,7 +4128,7 @@ impl<'db> Parameter<'db> {
     fn apply_type_mapping_impl<'a>(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'a, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
@@ -4157,7 +4153,7 @@ impl<'db> Parameter<'db> {
     fn cycle_normalized(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         previous: &Self,
         cycle: &salsa::Cycle,
     ) -> Self {
@@ -4181,7 +4177,7 @@ impl<'db> Parameter<'db> {
     pub(super) fn recursive_type_normalized_impl(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -4474,7 +4470,7 @@ impl<'db> ParameterKind<'db> {
     #[expect(clippy::ref_option)]
     fn cycle_normalized_default(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         current: &Option<Type<'db>>,
         previous: &Option<Type<'db>>,
         cycle: &salsa::Cycle,
@@ -4489,7 +4485,7 @@ impl<'db> ParameterKind<'db> {
     fn cycle_normalized(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         previous: &Self,
         cycle: &salsa::Cycle,
     ) -> Self {
@@ -4552,7 +4548,7 @@ impl<'db> ParameterKind<'db> {
     fn apply_type_mapping_impl<'a>(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'a, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,

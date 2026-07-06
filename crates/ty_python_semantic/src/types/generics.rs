@@ -333,7 +333,7 @@ impl<'db> InferableTypeVars<'db> {
 /// generic context can coexist without collapsing into each other.
 #[salsa::interned(debug, constructor=new_internal, heap_size=ruff_memory_usage::heap_size)]
 pub struct GenericContext<'db> {
-    pub(crate) program: Program<'db>,
+    pub(crate) program: Program,
 
     #[returns(ref)]
     variables_inner: FxOrderMap<BoundTypeVarIdentity<'db>, BoundTypeVarInstance<'db>>,
@@ -341,7 +341,7 @@ pub struct GenericContext<'db> {
 
 pub(super) fn walk_generic_context<'db, V: TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     context: GenericContext<'db>,
     visitor: &V,
 ) {
@@ -400,7 +400,7 @@ impl<'db> GenericContext<'db> {
     /// Creates a generic context from a list of `BoundTypeVarInstance`s.
     pub(crate) fn from_typevar_instances(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         type_params: impl IntoIterator<Item = BoundTypeVarInstance<'db>>,
     ) -> Self {
         Self::new_internal(
@@ -485,7 +485,7 @@ impl<'db> GenericContext<'db> {
             fn visit_bound_type_var_type(
                 &self,
                 db: &'db dyn Db,
-                program: crate::Program<'db>,
+                program: crate::Program,
                 bound_typevar: BoundTypeVarInstance<'db>,
             ) {
                 self.typevars
@@ -497,7 +497,7 @@ impl<'db> GenericContext<'db> {
                 }
             }
 
-            fn visit_type(&self, db: &'db dyn Db, program: Program<'db>, ty: Type<'db>) {
+            fn visit_type(&self, db: &'db dyn Db, program: Program, ty: Type<'db>) {
                 walk_type_with_recursion_guard(db, program, ty, self, &self.recursion_guard);
             }
         }
@@ -772,7 +772,7 @@ impl<'db> GenericContext<'db> {
             fn visit_bound_type_var_type(
                 &self,
                 db: &'db dyn Db,
-                _program: Program<'db>,
+                _program: Program,
                 bound_typevar: BoundTypeVarInstance<'db>,
             ) {
                 let bound_typevar = if bound_typevar.is_paramspec(db) {
@@ -800,7 +800,7 @@ impl<'db> GenericContext<'db> {
             fn visit_callable_type(
                 &self,
                 db: &'db dyn Db,
-                program: Program<'db>,
+                program: Program,
                 callable: CallableType<'db>,
             ) {
                 // Note: We only consider the outermost Callables in the return type.
@@ -816,7 +816,7 @@ impl<'db> GenericContext<'db> {
             fn visit_type_alias_type(
                 &self,
                 db: &'db dyn Db,
-                program: crate::Program<'db>,
+                program: crate::Program,
                 type_alias: TypeAliasType<'db>,
             ) {
                 // The default implementation would do this for us if we returned `true` from
@@ -832,18 +832,17 @@ impl<'db> GenericContext<'db> {
                 }
             }
 
-            fn visit_type(&self, db: &'db dyn Db, program: crate::Program<'db>, ty: Type<'db>) {
+            fn visit_type(&self, db: &'db dyn Db, program: crate::Program, ty: Type<'db>) {
                 walk_type_with_recursion_guard(db, program, ty, self, &self.recursion_guard);
             }
         }
-
-        let program = function_definition.analysis_file(db).program(db);
 
         // If the function in question is not generic, then there are no typevars, and we don't
         // have to worry about which ones appear in return type Callables.
         let Some(generic_context) = generic_context else {
             return (None, return_type);
         };
+        let program = function_definition.analysis_file(db).program(db);
 
         // Find whether each typevar appears inside and/or outside a return type Callable.
         let mut find_typevar_locations = FindTypeVarLocations::default();
@@ -888,7 +887,7 @@ impl<'db> GenericContext<'db> {
     pub(crate) fn default_specialization(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         known_class: Option<KnownClass>,
     ) -> Specialization<'db> {
         let partial = self.specialize_partial(db, program, std::iter::repeat_n(None, self.len(db)));
@@ -985,7 +984,7 @@ impl<'db> GenericContext<'db> {
     pub(crate) fn specialize_recursive<I>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         types: I,
     ) -> Specialization<'db>
     where
@@ -1000,7 +999,7 @@ impl<'db> GenericContext<'db> {
     fn specialize_from_types_recursive(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         mut types: Box<[Type<'db>]>,
     ) -> Specialization<'db> {
         let len = types.len();
@@ -1056,7 +1055,7 @@ impl<'db> GenericContext<'db> {
     fn fill_in_defaults<I>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         types: I,
     ) -> Box<[Type<'db>]>
     where
@@ -1120,7 +1119,7 @@ impl<'db> GenericContext<'db> {
     pub(crate) fn specialize_partial<I>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         types: I,
     ) -> Specialization<'db>
     where
@@ -1165,7 +1164,7 @@ impl get_size2::GetSize for Specialization<'_> {}
 
 pub(super) fn walk_specialization<'db, V: TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     specialization: Specialization<'db>,
     visitor: &V,
 ) {
@@ -1305,7 +1304,7 @@ impl<'db> Specialization<'db> {
     pub(crate) fn apply_specialization(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         other: Specialization<'db>,
     ) -> Self {
         let new_specialization = self.apply_type_mapping(
@@ -1341,7 +1340,7 @@ impl<'db> Specialization<'db> {
     pub(crate) fn apply_type_mapping<'a>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'a, 'db>,
     ) -> Self {
         self.apply_type_mapping_impl(
@@ -1356,7 +1355,7 @@ impl<'db> Specialization<'db> {
     pub(crate) fn apply_type_mapping_impl<'a>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'a, 'db>,
         tcx: &[Type<'db>],
         visitor: &ApplyTypeMappingVisitor<'db>,
@@ -1405,7 +1404,7 @@ impl<'db> Specialization<'db> {
     pub(crate) fn apply_optional_specialization(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         other: Option<Specialization<'db>>,
     ) -> Self {
         if let Some(other) = other {
@@ -1420,7 +1419,7 @@ impl<'db> Specialization<'db> {
     /// typevar to a known type, those types are unioned together.
     ///
     /// Panics if the two specializations are not for the same generic context.
-    pub(crate) fn combine(self, db: &'db dyn Db, program: Program<'db>, other: Self) -> Self {
+    pub(crate) fn combine(self, db: &'db dyn Db, program: Program, other: Self) -> Self {
         let generic_context = self.generic_context(db);
         assert_eq!(other.generic_context(db), generic_context);
         // TODO special-casing Unknown to mean "no mapping" is not right here, and can give
@@ -1445,7 +1444,7 @@ impl<'db> Specialization<'db> {
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -1480,7 +1479,7 @@ impl<'db> Specialization<'db> {
     pub(super) fn materialize_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         materialization_kind: MaterializationKind,
         visitor: &ApplyTypeMappingVisitor<'db>,
     ) -> Self {
@@ -1554,7 +1553,7 @@ impl<'db> Specialization<'db> {
     pub(crate) fn is_disjoint_from<'c>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         other: Self,
         constraints: &'c ConstraintSetBuilder<'db>,
         inferable: InferableTypeVars<'db>,
@@ -1578,7 +1577,7 @@ impl<'db> Specialization<'db> {
     pub(crate) fn find_legacy_typevars_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         binding_context: Option<Definition<'db>>,
         typevars: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
         visitor: &FindLegacyTypeVarsVisitor<'db>,
@@ -1848,7 +1847,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
 
 fn specialization_variance<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     bound_typevar: BoundTypeVarInstance<'db>,
 ) -> TypeVarVariance {
     let variance = bound_typevar.variance(db, program);
@@ -2020,7 +2019,7 @@ impl<'db> Type<'db> {
     pub(crate) fn substitute_one_typevar(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         bound_typevar: BoundTypeVarInstance<'db>,
         replacement: Type<'db>,
     ) -> Type<'db> {
@@ -2040,7 +2039,7 @@ impl<'db> Type<'db> {
 /// specialization of a generic function.
 pub(crate) struct SpecializationBuilder<'db, 'c> {
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     constraints: &'c ConstraintSetBuilder<'db>,
     inferable: InferableTypeVars<'db>,
     pending: ConstraintSet<'db, 'c>,
@@ -2051,7 +2050,7 @@ pub(crate) struct SpecializationBuilder<'db, 'c> {
 impl<'db, 'c> SpecializationBuilder<'db, 'c> {
     pub(crate) fn new(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         constraints: &'c ConstraintSetBuilder<'db>,
         inferable: InferableTypeVars<'db>,
     ) -> Self {

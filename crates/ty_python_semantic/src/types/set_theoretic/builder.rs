@@ -59,7 +59,7 @@ use smallvec::SmallVec;
 /// This only recognizes the "single truthiness guard" forms used by truthiness narrowing.
 fn split_truthiness_guarded_intersection<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     ty: Type<'db>,
 ) -> Option<(Type<'db>, Type<'db>)> {
     let Type::Intersection(intersection) = ty else {
@@ -96,7 +96,7 @@ fn split_truthiness_guarded_intersection<'db>(
 /// `list[Any]` is an invariant-dynamic generalization of `list[int]`.
 fn is_invariant_dynamic_generalization_of<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     general: Type<'db>,
     specific: Type<'db>,
 ) -> bool {
@@ -165,7 +165,7 @@ fn is_invariant_dynamic_generalization_of<'db>(
 /// Discussion: <https://github.com/astral-sh/ty/issues/224>
 fn merge_truthiness_guarded_pair<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     left: Type<'db>,
     right: Type<'db>,
 ) -> Option<Type<'db>> {
@@ -198,7 +198,7 @@ fn merge_truthiness_guarded_pair<'db>(
 /// unhashable. Keeping the non-final type allows downstream checks to consider it independently.
 fn should_preserve_hashable_union(
     db: &dyn Db,
-    program: crate::Program<'_>,
+    program: crate::Program,
     left: Type,
     right: Type,
 ) -> bool {
@@ -227,7 +227,7 @@ fn should_preserve_hashable_union(
 /// ```
 fn normalize_enum_complement_unions<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     types: &mut Vec<Type<'db>>,
 ) -> bool {
     for complement_index in 0..types.len() {
@@ -390,7 +390,7 @@ impl<'db> UnionElement<'db> {
     fn try_reduce(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         other_type: Type<'db>,
         cycle_recovery: bool,
     ) -> ReduceResult<'db> {
@@ -551,7 +551,7 @@ const MAX_NON_RECURSIVE_UNION_LITERALS: usize = 8192;
 pub(crate) struct UnionBuilder<'db> {
     elements: Vec<UnionElement<'db>>,
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     unpack_aliases: bool,
     /// This is enabled when joining types in a `cycle_recovery` function. Because recovery cannot
     /// introduce a new cycle, relation-based union simplifications are skipped in this mode.
@@ -574,7 +574,7 @@ impl<'db> UnionAccumulator<'db> {
         UnionAccumulator::One(ty)
     }
 
-    pub(crate) fn add(&mut self, db: &'db dyn Db, program: Program<'db>, ty: Type<'db>) {
+    pub(crate) fn add(&mut self, db: &'db dyn Db, program: Program, ty: Type<'db>) {
         match self {
             UnionAccumulator::One(existing) => {
                 *self = UnionAccumulator::Two(*existing, ty);
@@ -590,7 +590,7 @@ impl<'db> UnionAccumulator<'db> {
         }
     }
 
-    pub(crate) fn get_or_build(&mut self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    pub(crate) fn get_or_build(&mut self, db: &'db dyn Db, program: Program) -> Type<'db> {
         match self {
             UnionAccumulator::One(ty) => *ty,
             UnionAccumulator::Two(first, second) => {
@@ -607,7 +607,7 @@ impl<'db> UnionAccumulator<'db> {
         }
     }
 
-    pub(crate) fn into_type(self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    pub(crate) fn into_type(self, db: &'db dyn Db, program: Program) -> Type<'db> {
         match self {
             UnionAccumulator::One(ty) => ty,
             UnionAccumulator::Two(first, second) => {
@@ -619,7 +619,7 @@ impl<'db> UnionAccumulator<'db> {
 }
 
 impl<'db> UnionBuilder<'db> {
-    pub(crate) fn new(db: &'db dyn Db, program: Program<'db>) -> Self {
+    pub(crate) fn new(db: &'db dyn Db, program: Program) -> Self {
         Self {
             db,
             program,
@@ -652,7 +652,7 @@ impl<'db> UnionBuilder<'db> {
         self.elements.is_empty()
     }
 
-    pub(crate) fn program(&self) -> Program<'db> {
+    pub(crate) fn program(&self) -> Program {
         self.program
     }
 
@@ -1252,11 +1252,11 @@ pub(crate) struct IntersectionBuilder<'db> {
     // create a union of intersections.
     intersections: Vec<InnerIntersectionBuilder<'db>>,
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
 }
 
 impl<'db> IntersectionBuilder<'db> {
-    pub(crate) fn new(db: &'db dyn Db, program: Program<'db>) -> Self {
+    pub(crate) fn new(db: &'db dyn Db, program: Program) -> Self {
         Self {
             db,
             program,
@@ -1264,7 +1264,7 @@ impl<'db> IntersectionBuilder<'db> {
         }
     }
 
-    fn empty(db: &'db dyn Db, program: Program<'db>) -> Self {
+    fn empty(db: &'db dyn Db, program: Program) -> Self {
         Self {
             db,
             program,
@@ -1477,7 +1477,7 @@ impl<'db> InnerIntersectionBuilder<'db> {
     ///     if color is not Color.RED and color is not Color.BLUE:
     ///         reveal_type(color)  # Never
     /// ```
-    fn has_empty_enum_complement(&self, db: &'db dyn Db, program: Program<'db>) -> bool {
+    fn has_empty_enum_complement(&self, db: &'db dyn Db, program: Program) -> bool {
         for positive in &self.positive {
             let Type::NominalInstance(instance) = positive else {
                 continue;
@@ -1523,12 +1523,7 @@ impl<'db> InnerIntersectionBuilder<'db> {
     }
 
     /// Adds a positive type to this intersection.
-    fn add_positive(
-        &mut self,
-        db: &'db dyn Db,
-        program: Program<'db>,
-        mut new_positive: Type<'db>,
-    ) {
+    fn add_positive(&mut self, db: &'db dyn Db, program: Program, mut new_positive: Type<'db>) {
         // `Never & T` -> `Never`
         if self.positive.contains(&Type::Never) {
             return;
@@ -1757,7 +1752,7 @@ impl<'db> InnerIntersectionBuilder<'db> {
     }
 
     /// Adds a negative type to this intersection.
-    fn add_negative(&mut self, db: &'db dyn Db, program: Program<'db>, new_negative: Type<'db>) {
+    fn add_negative(&mut self, db: &'db dyn Db, program: Program, new_negative: Type<'db>) {
         // `Never & ~T` -> `Never`.
         if self.positive.contains(&Type::Never) {
             return;
@@ -1910,7 +1905,7 @@ impl<'db> InnerIntersectionBuilder<'db> {
     ///
     /// - If the intersection contains negative entries for all of the constraints, the overall
     ///   intersection is `Never`.
-    fn simplify_constrained_typevars(&mut self, db: &'db dyn Db, program: Program<'db>) {
+    fn simplify_constrained_typevars(&mut self, db: &'db dyn Db, program: Program) {
         let mut to_add = SmallVec::<[Type<'db>; 1]>::new();
 
         for ty in &self.positive {
@@ -1964,7 +1959,7 @@ impl<'db> InnerIntersectionBuilder<'db> {
         }
     }
 
-    fn build(mut self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    fn build(mut self, db: &'db dyn Db, program: Program) -> Type<'db> {
         if self.has_empty_enum_complement(db, program) {
             return Type::Never;
         }

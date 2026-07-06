@@ -39,7 +39,7 @@ impl<'db> Type<'db> {
         }
     }
 
-    pub(crate) fn has_typevar(self, db: &'db dyn Db, program: crate::Program<'db>) -> bool {
+    pub(crate) fn has_typevar(self, db: &'db dyn Db, program: crate::Program) -> bool {
         any_over_type(db, program, self, false, |ty| {
             matches!(ty, Type::TypeVar(_))
         })
@@ -48,7 +48,7 @@ impl<'db> Type<'db> {
     pub(crate) fn references_typevar(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         typevar_id: TypeVarIdentity<'db>,
     ) -> bool {
         any_over_type(db, program, self, false, |ty| match ty {
@@ -60,11 +60,7 @@ impl<'db> Type<'db> {
         })
     }
 
-    pub(crate) fn has_non_self_typevar(
-        self,
-        db: &'db dyn Db,
-        program: crate::Program<'db>,
-    ) -> bool {
+    pub(crate) fn has_non_self_typevar(self, db: &'db dyn Db, program: crate::Program) -> bool {
         any_over_type(
             db,
             program,
@@ -77,7 +73,7 @@ impl<'db> Type<'db> {
     pub(crate) fn has_typevar_or_typevar_instance(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> bool {
         any_over_type(db, program, self, false, |ty| {
             matches!(
@@ -90,7 +86,7 @@ impl<'db> Type<'db> {
     pub(crate) fn has_unspecialized_type_var(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> bool {
         any_over_type(db, program, self, false, |ty| {
             matches!(ty, Type::Dynamic(DynamicType::UnspecializedTypeVar))
@@ -153,7 +149,7 @@ impl get_size2::GetSize for TypeVarInstance<'_> {}
 
 pub(super) fn walk_type_var_type<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     typevar: TypeVarInstance<'db>,
     visitor: &V,
 ) {
@@ -302,7 +298,7 @@ impl<'db> TypeVarInstance<'db> {
     fn materialize_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         materialization_kind: MaterializationKind,
         visitor: &ApplyTypeMappingVisitor<'db>,
     ) -> Self {
@@ -345,7 +341,7 @@ impl<'db> TypeVarInstance<'db> {
         )
     }
 
-    fn to_instance(self, db: &'db dyn Db, program: crate::Program<'db>) -> Option<Self> {
+    fn to_instance(self, db: &'db dyn Db, program: crate::Program) -> Option<Self> {
         let bound_or_constraints = match self.bound_or_constraints(db)? {
             TypeVarBoundOrConstraints::UpperBound(upper_bound) => {
                 TypeVarBoundOrConstraints::UpperBound(upper_bound.to_instance(db, program)?)
@@ -380,7 +376,7 @@ impl<'db> TypeVarInstance<'db> {
         #[derive(Copy, Clone)]
         struct State<'db, 'a> {
             db: &'db dyn Db,
-            program: crate::Program<'db>,
+            program: crate::Program,
             visitor: &'a TypeVarDefaultVisitor<'db>,
             seen_typevars: &'a RefCell<FxHashSet<TypeVarInstance<'db>>>,
             seen_type_aliases: &'a RefCell<SeenTypeAliases<'db>>,
@@ -817,7 +813,7 @@ impl<'db> TypeVarNonceGenerator<'db> {
 
 pub(crate) fn max_typevar_freshness_matching_generic_context<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     types: impl IntoIterator<Item = Type<'db>>,
     generic_context: GenericContext<'db>,
 ) -> Option<TypeVarNonce> {
@@ -853,7 +849,7 @@ pub(crate) fn max_typevar_freshness_matching_generic_context<'db>(
         fn visit_bound_type_var_type(
             &self,
             db: &'db dyn Db,
-            _program: crate::Program<'db>,
+            _program: crate::Program,
             bound_typevar: BoundTypeVarInstance<'db>,
         ) {
             let mut identity = bound_typevar.identity(db);
@@ -867,7 +863,7 @@ pub(crate) fn max_typevar_freshness_matching_generic_context<'db>(
             }
         }
 
-        fn visit_type(&self, db: &'db dyn Db, program: crate::Program<'db>, ty: Type<'db>) {
+        fn visit_type(&self, db: &'db dyn Db, program: crate::Program, ty: Type<'db>) {
             walk_type_with_recursion_guard(db, program, ty, self, &self.recursion_guard);
         }
     }
@@ -926,7 +922,7 @@ impl<'db> BoundTypeVarInstance<'db> {
         self.identity(db).freshness
     }
 
-    pub(crate) fn program(self, db: &'db dyn Db) -> crate::Program<'db> {
+    pub(crate) fn program(self, db: &'db dyn Db) -> crate::Program {
         self.binding_context(db).program(db)
     }
 
@@ -973,7 +969,7 @@ impl<'db> BoundTypeVarInstance<'db> {
     pub(crate) fn with_paramspec_attr(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         kind: ParamSpecAttrKind,
     ) -> Self {
         debug_assert!(
@@ -1049,7 +1045,7 @@ impl<'db> BoundTypeVarInstance<'db> {
     /// of synthetic generic functions.
     pub(crate) fn synthetic(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         name: Name,
         variance: TypeVarVariance,
     ) -> Self {
@@ -1125,7 +1121,7 @@ impl<'db> BoundTypeVarInstance<'db> {
     pub(crate) fn variance_with_polarity(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         polarity: TypeVarVariance,
     ) -> TypeVarVariance {
         let _span = tracing::trace_span!("variance_with_polarity").entered();
@@ -1140,14 +1136,14 @@ impl<'db> BoundTypeVarInstance<'db> {
         }
     }
 
-    pub fn variance(self, db: &'db dyn Db, program: crate::Program<'db>) -> TypeVarVariance {
+    pub fn variance(self, db: &'db dyn Db, program: crate::Program) -> TypeVarVariance {
         self.variance_with_polarity(db, program, TypeVarVariance::Covariant)
     }
 
     pub(super) fn apply_type_mapping_impl<'a>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'a, 'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
     ) -> Type<'db> {
@@ -1244,7 +1240,7 @@ impl<'db> BoundTypeVarInstance<'db> {
 
 pub(super) fn walk_bound_type_var_type<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     bound_typevar: BoundTypeVarInstance<'db>,
     visitor: &V,
 ) {
@@ -1281,7 +1277,7 @@ impl<'db> BoundTypeVarInstance<'db> {
     fn materialize_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         materialization_kind: MaterializationKind,
         visitor: &ApplyTypeMappingVisitor<'db>,
     ) -> Self {
@@ -1298,7 +1294,7 @@ impl<'db> BoundTypeVarInstance<'db> {
     fn freshen_with_mapping(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         nonce: TypeVarNonce,
         type_mapping: &TypeMapping<'_, 'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
@@ -1347,7 +1343,7 @@ impl<'db> BoundTypeVarInstance<'db> {
         )
     }
 
-    pub(super) fn to_instance(self, db: &'db dyn Db, program: crate::Program<'db>) -> Option<Self> {
+    pub(super) fn to_instance(self, db: &'db dyn Db, program: crate::Program) -> Option<Self> {
         Some(Self::new(
             db,
             self.typevar(db).to_instance(db, program)?,
@@ -1470,7 +1466,7 @@ pub enum BindingContext<'db> {
     Definition(Definition<'db>),
     /// The typevar is synthesized internally, and is not associated with a particular definition
     /// in the source, but is still bound and eligible for specialization inference.
-    Synthetic(crate::Program<'db>),
+    Synthetic(crate::Program),
 }
 
 impl<'db> From<Definition<'db>> for BindingContext<'db> {
@@ -1487,7 +1483,7 @@ impl<'db> BindingContext<'db> {
         }
     }
 
-    pub(crate) fn program(self, db: &'db dyn Db) -> crate::Program<'db> {
+    pub(crate) fn program(self, db: &'db dyn Db) -> crate::Program {
         match self {
             BindingContext::Definition(definition) => definition.scope(db).program(db),
             BindingContext::Synthetic(program) => program,
@@ -1636,7 +1632,7 @@ impl get_size2::GetSize for TypeVarConstraints<'_> {}
 
 fn walk_type_var_constraints<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     constraints: TypeVarConstraints<'db>,
     visitor: &V,
 ) {
@@ -1646,14 +1642,14 @@ fn walk_type_var_constraints<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
 }
 
 impl<'db> TypeVarConstraints<'db> {
-    pub(super) fn as_type(self, db: &'db dyn Db, program: crate::Program<'db>) -> Type<'db> {
+    pub(super) fn as_type(self, db: &'db dyn Db, program: crate::Program) -> Type<'db> {
         UnionType::from_elements(db, program, self.elements(db))
     }
 
     fn to_instance(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Option<TypeVarConstraints<'db>> {
         let mut instance_elements = Vec::new();
         for ty in self.elements(db) {
@@ -1681,7 +1677,7 @@ impl<'db> TypeVarConstraints<'db> {
     pub(crate) fn map_with_boundness_and_qualifiers(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         mut transform_fn: impl FnMut(&Type<'db>) -> PlaceAndQualifiers<'db>,
     ) -> PlaceAndQualifiers<'db> {
         let mut builder = UnionBuilder::new(db, program);
@@ -1739,7 +1735,7 @@ impl<'db> TypeVarConstraints<'db> {
     fn materialize_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         materialization_kind: MaterializationKind,
         visitor: &ApplyTypeMappingVisitor<'db>,
     ) -> Self {
@@ -1754,7 +1750,7 @@ impl<'db> TypeVarConstraints<'db> {
     fn apply_type_mapping_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'_, 'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
     ) -> Self {
@@ -1781,7 +1777,7 @@ impl<'db> TypeVarConstraints<'db> {
     fn cycle_normalized(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         previous: Self,
         cycle: &salsa::Cycle,
     ) -> Self {
@@ -1803,7 +1799,7 @@ impl<'db> TypeVarConstraints<'db> {
     fn recursive_type_normalized(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         cycle: &salsa::Cycle,
     ) -> Self {
         self.map(db, |ty| ty.recursive_type_normalized(db, program, cycle))
@@ -1818,7 +1814,7 @@ pub enum TypeVarBoundOrConstraints<'db> {
 
 pub(super) fn walk_type_var_bounds<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     bounds: TypeVarBoundOrConstraints<'db>,
     visitor: &V,
 ) {
@@ -1834,7 +1830,7 @@ impl<'db> TypeVarBoundOrConstraints<'db> {
     fn materialize_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         materialization_kind: MaterializationKind,
         visitor: &ApplyTypeMappingVisitor<'db>,
     ) -> Self {
@@ -1856,7 +1852,7 @@ impl<'db> TypeVarBoundOrConstraints<'db> {
     fn apply_type_mapping_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'_, 'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
     ) -> Self {
@@ -1887,7 +1883,7 @@ impl<'db> TypeVarBoundOrConstraints<'db> {
     /// constraints provides a conservative upper bound, but it loses precision. And for many use
     /// cases, it's more efficient to just map over the constraint types directly, rather than
     /// building a union out of them and mapping over that.
-    pub(crate) fn as_type(self, db: &'db dyn Db, program: crate::Program<'db>) -> Type<'db> {
+    pub(crate) fn as_type(self, db: &'db dyn Db, program: crate::Program) -> Type<'db> {
         match self {
             TypeVarBoundOrConstraints::UpperBound(bound) => bound,
             TypeVarBoundOrConstraints::Constraints(constraints) => constraints.as_type(db, program),

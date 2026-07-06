@@ -88,6 +88,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         } else {
             UnionTypeInstance::from_value_expression_types(
                 db,
+                self.program,
                 [left_ty, right_ty],
                 self.scope(),
                 self.typevar_binding_context,
@@ -256,7 +257,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
     /// otherwise returns the union of all results.
     pub(super) fn map_constrained_typevar_constraints(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         typevar: Type<'db>,
         constraints: TypeVarConstraints<'db>,
         mut op: impl FnMut(Type<'db>) -> Option<Type<'db>>,
@@ -925,6 +926,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 } else {
                     Some(UnionTypeInstance::from_value_expression_types(
                         db,
+                        self.program,
                         [left_ty, right_ty],
                         self.scope(),
                         self.typevar_binding_context,
@@ -952,6 +954,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             ) if instance.has_known_class(db, KnownClass::NoneType) => {
                 Some(UnionTypeInstance::from_value_expression_types(
                     db,
+                    self.program,
                     [left_ty, right_ty],
                     self.scope(),
                     self.typevar_binding_context,

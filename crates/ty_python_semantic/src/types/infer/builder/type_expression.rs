@@ -120,6 +120,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             .default_specialize(self.db(), self.program)
             .in_type_expression(
                 self.db(),
+                self.program,
                 self.scope(),
                 self.typevar_binding_context,
                 self.inference_flags(),
@@ -1440,6 +1441,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 value_ty
                     .in_type_expression(
                         db,
+                        program,
                         scope_id,
                         current_typevar_binding_context,
                         current_inference_flags,
@@ -1460,6 +1462,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 specialized
                     .in_type_expression(
                         db,
+                        program,
                         scope_id,
                         current_typevar_binding_context,
                         current_inference_flags,
@@ -1618,6 +1621,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                             specialized_type_alias
                                 .in_type_expression(
                                     self.db(),
+                                    self.program,
                                     self.scope(),
                                     self.typevar_binding_context,
                                     self.inference_flags(),
@@ -1795,6 +1799,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                         specialized_class
                             .in_type_expression(
                                 self.db(),
+                                self.program,
                                 self.scope(),
                                 self.typevar_binding_context,
                                 self.inference_flags(),
@@ -2019,7 +2024,13 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                     AnnotatedExprContext::TypeExpression,
                 )
                 .inner_type()
-                .in_type_expression(self.db(), self.scope(), None, self.inference_flags())
+                .in_type_expression(
+                    self.db(),
+                    self.program,
+                    self.scope(),
+                    None,
+                    self.inference_flags(),
+                )
                 .unwrap_or_else(|err| {
                     err.into_fallback_type(&self.context, subscript, self.inference_flags())
                 }),

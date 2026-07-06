@@ -177,7 +177,7 @@ impl<'db> DynamicClassLiteral<'db> {
         }
     }
 
-    fn program(self, db: &'db dyn Db) -> crate::Program<'db> {
+    fn program(self, db: &'db dyn Db) -> crate::Program {
         self.scope(db).program(db)
     }
 

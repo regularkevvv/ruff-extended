@@ -74,7 +74,7 @@ pub(crate) use self::constructor::ConstructorCallableKind;
 
 fn generic_contexts_mentioned_in_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     ty: Type<'db>,
 ) -> FxOrderSet<GenericContext<'db>> {
     struct GenericContextCollector<'db> {
@@ -86,7 +86,7 @@ fn generic_contexts_mentioned_in_type<'db>(
         fn visit_signature(
             &self,
             db: &'db dyn Db,
-            program: crate::Program<'db>,
+            program: crate::Program,
             signature: &Signature<'db>,
         ) {
             if let Some(generic_context) = signature.generic_context {
@@ -110,7 +110,7 @@ fn generic_contexts_mentioned_in_type<'db>(
         fn visit_callable_type(
             &self,
             db: &'db dyn Db,
-            program: crate::Program<'db>,
+            program: crate::Program,
             callable: CallableType<'db>,
         ) {
             for signature in &callable.signatures(db).overloads {
@@ -121,7 +121,7 @@ fn generic_contexts_mentioned_in_type<'db>(
         fn visit_function_type(
             &self,
             db: &'db dyn Db,
-            program: crate::Program<'db>,
+            program: crate::Program,
             function: FunctionType<'db>,
         ) {
             for signature in &function.signature(db).overloads {
@@ -130,7 +130,7 @@ fn generic_contexts_mentioned_in_type<'db>(
             self.visit_signature(db, program, function.last_definition_signature(db));
         }
 
-        fn visit_type(&self, db: &'db dyn Db, program: crate::Program<'db>, ty: Type<'db>) {
+        fn visit_type(&self, db: &'db dyn Db, program: crate::Program, ty: Type<'db>) {
             walk_type_with_recursion_guard(db, program, ty, self, &self.recursion_guard);
         }
     }
@@ -145,7 +145,7 @@ fn generic_contexts_mentioned_in_type<'db>(
 
 fn freshen_generic_contexts_in_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     ty: Type<'db>,
     generic_contexts: FxOrderSet<GenericContext<'db>>,
     nonce_generator: &TypeVarNonceGenerator<'db>,
@@ -209,7 +209,7 @@ impl<'db> CallableItem<'db> {
         }
     }
 
-    fn return_type(&self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    fn return_type(&self, db: &'db dyn Db, program: Program) -> Type<'db> {
         match self {
             CallableItem::Regular(binding) => binding.return_type(),
             CallableItem::Constructor(binding) => binding.return_type(db, program),
@@ -219,7 +219,7 @@ impl<'db> CallableItem<'db> {
     fn check_types(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         constraints: &ConstraintSetBuilder<'db>,
         argument_types: &CallArguments<'_, 'db>,
         call_expression_tcx: TypeContext<'db>,
@@ -249,7 +249,7 @@ impl<'db> CallableItem<'db> {
     fn match_parameters(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         arguments: &CallArguments<'_, 'db>,
     ) {
         match self {
@@ -281,7 +281,7 @@ impl<'db> CallableItem<'db> {
     fn freshen_generic_contexts_in_place(
         &mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         nonce_generator: &TypeVarNonceGenerator<'db>,
     ) {
         match self {
@@ -327,7 +327,7 @@ impl<'db> CallableItem<'db> {
     fn functools_partial_callable<'a>(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         partial_overload: &mut Binding<'db>,
         bound_call_arguments: &CallArguments<'a, 'db>,
     ) -> Option<CallableType<'db>> {
@@ -400,7 +400,7 @@ impl<'db> BindingsElement<'db> {
         self.items.len() > 1
     }
 
-    fn return_type(&self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    fn return_type(&self, db: &'db dyn Db, program: Program) -> Type<'db> {
         if self.is_callable() {
             IntersectionType::from_elements(
                 db,
@@ -419,7 +419,7 @@ impl<'db> BindingsElement<'db> {
     fn check_types(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         constraints: &ConstraintSetBuilder<'db>,
         call_arguments: &CallArguments<'_, 'db>,
         call_expression_tcx: TypeContext<'db>,
@@ -853,7 +853,7 @@ impl<'db> Bindings<'db> {
     pub(crate) fn map_types(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         mut map: impl FnMut(&CallableBinding<'db>) -> Option<Type<'db>>,
     ) -> Type<'db> {
         let mut element_types = Vec::with_capacity(self.elements.len());
@@ -881,7 +881,7 @@ impl<'db> Bindings<'db> {
     fn map_item_types(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         mut map: impl FnMut(&CallableItem<'db>) -> Option<Type<'db>>,
     ) -> Type<'db> {
         let mut element_types = Vec::with_capacity(self.elements.len());
@@ -907,7 +907,7 @@ impl<'db> Bindings<'db> {
     /// normalization) used by both inference and known-call evaluation.
     pub(crate) fn functools_partial_matched_bindings<'a>(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         wrapped_callable_ty: Type<'db>,
         call_arguments: &CallArguments<'a, 'db>,
     ) -> Option<(CallArguments<'a, 'db>, Bindings<'db>, bool)> {
@@ -945,7 +945,7 @@ impl<'db> Bindings<'db> {
     fn functools_partial_type<'a>(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         wrapped_callable_ty: Type<'db>,
         partial_overload: &mut Binding<'db>,
         bound_call_arguments: &CallArguments<'a, 'db>,
@@ -1006,7 +1006,7 @@ impl<'db> Bindings<'db> {
     fn freshen_generic_contexts_in_place(
         &mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         nonce_generator: &TypeVarNonceGenerator<'db>,
     ) {
         let enclosing_binding_contexts = self.enclosing_binding_contexts.take();
@@ -1032,7 +1032,7 @@ impl<'db> Bindings<'db> {
     pub(crate) fn match_parameters(
         mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         arguments: &CallArguments<'_, 'db>,
     ) -> Self {
         let nonce_generator = TypeVarNonceGenerator::default();
@@ -1044,7 +1044,7 @@ impl<'db> Bindings<'db> {
     fn match_parameters_in_place(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         arguments: &CallArguments<'_, 'db>,
     ) {
         for item in self.iter_callable_items_mut() {
@@ -1067,7 +1067,7 @@ impl<'db> Bindings<'db> {
     pub(crate) fn check_types(
         mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         constraints: &ConstraintSetBuilder<'db>,
         call_arguments: &CallArguments<'_, 'db>,
         call_expression_tcx: TypeContext<'db>,
@@ -1089,7 +1089,7 @@ impl<'db> Bindings<'db> {
     pub(crate) fn check_types_impl(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         constraints: &ConstraintSetBuilder<'db>,
         call_arguments: &CallArguments<'_, 'db>,
         call_expression_tcx: TypeContext<'db>,
@@ -1165,7 +1165,7 @@ impl<'db> Bindings<'db> {
     /// Returns the return type of the call. For successful calls, this is the actual return type.
     /// For calls with binding errors, this is a type that best approximates the return type. For
     /// types that are not callable, returns `Type::Unknown`.
-    pub(crate) fn return_type(&self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    pub(crate) fn return_type(&self, db: &'db dyn Db, program: Program) -> Type<'db> {
         UnionType::from_elements(
             db,
             program,
@@ -1322,7 +1322,7 @@ impl<'db> Bindings<'db> {
     fn evaluate_known_cases(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         call_arguments: &CallArguments<'_, 'db>,
         dataclass_field_specifiers: &[Type<'db>],
     ) {
@@ -3093,7 +3093,7 @@ impl<'db> CallableBinding<'db> {
     pub(crate) fn bake_bound_type_into_overloads(
         &mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) {
         let Some(bound_self) = self.bound_type.take() else {
             return;
@@ -3106,7 +3106,7 @@ impl<'db> CallableBinding<'db> {
     fn freshen_generic_contexts_in_place(
         &mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         nonce_generator: &TypeVarNonceGenerator<'db>,
     ) {
         if self
@@ -3324,7 +3324,7 @@ impl<'db> CallableBinding<'db> {
     fn match_parameters(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         arguments: &CallArguments<'_, 'db>,
     ) {
         // If this callable is a bound method, prepend the self instance onto the arguments list
@@ -3339,7 +3339,7 @@ impl<'db> CallableBinding<'db> {
     fn check_types(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         constraints: &ConstraintSetBuilder<'db>,
         call_arguments: &CallArguments<'_, 'db>,
         call_expression_tcx: TypeContext<'db>,
@@ -3743,7 +3743,7 @@ impl<'db> CallableBinding<'db> {
     fn filter_overloads_using_any_or_unknown(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         constraints: &ConstraintSetBuilder<'db>,
         arguments: &CallArguments<'_, 'db>,
         matching_overload_indexes: &[usize],
@@ -4526,7 +4526,7 @@ impl<'a, 'db> ArgumentMatcher<'a, 'db> {
     fn match_variadic(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         argument_index: usize,
         argument: Argument<'a>,
         argument_type: Option<Type<'db>>,
@@ -4755,7 +4755,7 @@ impl<'a, 'db> ArgumentMatcher<'a, 'db> {
     fn match_keyword_variadic(
         &mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         argument_index: usize,
         argument_type: Option<Type<'db>>,
     ) {
@@ -4921,7 +4921,7 @@ impl<'a, 'db> ArgumentMatcher<'a, 'db> {
 
 struct ArgumentTypeChecker<'a, 'db> {
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     signature_type: Type<'db>,
     signature: &'a Signature<'db>,
     arguments: &'a CallArguments<'a, 'db>,
@@ -4957,7 +4957,7 @@ enum KeywordUnpackKeyTypeCheck<'db> {
 /// Validate the key type of a keyword-unpack argument without checking its value type.
 fn validate_keyword_unpack_key_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     constraints: &ConstraintSetBuilder<'db>,
     argument_type: Type<'db>,
     inferable_typevars: InferableTypeVars<'db>,
@@ -4992,7 +4992,7 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
     #[expect(clippy::too_many_arguments)]
     fn new(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         signature_type: Type<'db>,
         signature: &'a Signature<'db>,
         arguments: &'a CallArguments<'a, 'db>,
@@ -5961,7 +5961,7 @@ pub(crate) struct UnknownParameterNameError;
 #[derive(Clone, Copy)]
 struct ParamSpecArgumentContext<'a, 'call, 'db> {
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     constraints: &'a ConstraintSetBuilder<'db>,
     binding: &'a CallableBinding<'db>,
     callable: CallableType<'db>,
@@ -6099,7 +6099,7 @@ impl<'db> Binding<'db> {
     fn inferred_paramspec_callable(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         constraints: &ConstraintSetBuilder<'db>,
         binding: &CallableBinding<'db>,
         paramspec: BoundTypeVarInstance<'db>,
@@ -6235,7 +6235,7 @@ impl<'db> Binding<'db> {
     pub(crate) fn paramspec_binder_parameter_type(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         binding: &CallableBinding<'db>,
         argument_index: usize,
     ) -> Option<Type<'db>> {
@@ -6273,7 +6273,7 @@ impl<'db> Binding<'db> {
     pub(crate) fn argument_type_context(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         constraints: &ConstraintSetBuilder<'db>,
         binding: &CallableBinding<'db>,
         arguments_types: &CallArguments<'_, 'db>,
@@ -6429,12 +6429,7 @@ impl<'db> Binding<'db> {
         }
     }
 
-    fn freshen_bound_typevars(
-        &mut self,
-        db: &'db dyn Db,
-        program: crate::Program<'db>,
-        delta: u32,
-    ) {
+    fn freshen_bound_typevars(&mut self, db: &'db dyn Db, program: crate::Program, delta: u32) {
         if self.signature.generic_context.is_none() {
             return;
         }
@@ -6446,7 +6441,7 @@ impl<'db> Binding<'db> {
     fn match_parameters(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         arguments: &CallArguments<'_, 'db>,
     ) {
         let parameters = self.signature.parameters();
@@ -6492,7 +6487,7 @@ impl<'db> Binding<'db> {
     fn check_types(
         &mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         constraints: &ConstraintSetBuilder<'db>,
         arguments: &CallArguments<'_, 'db>,
         call_expression_tcx: TypeContext<'db>,
@@ -6539,7 +6534,7 @@ impl<'db> Binding<'db> {
     fn check_keyword_unpack_key_types(
         &mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         constraints: &ConstraintSetBuilder<'db>,
         arguments: &CallArguments<'_, 'db>,
     ) {
@@ -6593,7 +6588,7 @@ impl<'db> Binding<'db> {
     fn functools_partial_return_type<'a>(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         call_arguments: &CallArguments<'a, 'db>,
     ) -> Option<Type<'db>> {
         // `partial(...)` receives the wrapped callable as its first explicit argument (after
@@ -7955,7 +7950,7 @@ impl<'db> BindingError<'db> {
 /// Trait for adding context about compound types (unions/intersections) to diagnostics.
 trait CompoundDiagnostic {
     /// Adds context about any relevant compound type function types to the given diagnostic.
-    fn add_context(&self, db: &dyn Db, program: crate::Program<'_>, diag: &mut Diagnostic);
+    fn add_context(&self, db: &dyn Db, program: crate::Program, diag: &mut Diagnostic);
 }
 
 /// Contains additional context for union specific diagnostics.
@@ -7971,7 +7966,7 @@ struct UnionDiagnostic<'b, 'db> {
 }
 
 impl CompoundDiagnostic for UnionDiagnostic<'_, '_> {
-    fn add_context(&self, db: &dyn Db, program: crate::Program<'_>, diag: &mut Diagnostic) {
+    fn add_context(&self, db: &dyn Db, program: crate::Program, diag: &mut Diagnostic) {
         let sub = SubDiagnostic::new(
             SubDiagnosticSeverity::Info,
             format_args!(
@@ -8005,7 +8000,7 @@ struct IntersectionDiagnostic<'b, 'db> {
 }
 
 impl CompoundDiagnostic for IntersectionDiagnostic<'_, '_> {
-    fn add_context(&self, db: &dyn Db, program: crate::Program<'_>, diag: &mut Diagnostic) {
+    fn add_context(&self, db: &dyn Db, program: crate::Program, diag: &mut Diagnostic) {
         let sub = SubDiagnostic::new(
             SubDiagnosticSeverity::Info,
             format_args!(
@@ -8040,7 +8035,7 @@ struct LayeredDiagnostic<'b, 'db> {
 }
 
 impl CompoundDiagnostic for LayeredDiagnostic<'_, '_> {
-    fn add_context(&self, db: &dyn Db, program: crate::Program<'_>, diag: &mut Diagnostic) {
+    fn add_context(&self, db: &dyn Db, program: crate::Program, diag: &mut Diagnostic) {
         // Add intersection context first (more specific)
         let sub = SubDiagnostic::new(
             SubDiagnosticSeverity::Info,
@@ -8156,7 +8151,7 @@ const STRUCT_FORMAT_MAX_REPETITION: usize = 32;
 /// repetition counts exceed the limit, indicating a fallback to `tuple[Unknown, ...]`.
 fn parse_struct_format<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     python_version: PythonVersion,
     format_string: &str,
 ) -> Option<Vec<Type<'db>>> {

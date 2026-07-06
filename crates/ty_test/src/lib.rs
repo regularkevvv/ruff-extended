@@ -446,11 +446,11 @@ fn run_test(
     // Test to fix all fixable diagnostics and verify that they don't introduce any syntax errors.
     // But don't try to run fixes for tests that are expected to panic.
     if test.should_expect_panic().is_err() {
-        let program = db.program().snapshot(db);
+        let program = db.program();
         let token_source = CancellationTokenSource::new();
         let result = fix_all_diagnostics(
             db,
-            &program,
+            program,
             all_diagnostics,
             Applicability::Unsafe,
             &token_source.token(),

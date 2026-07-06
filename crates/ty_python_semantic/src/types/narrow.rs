@@ -57,7 +57,7 @@ use smallvec::{SmallVec, smallvec, smallvec_inline};
 /// iteration element type does not describe every value that can satisfy a membership test.
 fn has_bytes_like_containment<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     ty: Type<'db>,
 ) -> bool {
     match ty.resolve_type_alias(db) {
@@ -219,7 +219,7 @@ impl<'db> PatternSuccessTypes<'db> {
     fn cycle_normalized(
         mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         previous: &Self,
         cycle: &salsa::Cycle,
     ) -> Self {
@@ -321,7 +321,7 @@ impl<'db> PatternBindingTypes<'db> {
     }
 
     /// Return the union of all contributions to this binding.
-    fn ty(&self, db: &'db dyn Db, program: crate::Program<'db>) -> Type<'db> {
+    fn ty(&self, db: &'db dyn Db, program: crate::Program) -> Type<'db> {
         UnionType::from_elements(
             db,
             program,
@@ -342,7 +342,7 @@ impl<'db> PatternBindingTypes<'db> {
     }
 
     /// Return the union of the contributions that alias the current subject.
-    fn subject_ty(&self, db: &'db dyn Db, program: crate::Program<'db>) -> Type<'db> {
+    fn subject_ty(&self, db: &'db dyn Db, program: crate::Program) -> Type<'db> {
         UnionType::from_elements(
             db,
             program,
@@ -464,7 +464,7 @@ impl ClassInfoConstraintFunction {
     fn generate_constraint<'db>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         classinfo: Type<'db>,
         is_positive: bool,
     ) -> Option<Type<'db>> {
@@ -669,7 +669,7 @@ impl<'db> Conjunctions<'db> {
         self
     }
 
-    fn evaluate_constraint_type(self, db: &'db dyn Db, program: crate::Program<'db>) -> Type<'db> {
+    fn evaluate_constraint_type(self, db: &'db dyn Db, program: crate::Program) -> Type<'db> {
         if self.conjuncts.len() == 1 {
             return self.conjuncts[0];
         }
@@ -795,7 +795,7 @@ impl<'db> NarrowingConstraint<'db> {
     pub(crate) fn evaluate_constraint_type(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Type<'db> {
         let mut union = UnionBuilder::new(db, program);
         for conjunctions in self
@@ -960,7 +960,7 @@ fn merge_constraints_or<'db>(
 /// value of `PatternClass` may be a subclass of `A`.
 fn positive_class_pattern_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     class_expression_ty: Type<'db>,
 ) -> Option<Type<'db>> {
     match class_expression_ty {
@@ -1004,7 +1004,7 @@ fn positive_class_pattern_type<'db>(
 /// ```
 fn refine_exact_tuple_for_sequence_pattern<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     subject_ty: Type<'db>,
     pattern_element_types: &[Type<'db>],
 ) -> Option<Type<'db>> {
@@ -1038,7 +1038,7 @@ fn refine_exact_tuple_for_sequence_pattern<'db>(
 /// every value that does.
 fn necessary_match_pattern_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     pattern: &PatternPredicateKind<'db>,
 ) -> Type<'db> {
     match pattern {
@@ -1071,7 +1071,7 @@ fn necessary_match_pattern_type<'db>(
 /// Preserve the sequence element constraints that can be addressed at fixed indices.
 fn necessary_sequence_pattern_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     kind: &SequencePatternPredicateKind<'db>,
 ) -> Type<'db> {
     if let Some((prefix_patterns, suffix_patterns)) = kind.split_around_star() {
@@ -1305,7 +1305,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         Self { db, scope }
     }
 
-    fn program(&self) -> crate::Program<'db> {
+    fn program(&self) -> crate::Program {
         self.scope.program(self.db)
     }
 
@@ -2411,7 +2411,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
 }
 
 impl<'db> NarrowingConstraintsBuilder<'db, '_> {
-    fn program(&self) -> crate::Program<'db> {
+    fn program(&self) -> crate::Program {
         self.scope().program(self.db)
     }
 
@@ -2469,7 +2469,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
     ///   where the returned `Literal` types are mutually consistent in their truthiness.
     fn is_base_type_narrowable_by_len(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         ty: Type<'db>,
     ) -> bool {
         match ty {
@@ -2499,7 +2499,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
     /// Returns `None` if no part of the type is narrowable.
     fn narrow_type_by_len(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         ty: Type<'db>,
         is_positive: bool,
     ) -> Option<Type<'db>> {
@@ -2565,7 +2565,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
     /// element types for mutable or stateful sequences.
     fn narrow_type_by_sequence_pattern(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         ty: Type<'db>,
         kind: &SequencePatternPredicateKind<'db>,
     ) -> Type<'db> {
@@ -2626,7 +2626,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
     /// Return the type required by `pattern`, preserving nested exact tuples from `subject_ty`.
     fn necessary_match_pattern_type_for_subject(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         pattern: &PatternPredicateKind<'db>,
         subject_ty: Type<'db>,
     ) -> Type<'db> {
@@ -2655,7 +2655,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
     /// an observed length would become stale after mutation.
     fn narrow_type_by_exact_len(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         ty: Type<'db>,
         length: usize,
         is_equality: bool,
@@ -2943,7 +2943,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
         /// generic class.
         fn find_underlying_class<'db>(
             db: &'db dyn Db,
-            program: crate::Program<'db>,
+            program: crate::Program,
             ty: Type<'db>,
         ) -> Option<ClassLiteral<'db>> {
             match ty {
@@ -4282,7 +4282,7 @@ fn is_supported_tag_literal(ty: Type) -> bool {
 
 fn nominal_attribute_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     ty: Type<'db>,
     attribute_name: &str,
 ) -> Option<Type<'db>> {
@@ -4303,7 +4303,7 @@ fn nominal_attribute_type<'db>(
 // supported tag literal type for that field, or a type alias to such a type.
 fn all_matching_typeddict_fields_have_literal_types<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     ty: Type<'db>,
     field_name: &str,
 ) -> bool {
@@ -4392,7 +4392,7 @@ fn all_matching_typeddict_fields_have_literal_types<'db>(
 /// since a diagnostic will be emitted elsewhere for the out-of-bounds access.
 fn any_tuple_has_out_of_bounds_index<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     union: UnionType<'db>,
     index: i32,
 ) -> bool {
@@ -4411,7 +4411,7 @@ fn any_tuple_has_out_of_bounds_index<'db>(
 /// `__eq__` in unexpected ways.
 fn all_matching_tuple_elements_have_literal_types<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     union: UnionType<'db>,
     index: i32,
 ) -> bool {
@@ -4427,7 +4427,7 @@ pub(crate) trait NarrowingEvaluatorExtension<'db> {
     fn narrow(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         base_type: Type<'db>,
         place: ScopedPlaceId,
     ) -> Type<'db>;
@@ -4437,7 +4437,7 @@ impl<'db> NarrowingEvaluatorExtension<'db> for NarrowingEvaluator<'_, 'db> {
     fn narrow(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         base_type: Type<'db>,
         place: ScopedPlaceId,
     ) -> Type<'db> {

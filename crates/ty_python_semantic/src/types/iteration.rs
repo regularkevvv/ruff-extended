@@ -21,13 +21,13 @@ use ty_python_core::EvaluationMode;
 /// recursively unpacking starred elements whose iterables are also fixed-length.
 pub(crate) fn extract_fixed_length_iterable_element_types<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     iterable: &ast::Expr,
     mut expression_type: impl FnMut(&ast::Expr) -> Type<'db>,
 ) -> Option<Box<[Type<'db>]>> {
     fn extend_fixed_length_iterable<'db>(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         iterable: &ast::Expr,
         expression_type: &mut impl FnMut(&ast::Expr) -> Type<'db>,
         element_types: &mut Vec<Type<'db>>,
@@ -81,7 +81,7 @@ impl<'db> Type<'db> {
     pub(super) fn iterate(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Cow<'db, TupleSpec<'db>> {
         self.try_iterate(db, program).unwrap_or_else(|err| {
             Cow::Owned(TupleSpec::homogeneous(
@@ -101,7 +101,7 @@ impl<'db> Type<'db> {
     pub(super) fn try_iterate(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Result<Cow<'db, TupleSpec<'db>>, IterationError<'db>> {
         self.try_iterate_with_mode(db, program, EvaluationMode::Sync)
     }
@@ -109,12 +109,12 @@ impl<'db> Type<'db> {
     pub(super) fn try_iterate_with_mode(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         mode: EvaluationMode,
     ) -> Result<Cow<'db, TupleSpec<'db>>, IterationError<'db>> {
         fn non_async_special_case<'db>(
             db: &'db dyn Db,
-            program: crate::Program<'db>,
+            program: crate::Program,
             ty: Type<'db>,
         ) -> Option<Cow<'db, TupleSpec<'db>>> {
             // We will not infer precise heterogeneous tuple specs for literals with lengths above this threshold.
@@ -532,13 +532,13 @@ impl<'db> IterationError<'db> {
     pub(super) fn fallback_element_type(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Type<'db> {
         self.element_type(db, program).unwrap_or(Type::unknown())
     }
 
     /// Returns the element type if it is known, or `None` if the type is never iterable.
-    fn element_type(&self, db: &'db dyn Db, program: crate::Program<'db>) -> Option<Type<'db>> {
+    fn element_type(&self, db: &'db dyn Db, program: crate::Program) -> Option<Type<'db>> {
         let return_type = |result: Result<Bindings<'db>, CallDunderError<'db>>| {
             result
                 .map(|outcome| Some(outcome.return_type(db, program)))
@@ -654,7 +654,7 @@ impl<'db> IterationError<'db> {
         /// based on the variant of iteration error.
         struct Reporter<'a> {
             db: &'a dyn Db,
-            program: crate::Program<'a>,
+            program: crate::Program,
             builder: LintDiagnosticGuardBuilder<'a, 'a>,
             iterable_type: Type<'a>,
             mode: EvaluationMode,

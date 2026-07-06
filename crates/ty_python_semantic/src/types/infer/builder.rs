@@ -237,7 +237,7 @@ const NUM_FIELD_SPECIFIERS_INLINE: usize = 1;
 /// don't infer its types more than once.
 pub(super) struct TypeInferenceBuilder<'db, 'ast> {
     context: InferContext<'db, 'ast>,
-    program: Program<'db>,
+    program: Program,
 
     index: &'db SemanticIndex<'db>,
     region: InferenceRegion<'db>,
@@ -374,9 +374,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         module: &'ast ParsedModuleRef,
     ) -> Self {
         let scope = region.scope(db);
+        let context = InferContext::new(db, scope, module);
         Self {
-            context: InferContext::new(db, scope, module),
-            program: scope.program(db),
+            program: context.program(),
+            context,
             index,
             region,
             scope,
@@ -5628,7 +5629,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     ) -> Type<'db> {
         fn propagate_callable_kind<'d>(
             db: &'d dyn Db,
-            program: crate::Program<'d>,
+            program: crate::Program,
             ty: Type<'d>,
             kind: CallableTypeKind,
             provenance: CallableFunctionProvenance,
@@ -5698,7 +5699,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
         fn is_transparent_callable_decorator<'d>(
             db: &'d dyn Db,
-            program: crate::Program<'d>,
+            program: crate::Program,
             decorator_ty: Type<'d>,
             decorated_ty: Type<'d>,
         ) -> bool {
@@ -8802,7 +8803,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         fn report_missing_implicit_constructor_call<'db>(
             context: &InferContext<'db, '_>,
             db: &'db dyn Db,
-            program: crate::Program<'db>,
+            program: crate::Program,
             callable_type: Type<'db>,
             call_expression: &ast::ExprCall,
             bindings: &Bindings<'db>,
@@ -10446,7 +10447,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     ) -> Type<'db> {
         fn union_elements_missing_attribute<'db>(
             db: &'db dyn Db,
-            program: crate::Program<'db>,
+            program: crate::Program,
             ty: Type<'db>,
             attr_name: &str,
             missing_types: &mut FxIndexSet<Type<'db>>,
@@ -10580,6 +10581,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                             ));
                             if let Ok(defined_type) = value_type.in_type_expression(
                                 db,
+                                self.program,
                                 self.scope(),
                                 self.typevar_binding_context,
                                 self.inference_flags()
@@ -12117,7 +12119,7 @@ impl StringPartsCollector {
         self.contains_non_literal_str = true;
     }
 
-    fn string_type<'db>(self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    fn string_type(self, db: &dyn Db, program: Program) -> Type<'_> {
         if self.contains_non_literal_str {
             KnownClass::Str.to_instance(db, program)
         } else if let Some(concatenated) = self.concatenated {
@@ -12424,7 +12426,7 @@ impl<'db, 'ast> AddBinding<'db, 'ast> {
     /// pyright. TODO: Other standard library classes may also be considered safe. Also,
     /// subclasses of these safe classes that do not override `__getitem__/__setitem__`
     /// may be considered safe.
-    fn is_safe_mutable_class(db: &'db dyn Db, program: Program<'db>, ty: Type<'db>) -> bool {
+    fn is_safe_mutable_class(db: &'db dyn Db, program: Program, ty: Type<'db>) -> bool {
         const SAFE_MUTABLE_CLASSES: &[KnownClass] = &[
             KnownClass::List,
             KnownClass::Dict,

@@ -49,11 +49,7 @@ fn typing_vs_typeshed_no_default() {
     );
 }
 
-fn list_alias<'db>(
-    db: &'db dyn Db,
-    program: Program<'db>,
-    argument: Type<'db>,
-) -> GenericAlias<'db> {
+fn list_alias<'db>(db: &'db dyn Db, program: Program, argument: Type<'db>) -> GenericAlias<'db> {
     KnownClass::List
         .to_specialized_class_type(db, program, &[argument])
         .expect("`list` should accept one type argument")
@@ -66,7 +62,7 @@ fn oscillating_generic_alias_cycle_recover<'db>(
     cycle: &salsa::Cycle,
     previous: &Type<'db>,
     current: Type<'db>,
-    program: Program<'db>,
+    program: Program,
 ) -> Type<'db> {
     current.cycle_normalized(db, program, *previous, cycle)
 }
@@ -75,7 +71,7 @@ fn oscillating_generic_alias_cycle_recover<'db>(
     cycle_initial=|_, id, _| Type::divergent(id),
     cycle_fn=oscillating_generic_alias_cycle_recover,
 )]
-fn oscillating_generic_alias<'db>(db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+fn oscillating_generic_alias(db: &dyn Db, program: Program) -> Type<'_> {
     let previous = oscillating_generic_alias(db, program);
     let argument = if let Type::GenericAlias(alias) = previous
         && alias.specialization(db).types(db) == [Type::unknown()]

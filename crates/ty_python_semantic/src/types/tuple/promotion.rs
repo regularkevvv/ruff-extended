@@ -24,7 +24,7 @@ impl<'db> TupleSizePromotionConstraints<'db> {
     pub(crate) fn record_inferred_expression_type(
         &mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         typevar_identity: BoundTypeVarIdentity<'db>,
         expression: &ast::Expr,
         ty: Type<'db>,
@@ -39,7 +39,7 @@ impl<'db> TupleSizePromotionConstraints<'db> {
     pub(crate) fn record_unpromotable_type(
         &mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         typevar_identity: BoundTypeVarIdentity<'db>,
         ty: Type<'db>,
     ) {
@@ -60,7 +60,7 @@ impl<'db> TupleSizePromotionConstraints<'db> {
     /// empty tuple (and hence is eligible for tuple size promotion).
     fn is_promotable_tuple_literal(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         expression: &ast::Expr,
         ty: Type<'db>,
     ) -> bool {
@@ -81,7 +81,7 @@ enum TupleSizePromotionCandidate<'db> {
 impl<'db> TupleSizePromotionCandidate<'db> {
     /// Returns an eligible candidate if the given type represents one (i.e., it is a
     /// fixed-length homogeneous tuple or the empty tuple).
-    fn from_type(db: &'db dyn Db, program: crate::Program<'db>, ty: Type<'db>) -> Option<Self> {
+    fn from_type(db: &'db dyn Db, program: crate::Program, ty: Type<'db>) -> Option<Self> {
         let tuple_spec = ty.exact_tuple_instance_spec(db)?;
         let TupleSpec::Fixed(tuple) = tuple_spec.as_ref() else {
             return None;
@@ -131,7 +131,7 @@ impl<'db> HomogeneousTupleUnionGroup<'db> {
 /// candidates for tuple size promotion, and another for groups of homogeneous tuple elements that are.
 fn partition_tuple_union_elements<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     elements: impl IntoIterator<Item = Type<'db>>,
 ) -> (Vec<Type<'db>>, Vec<HomogeneousTupleUnionGroup<'db>>) {
     let mut other_union_elements = Vec::new();
@@ -189,7 +189,7 @@ impl<'db> Type<'db> {
     pub(crate) fn promote_tuple_size_in_union(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Type<'db> {
         let Type::Union(union) = self else {
             return self;

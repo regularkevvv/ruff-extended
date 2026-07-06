@@ -363,7 +363,7 @@ impl<'db> SubscriptErrorKind<'db> {
 
 fn map_union_subscript<'db, F>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     union: UnionType<'db>,
     mut map_fn: F,
 ) -> Result<Type<'db>, SubscriptError<'db>>
@@ -402,7 +402,7 @@ where
 
 fn map_intersection_subscript<'db, F>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     intersection: IntersectionType<'db>,
     mut map_fn: F,
 ) -> Result<Type<'db>, SubscriptError<'db>>
@@ -472,7 +472,7 @@ where
 // `Unknown` otherwise. This is not naturally representable via synthesized `__getitem__` overloads.
 fn typed_dict_subscript<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     typed_dict: TypedDictType<'db>,
     slice_ty: Type<'db>,
 ) -> Result<Type<'db>, SubscriptError<'db>> {
@@ -529,7 +529,7 @@ impl<'db> Type<'db> {
     pub(super) fn subscript(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         slice_ty: Type<'db>,
         expr_context: ast::ExprContext,
     ) -> Result<Type<'db>, SubscriptError<'db>> {

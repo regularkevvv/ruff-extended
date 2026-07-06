@@ -151,12 +151,12 @@ const SYNTHETIC_DATACLASS_ATTRIBUTES: &[&str] = &[
 ];
 
 struct AllMembers<'db> {
-    program: crate::Program<'db>,
+    program: crate::Program,
     members: FxHashSet<Member<'db>>,
 }
 
 impl<'db> AllMembers<'db> {
-    fn of(db: &'db dyn Db, program: crate::Program<'db>, ty: Type<'db>) -> Self {
+    fn of(db: &'db dyn Db, program: crate::Program, ty: Type<'db>) -> Self {
         let mut all_members = Self {
             program,
             members: FxHashSet::default(),
@@ -677,7 +677,7 @@ impl<'db> PartialOrd for Member<'db> {
 /// as an attribute on an object of the given type.
 pub fn all_members<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     ty: Type<'db>,
 ) -> FxHashSet<Member<'db>> {
     AllMembers::of(db, program, ty).members

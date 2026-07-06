@@ -139,7 +139,7 @@ pub struct TupleType<'db> {
 
 pub(super) fn walk_tuple_type<'db, V: super::visitor::TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     tuple: TupleType<'db>,
     visitor: &V,
 ) {
@@ -207,11 +207,7 @@ impl<'db> TupleType<'db> {
     // `static-frame` as part of the ecosystem analysis. This is because it's called
     // from `NominalInstanceType::class()`, which is a very hot method.
     #[salsa::tracked(cycle_initial=to_class_type_cycle_initial, heap_size=ruff_memory_usage::heap_size)]
-    pub(crate) fn to_class_type(
-        self,
-        db: &'db dyn Db,
-        program: crate::Program<'db>,
-    ) -> ClassType<'db> {
+    pub(crate) fn to_class_type(self, db: &'db dyn Db, program: crate::Program) -> ClassType<'db> {
         let tuple_class = KnownClass::Tuple
             .try_to_class_literal(db, program)
             .expect("Typeshed should always have a `tuple` class in `builtins.pyi`");
@@ -229,7 +225,7 @@ impl<'db> TupleType<'db> {
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -243,7 +239,7 @@ impl<'db> TupleType<'db> {
     pub(crate) fn apply_type_mapping_impl<'a>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'a, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
@@ -259,7 +255,7 @@ impl<'db> TupleType<'db> {
     pub(crate) fn find_legacy_typevars_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         binding_context: Option<Definition<'db>>,
         typevars: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
         visitor: &FindLegacyTypeVarsVisitor<'db>,
@@ -268,7 +264,7 @@ impl<'db> TupleType<'db> {
             .find_legacy_typevars_impl(db, program, binding_context, typevars, visitor);
     }
 
-    pub(crate) fn is_single_valued(self, db: &'db dyn Db, program: crate::Program<'db>) -> bool {
+    pub(crate) fn is_single_valued(self, db: &'db dyn Db, program: crate::Program) -> bool {
         self.tuple(db).is_single_valued(db, program)
     }
 }
@@ -621,7 +617,7 @@ fn to_class_type_cycle_initial<'db>(
     db: &'db dyn Db,
     id: salsa::Id,
     self_: TupleType<'db>,
-    program: crate::Program<'db>,
+    program: crate::Program,
 ) -> ClassType<'db> {
     let tuple_class = KnownClass::Tuple
         .try_to_class_literal(db, program)
@@ -692,7 +688,7 @@ impl<'db> FixedLengthTuple<Type<'db>> {
     fn resize(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         new_length: TupleLength,
     ) -> Result<Tuple<Type<'db>>, ResizeTupleError> {
         match new_length {
@@ -726,7 +722,7 @@ impl<'db> FixedLengthTuple<Type<'db>> {
     fn recursive_type_normalized_impl(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -753,7 +749,7 @@ impl<'db> FixedLengthTuple<Type<'db>> {
     fn apply_type_mapping_impl<'a>(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'a, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
@@ -788,7 +784,7 @@ impl<'db> FixedLengthTuple<Type<'db>> {
     fn find_legacy_typevars_impl(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         binding_context: Option<Definition<'db>>,
         typevars: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
         visitor: &FindLegacyTypeVarsVisitor<'db>,
@@ -798,7 +794,7 @@ impl<'db> FixedLengthTuple<Type<'db>> {
         }
     }
 
-    fn is_single_valued(&self, db: &'db dyn Db, program: crate::Program<'db>) -> bool {
+    fn is_single_valued(&self, db: &'db dyn Db, program: crate::Program) -> bool {
         self.0.iter().all(|ty| ty.is_single_valued(db, program))
     }
 }
@@ -1159,7 +1155,7 @@ impl VariableSlice {
     fn ty<'db>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         tuple: &VariableLengthTuple<Type<'db>>,
     ) -> Type<'db> {
         UnionType::from_elements_leave_aliases(
@@ -1182,7 +1178,7 @@ impl VariableTupleSlicePlan {
     fn into_type<'db>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         tuple: &VariableLengthTuple<Type<'db>>,
     ) -> Type<'db> {
         match self {
@@ -1284,7 +1280,7 @@ impl<'db> VariableLengthTuple<Type<'db>> {
     fn slice_fixed_position<'a>(
         &'a self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         slice: FixedPositionSlice,
     ) -> impl Iterator<Item = Type<'db>> + 'a
     where
@@ -1309,7 +1305,7 @@ impl<'db> VariableLengthTuple<Type<'db>> {
     fn slice_front_forward<'a>(
         &'a self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         start: usize,
         exclusive_stop: usize,
         step: NonZeroUsize,
@@ -1332,7 +1328,7 @@ impl<'db> VariableLengthTuple<Type<'db>> {
     fn slice_back<'a>(
         &'a self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         start: usize,
         exclusive_stop: usize,
         step: NonZeroUsize,
@@ -1383,7 +1379,7 @@ impl<'db> VariableLengthTuple<Type<'db>> {
     fn py_slice_type(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         start: Option<i32>,
         stop: Option<i32>,
         step: Option<i32>,
@@ -1719,7 +1715,7 @@ impl<'db> VariableLengthTuple<Type<'db>> {
     fn type_at_nonnegative_index(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         index: usize,
     ) -> Option<Type<'db>> {
         (index < self.len().minimum())
@@ -1729,7 +1725,7 @@ impl<'db> VariableLengthTuple<Type<'db>> {
     fn type_at_nonnegative_index_unbounded(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         index: usize,
     ) -> Type<'db> {
         if let Some(element) = self.prefix_elements().get(index) {
@@ -1743,7 +1739,7 @@ impl<'db> VariableLengthTuple<Type<'db>> {
     fn type_at_negative_distance(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         distance: usize,
     ) -> Option<Type<'db>> {
         if distance == 0 || distance > self.len().minimum() {
@@ -1767,7 +1763,7 @@ impl<'db> VariableLengthTuple<Type<'db>> {
         ))
     }
 
-    fn homogeneous_type(&self, db: &'db dyn Db, program: crate::Program<'db>) -> Type<'db> {
+    fn homogeneous_type(&self, db: &'db dyn Db, program: crate::Program) -> Type<'db> {
         let element = UnionType::from_elements_leave_aliases(db, program, self.all_elements());
         Type::homogeneous_tuple(db, element)
     }
@@ -1775,7 +1771,7 @@ impl<'db> VariableLengthTuple<Type<'db>> {
     fn variable_and_suffix_type(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         suffix_stop: Option<usize>,
     ) -> Type<'db> {
         UnionType::from_elements_leave_aliases(
@@ -1810,7 +1806,7 @@ impl<'db> VariableLengthTuple<Type<'db>> {
     fn prenormalized_prefix_elements<'a>(
         &'a self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         variable: Option<Type<'db>>,
     ) -> impl Iterator<Item = Type<'db>> + 'a {
         let variable = variable.unwrap_or(self.variable());
@@ -1842,7 +1838,7 @@ impl<'db> VariableLengthTuple<Type<'db>> {
     fn prenormalized_suffix_elements<'a>(
         &'a self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         variable: Option<Type<'db>>,
     ) -> impl Iterator<Item = Type<'db>> + 'a {
         let variable = variable.unwrap_or(self.variable());
@@ -1853,7 +1849,7 @@ impl<'db> VariableLengthTuple<Type<'db>> {
     fn resize(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         new_length: TupleLength,
     ) -> Result<Tuple<Type<'db>>, ResizeTupleError> {
         match new_length {
@@ -1904,7 +1900,7 @@ impl<'db> VariableLengthTuple<Type<'db>> {
     fn recursive_type_normalized_impl(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -1947,7 +1943,7 @@ impl<'db> VariableLengthTuple<Type<'db>> {
     fn apply_type_mapping_impl<'a>(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'a, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
@@ -1967,7 +1963,7 @@ impl<'db> VariableLengthTuple<Type<'db>> {
     fn find_legacy_typevars_impl(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         binding_context: Option<Definition<'db>>,
         typevars: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
         visitor: &FindLegacyTypeVarsVisitor<'db>,
@@ -1988,7 +1984,7 @@ impl<'db> VariableLengthTuple<Type<'db>> {
     pub(crate) fn py_index(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         index: i32,
     ) -> Result<Type<'db>, OutOfBoundsError> {
         match Nth::from_index(index) {
@@ -2118,7 +2114,7 @@ impl<'db> Tuple<Type<'db>> {
     pub(crate) fn homogeneous_element_type(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Type<'db> {
         UnionType::from_elements_leave_aliases(db, program, self.all_elements())
     }
@@ -2130,7 +2126,7 @@ impl<'db> Tuple<Type<'db>> {
     pub(crate) fn py_slice_type(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         start: Option<i32>,
         stop: Option<i32>,
         step: Option<i32>,
@@ -2150,7 +2146,7 @@ impl<'db> Tuple<Type<'db>> {
     pub(crate) fn resize(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         new_length: TupleLength,
     ) -> Result<Self, ResizeTupleError> {
         match self {
@@ -2162,7 +2158,7 @@ impl<'db> Tuple<Type<'db>> {
     pub(super) fn recursive_type_normalized_impl(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -2179,7 +2175,7 @@ impl<'db> Tuple<Type<'db>> {
     pub(crate) fn apply_type_mapping_impl<'a>(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'a, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
@@ -2197,7 +2193,7 @@ impl<'db> Tuple<Type<'db>> {
     fn find_legacy_typevars_impl(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         binding_context: Option<Definition<'db>>,
         typevars: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
         visitor: &FindLegacyTypeVarsVisitor<'db>,
@@ -2212,7 +2208,7 @@ impl<'db> Tuple<Type<'db>> {
         }
     }
 
-    pub(crate) fn is_single_valued(&self, db: &'db dyn Db, program: crate::Program<'db>) -> bool {
+    pub(crate) fn is_single_valued(&self, db: &'db dyn Db, program: crate::Program) -> bool {
         match self {
             Tuple::Fixed(tuple) => tuple.is_single_valued(db, program),
             Tuple::Variable(_) => false,
@@ -2364,7 +2360,7 @@ impl<'db> Tuple<Type<'db>> {
     /// Return the `TupleSpec` for the singleton `sys.version_info`
     pub(crate) fn version_info_spec(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         python_version: PythonVersion,
     ) -> TupleSpec<'db> {
         let int_instance_ty = KnownClass::Int.to_instance(db, program);
@@ -2409,7 +2405,7 @@ impl<'db> Tuple<Type<'db>> {
     pub(crate) fn py_index(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         index: i32,
     ) -> Result<Type<'db>, OutOfBoundsError> {
         match self {
@@ -2435,12 +2431,12 @@ pub(crate) enum TupleElement<T> {
 /// assigned to the starred target in `list`.
 pub(crate) struct TupleUnpacker<'db> {
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     targets: Tuple<UnionBuilder<'db>>,
 }
 
 impl<'db> TupleUnpacker<'db> {
-    pub(crate) fn new(db: &'db dyn Db, program: crate::Program<'db>, len: TupleLength) -> Self {
+    pub(crate) fn new(db: &'db dyn Db, program: crate::Program, len: TupleLength) -> Self {
         let new_builders =
             |len: usize| std::iter::repeat_with(|| UnionBuilder::new(db, program)).take(len);
         let targets = match len {
@@ -2521,7 +2517,7 @@ impl<'db> VariableLengthTuple<UnionBuilder<'db>> {
     fn unpack_tuple(
         &mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         values: &VariableLengthTuple<Type<'db>>,
     ) {
         // We have already verified above that the two tuples have the same length.
@@ -2577,7 +2573,7 @@ impl<'db> TupleSpecBuilder<'db> {
     pub(crate) fn concat(
         mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         other: &TupleSpec<'db>,
     ) -> Self {
         match (&mut self, other) {
@@ -2658,7 +2654,7 @@ impl<'db> TupleSpecBuilder<'db> {
     pub(crate) fn union(
         mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         other: &TupleSpec<'db>,
     ) -> Self {
         match (&mut self, other) {
@@ -2704,7 +2700,7 @@ impl<'db> TupleSpecBuilder<'db> {
     pub(crate) fn intersect(
         mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         other: &TupleSpec<'db>,
     ) -> Option<Self> {
         match (&mut self, other) {

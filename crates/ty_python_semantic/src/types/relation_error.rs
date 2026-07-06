@@ -145,7 +145,7 @@ impl<'db> ErrorContext<'db> {
     fn render(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         help_messages: &mut FxOrderSet<HelpMessages>,
     ) -> Option<String> {
         let typed_dict_name = |typed_dict: &TypedDictType<'db>| match typed_dict {
@@ -404,7 +404,7 @@ impl<'db> ErrorContextNode<'db> {
     fn render_tree(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         output_lines: &mut Vec<String>,
         help_messages: &mut FxOrderSet<HelpMessages>,
         prefix: &str,
@@ -524,7 +524,7 @@ impl<'db> ErrorContextTree<'db> {
     pub(in crate::types) fn attach_to(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         diag: &mut LintDiagnosticGuard<'_, '_>,
     ) {
         let mut output_lines = Vec::new();

@@ -3,6 +3,7 @@ use crate::{Db, platform::PythonPlatform};
 
 use ruff_db::{files::File, system::SystemPath};
 use ruff_python_ast::PythonVersion;
+use salsa::{Durability, Setter};
 use ty_module_resolver::{ProgramFile, ResolverProgram, SearchPaths};
 use ty_site_packages::{PythonVersionSource, PythonVersionWithSource};
 
@@ -10,15 +11,13 @@ use ty_site_packages::{PythonVersionSource, PythonVersionWithSource};
 pub use ty_module_resolver::{FallibleStrategy, MisconfigurationStrategy, UseDefaultStrategy};
 
 /// The semantic Python environment used to analyze source files.
-///
-/// Programs are immutable and canonicalized. Changing any semantic setting creates a different
-/// program instead of invalidating queries for the existing program.
-#[salsa::interned(
-    debug,
-    heap_size = ruff_memory_usage::heap_size
-)]
-pub struct Program<'db> {
-    resolver_program: ResolverProgram<'db>,
+#[salsa::input(heap_size = ruff_memory_usage::heap_size)]
+#[derive(Debug)]
+pub struct Program {
+    resolver_program: ResolverProgram,
+
+    #[returns(ref)]
+    pub python_version_source: PythonVersionSource,
 
     #[returns(ref)]
     pub python_platform: PythonPlatform,
@@ -27,89 +26,115 @@ pub struct Program<'db> {
     pub settings: InferenceSettings,
 }
 
-// The Salsa allocation is tracked separately.
-impl get_size2::GetSize for Program<'_> {}
+impl get_size2::GetSize for Program {}
 
-impl<'db> Program<'db> {
-    pub fn create(db: &'db dyn Db, settings: &ProgramSettings) -> Self {
+impl Program {
+    pub fn create(db: &dyn Db, settings: &ProgramSettings) -> Self {
         Self::from_settings(db, settings, &InferenceSettings::default())
     }
 
     pub fn from_settings(
-        db: &'db dyn Db,
+        db: &dyn Db,
         settings: &ProgramSettings,
         inference_settings: &InferenceSettings,
     ) -> Self {
         let resolver_program =
             ResolverProgram::create(db, settings.python_version.version, &settings.search_paths);
-        Self::new(
-            db,
+        Self::builder(
             resolver_program,
-            &settings.python_platform,
-            inference_settings,
+            settings.python_version.source.clone(),
+            settings.python_platform.clone(),
+            inference_settings.clone(),
         )
+        .durability(Durability::HIGH)
+        .new(db)
     }
 
     #[must_use]
-    pub fn with_inference_settings(self, db: &'db dyn Db, settings: InferenceSettings) -> Self {
-        Self::new(
-            db,
-            self.resolver(db),
+    pub fn with_inference_settings(self, db: &dyn Db, settings: InferenceSettings) -> Self {
+        let resolver = ResolverProgram::create(db, self.python_version(db), self.search_paths(db));
+        Self::builder(
+            resolver,
+            self.python_version_source(db).clone(),
             self.python_platform(db).clone(),
             settings,
         )
+        .durability(Durability::HIGH)
+        .new(db)
     }
 
-    pub fn custom_stdlib_search_path(self, db: &'db dyn Db) -> Option<&'db SystemPath> {
+    pub fn update_from_settings(self, db: &mut dyn Db, settings: ProgramSettings) -> bool {
+        let ProgramSettings {
+            python_version,
+            python_platform,
+            search_paths,
+        } = settings;
+
+        let resolver_changed = self
+            .resolver(db)
+            .update(db, python_version.version, search_paths);
+        let source_changed = self.python_version_source(db) != &python_version.source;
+        if source_changed {
+            self.set_python_version_source(db).to(python_version.source);
+        }
+        let platform_changed = self.python_platform(db) != &python_platform;
+        if platform_changed {
+            self.set_python_platform(db).to(python_platform);
+        }
+
+        resolver_changed || source_changed || platform_changed
+    }
+
+    pub fn update_inference_settings(self, db: &mut dyn Db, settings: InferenceSettings) -> bool {
+        let changed = self.settings(db) != &settings;
+        if changed {
+            self.set_settings(db).to(settings);
+        }
+        changed
+    }
+
+    pub fn freeze(self, db: &mut dyn Db) {
+        self.resolver(db).freeze(db);
+
+        let durability = Durability::NEVER_CHANGE;
+        let source = self.python_version_source(db).clone();
+        let platform = self.python_platform(db).clone();
+        let settings = self.settings(db).clone();
+        let resolver = self.resolver(db);
+
+        self.set_resolver_program(db)
+            .with_durability(durability)
+            .to(resolver);
+        self.set_python_version_source(db)
+            .with_durability(durability)
+            .to(source);
+        self.set_python_platform(db)
+            .with_durability(durability)
+            .to(platform);
+        self.set_settings(db)
+            .with_durability(durability)
+            .to(settings);
+    }
+
+    pub fn custom_stdlib_search_path(self, db: &dyn Db) -> Option<&SystemPath> {
         self.search_paths(db).custom_stdlib()
     }
 
-    pub fn python_version(self, db: &'db dyn Db) -> PythonVersion {
+    pub fn python_version(self, db: &dyn Db) -> PythonVersion {
         self.resolver(db).python_version(db)
     }
 
-    pub fn search_paths(self, db: &'db dyn Db) -> &'db SearchPaths {
+    pub fn search_paths(self, db: &dyn Db) -> &SearchPaths {
         self.resolver(db).search_paths(db)
     }
 
     /// Returns the module-resolution projection of this program.
-    pub fn resolver(self, db: &'db dyn Db) -> ResolverProgram<'db> {
+    pub fn resolver(self, db: &dyn Db) -> ResolverProgram {
         self.resolver_program(db)
     }
 
-    pub fn file(self, db: &'db dyn Db, file: File) -> ProgramFile<'db> {
+    pub fn file(self, db: &dyn Db, file: File) -> ProgramFile<'_> {
         ProgramFile::new(db, self.resolver(db), file)
-    }
-
-    /// Captures the settings needed to recreate this program against another database view.
-    ///
-    /// This is intended for orchestration that mutates the database. Holding a Salsa database
-    /// snapshot merely to extend a [`Program`] handle's lifetime prevents those writes.
-    pub fn snapshot(self, db: &'db dyn Db) -> ProgramSnapshot {
-        ProgramSnapshot {
-            program_settings: ProgramSettings {
-                python_version: PythonVersionWithSource {
-                    version: self.python_version(db),
-                    source: PythonVersionSource::default(),
-                },
-                python_platform: self.python_platform(db).clone(),
-                search_paths: self.search_paths(db).clone(),
-            },
-            inference_settings: self.settings(db).clone(),
-        }
-    }
-}
-
-/// An owned description of a [`Program`] for database-mutating orchestration.
-#[derive(Clone, Debug, Eq, PartialEq, get_size2::GetSize)]
-pub struct ProgramSnapshot {
-    program_settings: ProgramSettings,
-    inference_settings: InferenceSettings,
-}
-
-impl ProgramSnapshot {
-    pub fn program<'db>(&self, db: &'db dyn Db) -> Program<'db> {
-        Program::from_settings(db, &self.program_settings, &self.inference_settings)
     }
 }
 
@@ -141,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn programs_are_canonicalized_by_semantic_settings() -> anyhow::Result<()> {
+    fn programs_are_independent_inputs() -> anyhow::Result<()> {
         let db = TestDbBuilder::new().build()?;
         let first_settings = settings(&db, PythonVersion::default());
         let first = Program::create(&db, &first_settings);
@@ -150,7 +175,8 @@ mod tests {
         different_provenance.python_version.source = PythonVersionSource::Cli;
         let second = Program::create(&db, &different_provenance);
 
-        assert_eq!(first, second);
+        assert_ne!(first, second);
+        assert_eq!(second.python_version_source(&db), &PythonVersionSource::Cli);
         Ok(())
     }
 

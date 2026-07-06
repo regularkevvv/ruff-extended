@@ -69,7 +69,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
         fn imp<'db>(
             db: &'db dyn Db,
-            program: Program<'db>,
+            program: Program,
             ty: Type<'db>,
             visitor: &TypedDictKeyExpectedTypeVisitor<'db>,
         ) -> Option<Type<'db>> {
@@ -2117,7 +2117,7 @@ impl<'db> LegacyGenericContextError<'db> {
 #[expect(clippy::too_many_arguments)]
 fn infer_legacy_generic_subscript<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     index: &'db SemanticIndex<'db>,
     file_scope_id: FileScopeId,
     typevar_binding_context: Option<Definition<'db>>,
@@ -2163,7 +2163,7 @@ fn infer_legacy_generic_subscript<'db>(
 /// that each argument is a type variable.
 fn legacy_generic_class_context<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     index: &'db SemanticIndex<'db>,
     file_scope_id: FileScopeId,
     typevar_binding_context: Option<Definition<'db>>,

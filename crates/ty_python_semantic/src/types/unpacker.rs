@@ -335,7 +335,7 @@ impl<'db> UnpackResult<'db> {
     pub(crate) fn cycle_normalized(
         mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         previous_cycle_result: &UnpackResult<'db>,
         cycle: &salsa::Cycle,
     ) -> Self {

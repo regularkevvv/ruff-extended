@@ -52,12 +52,13 @@ pub(crate) struct InferContext<'db, 'ast> {
 
 impl<'db, 'ast> InferContext<'db, 'ast> {
     pub(crate) fn new(db: &'db dyn Db, scope: ScopeId<'db>, module: &'ast ParsedModuleRef) -> Self {
+        let analysis_file = scope.analysis_file(db);
         Self {
             db,
             scope,
-            analysis_file: scope.analysis_file(db),
+            analysis_file,
             module,
-            file: scope.file(db),
+            file: analysis_file.file(db),
             diagnostics: std::cell::RefCell::new(TypeCheckDiagnostics::default()),
             diagnostics_suppressed: false,
             inference_flags: InferenceFlags::empty(),
@@ -76,7 +77,7 @@ impl<'db, 'ast> InferContext<'db, 'ast> {
         self.analysis_file
     }
 
-    pub(crate) fn program(&self) -> Program<'db> {
+    pub(crate) fn program(&self) -> Program {
         self.analysis_file.program(self.db)
     }
 
@@ -479,7 +480,7 @@ impl<'db, 'ctx> LintDiagnosticGuardBuilder<'db, 'ctx> {
 
         let (severity, source) = Self::severity_and_source(ctx, lint_id)?;
 
-        let suppressions = suppressions(ctx.db(), ctx.analysis_file());
+        let suppressions = suppressions(ctx.db(), ctx.analysis_file().versioned_file(ctx.db()));
         if let Some(suppression) = suppressions.find_suppression(range, lint_id) {
             ctx.diagnostics.borrow_mut().mark_used(suppression.id());
             return None;

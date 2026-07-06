@@ -188,7 +188,7 @@ pub enum KnownBoundMethodType<'db> {
 
 pub(super) fn walk_method_wrapper_type<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     method_wrapper: KnownBoundMethodType<'db>,
     visitor: &V,
 ) {
@@ -229,7 +229,7 @@ impl<'db> KnownBoundMethodType<'db> {
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -297,7 +297,7 @@ impl<'db> KnownBoundMethodType<'db> {
     pub(super) fn signatures(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
     ) -> impl Iterator<Item = Signature<'db>> {
         let object_type_form = || TypeFormType::from_type_expression(db, Type::object());
 
@@ -616,11 +616,11 @@ pub enum WrapperDescriptorKind {
 }
 
 impl WrapperDescriptorKind {
-    pub(super) fn signatures<'db>(
+    pub(super) fn signatures(
         self,
-        db: &'db dyn Db,
-        program: Program<'db>,
-    ) -> impl Iterator<Item = Signature<'db>> {
+        db: &dyn Db,
+        program: Program,
+    ) -> impl Iterator<Item = Signature<'_>> {
         /// Similar to what we do in [`KnownBoundMethod::signatures`],
         /// here we also model `types.FunctionType.__get__` (or builtins.property.__get__),
         /// but now we consider a call to this as a function, i.e. we also expect the `self`
@@ -629,11 +629,11 @@ impl WrapperDescriptorKind {
         /// TODO: Consider merging these synthesized signatures with the ones in
         /// [`KnownBoundMethod::signatures`], since that one is just this signature
         /// with the `self` parameters removed.
-        fn dunder_get_signatures<'db>(
-            db: &'db dyn Db,
-            program: Program<'db>,
+        fn dunder_get_signatures(
+            db: &dyn Db,
+            program: Program,
             class: KnownClass,
-        ) -> [Signature<'db>; 2] {
+        ) -> [Signature<'_>; 2] {
             let type_instance = KnownClass::Type.to_instance(db, program);
             let none = Type::none(db, program);
             let descriptor = class.to_instance(db, program);

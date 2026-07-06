@@ -92,7 +92,7 @@ fn resolve_type_at<'db>(
 
 fn type_hierarchy_class_to_item(
     db: &dyn Db,
-    program: Program<'_>,
+    program: Program,
     class: TypeHierarchyClass,
 ) -> TypeHierarchyItem {
     let detail = ty_module_resolver::file_to_module(db, program.file(db, class.file))

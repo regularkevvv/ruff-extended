@@ -40,14 +40,22 @@ pub(crate) mod tests {
         files: Files,
         system: TestSystem,
         vendored: VendoredFileSystem,
-        program_settings: ProgramSettings,
+        program: Option<Program>,
     }
 
     impl TestDb {
         pub(crate) fn new() -> Self {
             let events = Events::default();
             let vendored = ty_vendored::file_system().clone();
-            Self {
+            let settings = ProgramSettings {
+                python_version: PythonVersionWithSource {
+                    version: PythonVersion::default(),
+                    source: PythonVersionSource::default(),
+                },
+                python_platform: PythonPlatform::default(),
+                search_paths: SearchPaths::empty(&vendored),
+            };
+            let mut db = Self {
                 storage: salsa::Storage::new(Some(Box::new({
                     move |event| {
                         tracing::trace!("event: {event:?}");
@@ -56,25 +64,20 @@ pub(crate) mod tests {
                     }
                 }))),
                 system: TestSystem::default(),
-                program_settings: ProgramSettings {
-                    python_version: PythonVersionWithSource {
-                        version: PythonVersion::default(),
-                        source: PythonVersionSource::default(),
-                    },
-                    python_platform: PythonPlatform::default(),
-                    search_paths: SearchPaths::empty(&vendored),
-                },
+                program: None,
                 vendored,
                 files: Files::default(),
-            }
+            };
+            db.program = Some(Program::from_settings(
+                &db,
+                &settings,
+                &crate::environment::InferenceSettings::default(),
+            ));
+            db
         }
 
-        pub(crate) fn program(&self) -> Program<'_> {
-            Program::from_settings(
-                self,
-                &self.program_settings,
-                &crate::environment::InferenceSettings::default(),
-            )
+        pub(crate) fn program(&self) -> Program {
+            self.program.expect("test database has a program")
         }
     }
 
@@ -103,7 +106,7 @@ pub(crate) mod tests {
         }
 
         fn python_version(&self) -> PythonVersion {
-            self.program_settings.python_version.version
+            self.program().python_version(self)
         }
     }
 
@@ -156,7 +159,7 @@ pub(crate) mod tests {
             db.write_files(self.files)
                 .context("Failed to write test files")?;
 
-            db.program_settings = ProgramSettings {
+            let settings = ProgramSettings {
                 python_version: PythonVersionWithSource {
                     version: self.python_version,
                     source: PythonVersionSource::default(),
@@ -166,6 +169,7 @@ pub(crate) mod tests {
                     .to_search_paths(db.system(), db.vendored(), &FallibleStrategy)
                     .context("Invalid search path settings")?,
             };
+            db.program().update_from_settings(&mut db, settings);
 
             Ok(db)
         }

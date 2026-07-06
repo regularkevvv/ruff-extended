@@ -189,11 +189,12 @@ impl<'db> NewType<'db> {
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
         let eager_base = match self.eager_base(db) {
-            Some(base) => Some(base.recursive_type_normalized_impl(db, div, nested)?),
+            Some(base) => Some(base.recursive_type_normalized_impl(db, program, div, nested)?),
             None => None,
         };
 
@@ -253,7 +254,7 @@ impl<'c, 'db> DisjointnessChecker<'_, 'c, 'db> {
 
 pub(crate) fn walk_newtype_instance_type<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     newtype: NewType<'db>,
     visitor: &V,
 ) {
@@ -281,7 +282,7 @@ pub enum NewTypeBase<'db> {
 }
 
 impl<'db> NewTypeBase<'db> {
-    pub fn instance_type(self, db: &'db dyn Db, program: crate::Program<'db>) -> Type<'db> {
+    pub fn instance_type(self, db: &'db dyn Db, program: crate::Program) -> Type<'db> {
         match self {
             NewTypeBase::ClassType(class_type) => Type::instance(db, class_type),
             NewTypeBase::NewType(newtype) => Type::NewTypeInstance(newtype),
@@ -293,15 +294,16 @@ impl<'db> NewTypeBase<'db> {
     fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
         match self {
             NewTypeBase::ClassType(class_type) => class_type
-                .recursive_type_normalized_impl(db, div, nested)
+                .recursive_type_normalized_impl(db, program, div, nested)
                 .map(NewTypeBase::ClassType),
             NewTypeBase::NewType(newtype) => newtype
-                .recursive_type_normalized_impl(db, div, nested)
+                .recursive_type_normalized_impl(db, program, div, nested)
                 .map(NewTypeBase::NewType),
             NewTypeBase::Float | NewTypeBase::Complex => Some(self),
         }

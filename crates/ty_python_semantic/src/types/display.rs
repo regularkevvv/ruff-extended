@@ -206,7 +206,7 @@ impl<'db> DisplaySettings<'db> {
     #[must_use]
     pub fn from_possibly_ambiguous_types<I, T>(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         types: I,
     ) -> Self
     where
@@ -568,7 +568,7 @@ impl<'db> TypeVisitor<'db> for AmbiguousNameCollector<'db> {
         false
     }
 
-    fn visit_type(&self, db: &'db dyn Db, program: crate::Program<'db>, ty: Type<'db>) {
+    fn visit_type(&self, db: &'db dyn Db, program: crate::Program, ty: Type<'db>) {
         match ty {
             Type::ClassLiteral(class) => self.record_class(db, class),
             Type::LiteralValue(literal) => {
@@ -603,7 +603,7 @@ impl<'db> TypeVisitor<'db> for AmbiguousNameCollector<'db> {
 }
 
 impl<'db> Type<'db> {
-    pub fn display(self, db: &'db dyn Db, program: crate::Program<'db>) -> DisplayType<'db> {
+    pub fn display(self, db: &'db dyn Db, program: crate::Program) -> DisplayType<'db> {
         DisplayType {
             ty: self,
             program,
@@ -615,7 +615,7 @@ impl<'db> Type<'db> {
     pub fn display_with(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         settings: DisplaySettings<'db>,
     ) -> DisplayType<'db> {
         DisplayType {
@@ -629,7 +629,7 @@ impl<'db> Type<'db> {
     fn representation(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         settings: DisplaySettings<'db>,
     ) -> DisplayRepresentation<'db> {
         DisplayRepresentation {
@@ -644,7 +644,7 @@ impl<'db> Type<'db> {
 pub struct DisplayType<'db> {
     ty: Type<'db>,
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     settings: DisplaySettings<'db>,
 }
 
@@ -931,7 +931,7 @@ impl Display for DisplayTypeAliasDeclaration<'_> {
 /// Helper for displaying `TypeGuardLike` types `TypeIs` and `TypeGuard`.
 fn fmt_type_guard_like<'db, T: TypeGuardLike<'db>>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     guard: T,
     settings: &DisplaySettings<'db>,
     f: &mut TypeWriter<'_, '_, 'db>,
@@ -957,7 +957,7 @@ fn fmt_type_guard_like<'db, T: TypeGuardLike<'db>>(
 struct DisplayRepresentation<'db> {
     ty: Type<'db>,
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     settings: DisplaySettings<'db>,
 }
 
@@ -1513,7 +1513,7 @@ impl<'db> TupleSpec<'db> {
     fn display_with<'a>(
         &'a self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         settings: DisplaySettings<'db>,
     ) -> DisplayTuple<'a, 'db> {
         DisplayTuple {
@@ -1528,7 +1528,7 @@ impl<'db> TupleSpec<'db> {
 struct DisplayTuple<'a, 'db> {
     tuple: &'a TupleSpec<'db>,
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     settings: DisplaySettings<'db>,
 }
 
@@ -1962,11 +1962,7 @@ impl Display for DisplayGenericContext<'_, '_> {
 }
 
 impl<'db> Specialization<'db> {
-    fn display_full(
-        self,
-        db: &'db dyn Db,
-        program: crate::Program<'db>,
-    ) -> DisplaySpecialization<'db> {
+    fn display_full(self, db: &'db dyn Db, program: crate::Program) -> DisplaySpecialization<'db> {
         DisplaySpecialization {
             specialization: self,
             db,
@@ -1981,7 +1977,7 @@ impl<'db> Specialization<'db> {
     fn display_short(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         tuple_specialization: TupleSpecialization,
         settings: DisplaySettings<'db>,
     ) -> DisplaySpecialization<'db> {
@@ -1999,7 +1995,7 @@ impl<'db> Specialization<'db> {
 struct DisplaySpecialization<'db> {
     specialization: Specialization<'db>,
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     tuple_specialization: TupleSpecialization,
     settings: DisplaySettings<'db>,
     full: bool,
@@ -2085,7 +2081,7 @@ impl<'db> CallableType<'db> {
     pub(crate) fn display<'a>(
         &'a self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> DisplayCallableType<'a, 'db> {
         Self::display_with(self, db, program, DisplaySettings::default())
     }
@@ -2093,7 +2089,7 @@ impl<'db> CallableType<'db> {
     fn display_with<'a>(
         &'a self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         settings: DisplaySettings<'db>,
     ) -> DisplayCallableType<'a, 'db> {
         DisplayCallableType {
@@ -2110,7 +2106,7 @@ pub(crate) struct DisplayCallableType<'a, 'db> {
     signatures: &'a CallableSignature<'db>,
     kind: CallableTypeKind,
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     settings: DisplaySettings<'db>,
 }
 
@@ -2170,7 +2166,7 @@ impl<'db> Signature<'db> {
     pub(crate) fn display<'a>(
         &'a self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> DisplaySignature<'a, 'db> {
         Self::display_with(self, db, program, DisplaySettings::default())
     }
@@ -2178,7 +2174,7 @@ impl<'db> Signature<'db> {
     pub(crate) fn display_with<'a>(
         &'a self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         settings: DisplaySettings<'db>,
     ) -> DisplaySignature<'a, 'db> {
         DisplaySignature {
@@ -2199,7 +2195,7 @@ pub(crate) struct DisplaySignature<'a, 'db> {
     parameters: &'a Parameters<'db>,
     return_ty: Type<'db>,
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     settings: DisplaySettings<'db>,
 }
 
@@ -2215,7 +2211,7 @@ impl<'db> DisplaySignature<'_, 'db> {
         }
     }
 
-    fn should_hide_self_from_display(&self, db: &'db dyn Db, program: crate::Program<'db>) -> bool {
+    fn should_hide_self_from_display(&self, db: &'db dyn Db, program: crate::Program) -> bool {
         !self.return_ty.contains_self(db, program)
             && !self.parameters.iter().any(|p| {
                 p.should_annotation_be_displayed() && p.annotated_type().contains_self(db, program)
@@ -2326,7 +2322,7 @@ impl<'db> Parameters<'db> {
     fn display_with<'a>(
         &'a self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         settings: DisplaySettings<'db>,
     ) -> DisplayParameters<'a, 'db> {
         DisplayParameters {
@@ -2341,7 +2337,7 @@ impl<'db> Parameters<'db> {
 struct DisplayParameters<'a, 'db> {
     parameters: &'a Parameters<'db>,
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     settings: DisplaySettings<'db>,
 }
 
@@ -2486,7 +2482,7 @@ impl<'db> Parameter<'db> {
     fn display_with<'a>(
         &'a self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         settings: DisplaySettings<'db>,
     ) -> DisplayParameter<'a, 'db> {
         DisplayParameter {
@@ -2501,7 +2497,7 @@ impl<'db> Parameter<'db> {
 struct DisplayParameter<'a, 'db> {
     param: &'a Parameter<'db>,
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     settings: DisplaySettings<'db>,
 }
 
@@ -2625,7 +2621,7 @@ impl<'db> UnionType<'db> {
     fn display_with<'a>(
         &'a self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         settings: DisplaySettings<'db>,
     ) -> DisplayUnionType<'a, 'db> {
         DisplayUnionType {
@@ -2640,7 +2636,7 @@ impl<'db> UnionType<'db> {
 struct DisplayUnionType<'a, 'db> {
     ty: &'a UnionType<'db>,
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     settings: DisplaySettings<'db>,
 }
 
@@ -2669,7 +2665,7 @@ impl<'db> FmtDetailed<'db> for DisplayUnionType<'_, 'db> {
         /// ```
         fn condensable_literals<'db>(
             db: &'db dyn Db,
-            program: crate::Program<'db>,
+            program: crate::Program,
             ty: Type<'db>,
         ) -> Option<Vec<Type<'db>>> {
             match ty {
@@ -2697,7 +2693,7 @@ impl<'db> FmtDetailed<'db> for DisplayUnionType<'_, 'db> {
 
         fn singleline_union_element_label<'db>(
             db: &'db dyn Db,
-            program: crate::Program<'db>,
+            program: crate::Program,
             element: Type<'db>,
             settings: &DisplaySettings<'db>,
         ) -> String {
@@ -2837,7 +2833,7 @@ impl fmt::Debug for DisplayUnionType<'_, '_> {
 struct DisplaySubclassOfGroup<'db> {
     types: Vec<SubclassOfType<'db>>,
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     settings: DisplaySettings<'db>,
 }
 
@@ -2899,7 +2895,7 @@ impl Display for DisplaySubclassOfGroup<'_> {
 struct DisplayLiteralGroup<'db> {
     literals: Vec<Type<'db>>,
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     settings: DisplaySettings<'db>,
 }
 
@@ -2953,7 +2949,7 @@ impl<'db> IntersectionType<'db> {
     fn display_with<'a>(
         &'a self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         settings: DisplaySettings<'db>,
     ) -> DisplayIntersectionType<'a, 'db> {
         DisplayIntersectionType {
@@ -2968,7 +2964,7 @@ impl<'db> IntersectionType<'db> {
 struct DisplayIntersectionType<'a, 'db> {
     ty: &'a IntersectionType<'db>,
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     settings: DisplaySettings<'db>,
 }
 
@@ -3018,7 +3014,7 @@ impl fmt::Debug for DisplayIntersectionType<'_, '_> {
 struct DisplayMaybeNegatedType<'db> {
     ty: Type<'db>,
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     negated: bool,
     settings: DisplaySettings<'db>,
 }
@@ -3063,7 +3059,7 @@ fn should_parenthesize_callable_type(ty: Type<'_>, db: &dyn Db) -> bool {
 struct DisplayMaybeParenthesizedType<'db> {
     ty: Type<'db>,
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     settings: DisplaySettings<'db>,
 }
 
@@ -3105,7 +3101,7 @@ trait TypeArrayDisplay<'db> {
     fn display_with(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         settings: DisplaySettings<'db>,
     ) -> DisplayTypeArray<'_, 'db>;
 }
@@ -3114,7 +3110,7 @@ impl<'db> TypeArrayDisplay<'db> for Box<[Type<'db>]> {
     fn display_with(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         settings: DisplaySettings<'db>,
     ) -> DisplayTypeArray<'_, 'db> {
         DisplayTypeArray {
@@ -3130,7 +3126,7 @@ impl<'db> TypeArrayDisplay<'db> for Vec<Type<'db>> {
     fn display_with(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         settings: DisplaySettings<'db>,
     ) -> DisplayTypeArray<'_, 'db> {
         DisplayTypeArray {
@@ -3146,7 +3142,7 @@ impl<'db> TypeArrayDisplay<'db> for [Type<'db>] {
     fn display_with(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         settings: DisplaySettings<'db>,
     ) -> DisplayTypeArray<'_, 'db> {
         DisplayTypeArray {
@@ -3161,7 +3157,7 @@ impl<'db> TypeArrayDisplay<'db> for [Type<'db>] {
 struct DisplayTypeArray<'b, 'db> {
     types: &'b [Type<'db>],
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     settings: DisplaySettings<'db>,
 }
 
@@ -3221,14 +3217,14 @@ impl Display for DisplayStringLiteralType<'_> {
 pub(crate) struct DisplayKnownInstanceRepr<'db> {
     pub(crate) known_instance: KnownInstanceType<'db>,
     pub(crate) db: &'db dyn Db,
-    pub(crate) program: crate::Program<'db>,
+    pub(crate) program: crate::Program,
 }
 
 impl<'db> KnownInstanceType<'db> {
     pub(crate) fn display_with(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         _settings: DisplaySettings<'db>,
     ) -> DisplayKnownInstanceRepr<'db> {
         DisplayKnownInstanceRepr {

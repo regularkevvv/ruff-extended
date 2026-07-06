@@ -33,7 +33,7 @@ use ty_python_core::scope::ScopeId;
 
 pub(super) fn synthesize_typed_dict_method<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     typed_dict: TypedDictType<'db>,
     method_name: &str,
     fields: impl Fn() -> TypedDictFields<'db>,
@@ -166,7 +166,7 @@ impl<'db> TypedDictFields<'db> {
 ///    Keyword-only. Fields that are not valid Python identifiers are collapsed into `**kwargs`.
 fn synthesize_typed_dict_init<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     typed_dict: TypedDictType<'db>,
     fields: TypedDictFields<'db>,
 ) -> Type<'db> {
@@ -243,7 +243,7 @@ fn synthesize_typed_dict_init<'db>(
 /// Synthesize the `__getitem__` method for a `TypedDict`.
 fn synthesize_typed_dict_getitem<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     typed_dict: TypedDictType<'db>,
     fields: TypedDictFields<'db>,
 ) -> Type<'db> {
@@ -288,7 +288,7 @@ fn synthesize_typed_dict_getitem<'db>(
 /// Synthesize the `__setitem__` method for a `TypedDict`.
 fn synthesize_typed_dict_setitem<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     typed_dict: TypedDictType<'db>,
     fields: TypedDictFields<'db>,
 ) -> Type<'db> {
@@ -348,7 +348,7 @@ fn synthesize_typed_dict_setitem<'db>(
 /// Synthesize the `__delitem__` method for a `TypedDict`.
 fn synthesize_typed_dict_delitem<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     typed_dict: TypedDictType<'db>,
     fields: TypedDictFields<'db>,
 ) -> Type<'db> {
@@ -402,7 +402,7 @@ fn synthesize_typed_dict_delitem<'db>(
 /// Synthesize the `get` method for a `TypedDict`.
 fn synthesize_typed_dict_get<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     typed_dict: TypedDictType<'db>,
     fields: TypedDictFields<'db>,
 ) -> Type<'db> {
@@ -554,7 +554,7 @@ fn synthesize_typed_dict_get<'db>(
 /// Synthesize the `update` method for a `TypedDict`.
 fn synthesize_typed_dict_update<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     typed_dict: TypedDictType<'db>,
     fields: TypedDictFields<'db>,
 ) -> Type<'db> {
@@ -622,7 +622,7 @@ fn synthesize_typed_dict_update<'db>(
 /// Synthesize the `pop` method for a `TypedDict`.
 fn synthesize_typed_dict_pop<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     typed_dict: TypedDictType<'db>,
     fields: TypedDictFields<'db>,
 ) -> Type<'db> {
@@ -705,7 +705,7 @@ fn synthesize_typed_dict_pop<'db>(
 /// Synthesize the `setdefault` method for a `TypedDict`.
 fn synthesize_typed_dict_setdefault<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     typed_dict: TypedDictType<'db>,
     fields: TypedDictFields<'db>,
 ) -> Type<'db> {
@@ -774,7 +774,7 @@ fn synthesize_typed_dict_no_argument_method<'db>(
 /// Synthesize `items`, `keys`, or `values` for a closed or extra-items `TypedDict`.
 fn synthesize_typed_dict_view_method<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     typed_dict: TypedDictType<'db>,
     view_name: &str,
 ) -> Type<'db> {
@@ -803,7 +803,7 @@ fn synthesize_typed_dict_view_method<'db>(
 /// Synthesize a merge operator (`__or__`, `__ror__`, or `__ior__`) for a `TypedDict`.
 fn synthesize_typed_dict_merge<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     instance_ty: Type<'db>,
     name: &str,
 ) -> Type<'db> {
@@ -1113,7 +1113,7 @@ impl<'db> DynamicTypedDictLiteral<'db> {
 
 pub(super) fn typed_dict_fallback_class_member<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     module: TypedDictModule,
     lookup_policy: MemberLookupPolicy,
     name: &str,

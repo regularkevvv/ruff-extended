@@ -69,7 +69,7 @@ impl<'db> SemanticModel<'db> {
         self.analysis_file
     }
 
-    pub(crate) fn program(&self) -> crate::Program<'db> {
+    pub(crate) fn program(&self) -> crate::Program {
         self.analysis_file.program(self.db)
     }
 

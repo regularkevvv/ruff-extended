@@ -11,7 +11,7 @@ use crate::program::ResolverProgram;
 use crate::resolve::{ModuleResolveMode, ResolverContext, resolve_file_module, search_paths};
 
 /// List all available modules, including all sub-modules, sorted in lexicographic order.
-pub fn all_modules<'db>(db: &'db dyn Db, program: ResolverProgram<'db>) -> Vec<Module<'db>> {
+pub fn all_modules(db: &dyn Db, program: ResolverProgram) -> Vec<Module<'_>> {
     let mut modules = list_modules(db, program).to_vec();
     let mut stack = modules.clone();
     while let Some(module) = stack.pop() {
@@ -27,7 +27,7 @@ pub fn all_modules<'db>(db: &'db dyn Db, program: ResolverProgram<'db>) -> Vec<M
 /// List all available top-level modules.
 /// List all available top-level modules in one resolver program.
 #[salsa::tracked(returns(deref))]
-pub fn list_modules<'db>(db: &'db dyn Db, program: ResolverProgram<'db>) -> Box<[Module<'db>]> {
+pub fn list_modules(db: &dyn Db, program: ResolverProgram) -> Box<[Module<'_>]> {
     let mut modules: BTreeMap<&ModuleName, ListedModule<'_>> = BTreeMap::new();
     for search_path in search_paths(db, program, ModuleResolveMode::StubsAllowed) {
         for &new in list_modules_in(
@@ -69,7 +69,7 @@ pub fn list_modules<'db>(db: &'db dyn Db, program: ResolverProgram<'db>) -> Box<
 
 #[salsa::tracked(debug, heap_size=ruff_memory_usage::heap_size)]
 struct SearchPathIngredient<'db> {
-    program: ResolverProgram<'db>,
+    program: ResolverProgram,
     #[returns(ref)]
     path: SearchPath,
 }
@@ -119,7 +119,7 @@ impl get_size2::GetSize for ListedModule<'_> {}
 /// in the same directory).
 struct Lister<'db> {
     db: &'db dyn Db,
-    program: ResolverProgram<'db>,
+    program: ResolverProgram,
     search_path: &'db SearchPath,
     modules: BTreeMap<&'db ModuleName, ListedModule<'db>>,
 }
@@ -127,11 +127,7 @@ struct Lister<'db> {
 impl<'db> Lister<'db> {
     /// Create new state that can accumulate modules from a list
     /// of file paths.
-    fn new(
-        db: &'db dyn Db,
-        program: ResolverProgram<'db>,
-        search_path: &'db SearchPath,
-    ) -> Lister<'db> {
+    fn new(db: &'db dyn Db, program: ResolverProgram, search_path: &'db SearchPath) -> Lister<'db> {
         Lister {
             db,
             program,
@@ -427,8 +423,8 @@ mod tests {
 
     use super::list_modules as list_modules_query;
 
-    fn resolver_program(db: &TestDb) -> ResolverProgram<'_> {
-        ResolverProgram::create(db, db.python_version(), db.search_paths())
+    fn resolver_program(db: &TestDb) -> ResolverProgram {
+        db.resolver_program()
     }
 
     fn list_modules(db: &TestDb) -> Box<[Module<'_>]> {

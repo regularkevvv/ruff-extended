@@ -277,11 +277,11 @@ impl FromIterator<NavigationTarget> for NavigationTargets {
 }
 
 pub trait HasNavigationTargets {
-    fn navigation_targets(&self, db: &dyn Db, program: Program<'_>) -> NavigationTargets;
+    fn navigation_targets(&self, db: &dyn Db, program: Program) -> NavigationTargets;
 }
 
 impl HasNavigationTargets for Type<'_> {
-    fn navigation_targets(&self, db: &dyn Db, program: Program<'_>) -> NavigationTargets {
+    fn navigation_targets(&self, db: &dyn Db, program: Program) -> NavigationTargets {
         match self {
             Type::Union(union) => union
                 .elements(db)
@@ -329,7 +329,7 @@ impl HasNavigationTargets for Type<'_> {
 }
 
 impl HasNavigationTargets for TypeDefinition<'_> {
-    fn navigation_targets(&self, db: &dyn Db, _program: Program<'_>) -> NavigationTargets {
+    fn navigation_targets(&self, db: &dyn Db, _program: Program) -> NavigationTargets {
         let Some(full_range) = self.full_range(db) else {
             return NavigationTargets::empty();
         };
@@ -436,7 +436,7 @@ mod tests {
             CursorTestBuilder::default()
         }
 
-        pub(super) fn program(&self) -> Program<'_> {
+        pub(super) fn program(&self) -> Program {
             self.db.project().program(&self.db)
         }
 

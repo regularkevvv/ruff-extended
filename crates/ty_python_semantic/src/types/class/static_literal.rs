@@ -109,7 +109,7 @@ pub struct StaticClassLiteral<'db> {
 impl get_size2::GetSize for StaticClassLiteral<'_> {}
 
 impl<'db> StaticClassLiteral<'db> {
-    pub(crate) fn program(self, db: &'db dyn Db) -> crate::Program<'db> {
+    pub(crate) fn program(self, db: &'db dyn Db) -> crate::Program {
         self.body_scope(db).program(db)
     }
 }
@@ -366,7 +366,7 @@ impl<'db> StaticClassLiteral<'db> {
             fn visit_bound_type_var_type(
                 &self,
                 _db: &'db dyn Db,
-                _program: crate::Program<'db>,
+                _program: crate::Program,
                 bound_typevar: BoundTypeVarInstance<'db>,
             ) {
                 self.typevars.borrow_mut().insert(bound_typevar);
@@ -375,7 +375,7 @@ impl<'db> StaticClassLiteral<'db> {
             fn visit_generic_alias_type(
                 &self,
                 db: &'db dyn Db,
-                program: crate::Program<'db>,
+                program: crate::Program,
                 alias: GenericAlias<'db>,
             ) {
                 // The generic context contains the base class's formal type parameters, not type
@@ -385,7 +385,7 @@ impl<'db> StaticClassLiteral<'db> {
                 }
             }
 
-            fn visit_type(&self, db: &'db dyn Db, program: crate::Program<'db>, ty: Type<'db>) {
+            fn visit_type(&self, db: &'db dyn Db, program: crate::Program, ty: Type<'db>) {
                 walk_type_with_recursion_guard(db, program, ty, self, &self.recursion_guard);
             }
         }
@@ -442,17 +442,17 @@ impl<'db> StaticClassLiteral<'db> {
         db: &'db dyn Db,
         specialization: Option<Specialization<'db>>,
     ) -> ClassType<'db> {
-        let program = self.program(db);
         self.apply_specialization(db, |generic_context| {
             specialization.unwrap_or_else(|| {
+                let program = self.program(db);
                 generic_context.default_specialization(db, program, self.known(db))
             })
         })
     }
 
     pub(crate) fn top_materialization(self, db: &'db dyn Db) -> ClassType<'db> {
-        let program = self.program(db);
         self.apply_specialization(db, |generic_context| {
+            let program = self.program(db);
             generic_context
                 .default_specialization(db, program, self.known(db))
                 .materialize_impl(
@@ -468,8 +468,8 @@ impl<'db> StaticClassLiteral<'db> {
     /// returned unchanged. For a non-specialized generic class, we return a generic alias that
     /// applies the default specialization to the class's typevars.
     pub(crate) fn default_specialization(self, db: &'db dyn Db) -> ClassType<'db> {
-        let program = self.program(db);
         self.apply_specialization(db, |generic_context| {
+            let program = self.program(db);
             generic_context.default_specialization(db, program, self.known(db))
         })
     }
@@ -1129,7 +1129,7 @@ impl<'db> StaticClassLiteral<'db> {
     ) -> PlaceAndQualifiers<'db> {
         fn into_function_like_callable<'d>(
             db: &'d dyn Db,
-            program: crate::Program<'d>,
+            program: crate::Program,
             ty: Type<'d>,
         ) -> Type<'d> {
             match ty {
@@ -1151,12 +1151,12 @@ impl<'db> StaticClassLiteral<'db> {
             }
         }
 
-        let program = ClassLiteral::Static(self).program(db);
         let mut member = self.class_member_inner(db, None, name, policy);
 
         // We generally treat dunder attributes with `Callable` types as function-like callables.
         // See `callables_as_descriptors.md` for more details.
         if name.starts_with("__") && name.ends_with("__") {
+            let program = self.program(db);
             member = member.map_type(|ty| into_function_like_callable(db, program, ty));
         }
 
@@ -1209,7 +1209,6 @@ impl<'db> StaticClassLiteral<'db> {
         specialization: Option<Specialization<'db>>,
         name: &str,
     ) -> Member<'db> {
-        let program = self.program(db);
         // Check if this class is dataclass-like (either via @dataclass or via dataclass_transform)
         if matches!(
             CodeGeneratorKind::from_class(db, self.into()),
@@ -1217,6 +1216,7 @@ impl<'db> StaticClassLiteral<'db> {
         ) {
             if name == "__dataclass_fields__" {
                 // Make this class look like a subclass of the `DataClassInstance` protocol
+                let program = self.program(db);
                 return Member {
                     inner: Place::declared(KnownClass::Dict.to_specialized_instance(
                         db,
@@ -1290,6 +1290,8 @@ impl<'db> StaticClassLiteral<'db> {
             return Self::implicit_attribute(db, body_scope, name, MethodDecorator::ClassMethod);
         }
 
+        let program = self.program(db);
+
         // For dataclass-like classes, `KW_ONLY` sentinel fields are not real
         // class attributes; they are markers used by the dataclass decorator to
         // indicate that subsequent fields are keyword-only. Treat them as
@@ -1328,7 +1330,6 @@ impl<'db> StaticClassLiteral<'db> {
         inherited_generic_context: Option<GenericContext<'db>>,
         name: &str,
     ) -> Option<Type<'db>> {
-        let program = self.program(db);
         // Handle `@functools.total_ordering`: synthesize comparison methods
         // for classes that have `@total_ordering` and define at least one
         // ordering method. The decorator requires at least one of __lt__,
@@ -1352,34 +1353,40 @@ impl<'db> StaticClassLiteral<'db> {
                 })
             && self.has_ordering_method_in_mro(db, specialization)
             && let Some(root_method_ty) = self.total_ordering_root_method(db, specialization)
-            && let Some(callables) = root_method_ty.try_upcast_to_callable(db, program)
         {
-            let bool_ty = KnownClass::Bool.to_instance(db, program);
-            let synthesized_callables = callables.map(|callable| {
-                let signatures = CallableSignature::from_overloads(
-                    callable.signatures(db).iter().map(|signature| {
-                        // The generated methods return a union of the root method's return type
-                        // and `bool`. This is because `@total_ordering` synthesizes methods like:
-                        //     def __gt__(self, other): return not (self == other or self < other)
-                        // If `__lt__` returns `int`, then `__gt__` could return `int | bool`.
-                        let return_ty =
-                            UnionType::from_two_elements(db, program, signature.return_ty, bool_ty);
-                        Signature::new_generic(
-                            signature.generic_context,
-                            signature.parameters().clone(),
-                            return_ty,
-                        )
-                    }),
-                );
-                CallableType::new(
-                    db,
-                    signatures,
-                    CallableTypeKind::FunctionLike,
-                    CallableFunctionProvenance::None,
-                )
-            });
+            let program = self.program(db);
+            if let Some(callables) = root_method_ty.try_upcast_to_callable(db, program) {
+                let bool_ty = KnownClass::Bool.to_instance(db, program);
+                let synthesized_callables = callables.map(|callable| {
+                    let signatures = CallableSignature::from_overloads(
+                        callable.signatures(db).iter().map(|signature| {
+                            // The generated methods return a union of the root method's return type
+                            // and `bool`. This is because `@total_ordering` synthesizes methods like:
+                            //     def __gt__(self, other): return not (self == other or self < other)
+                            // If `__lt__` returns `int`, then `__gt__` could return `int | bool`.
+                            let return_ty = UnionType::from_two_elements(
+                                db,
+                                program,
+                                signature.return_ty,
+                                bool_ty,
+                            );
+                            Signature::new_generic(
+                                signature.generic_context,
+                                signature.parameters().clone(),
+                                return_ty,
+                            )
+                        }),
+                    );
+                    CallableType::new(
+                        db,
+                        signatures,
+                        CallableTypeKind::FunctionLike,
+                        CallableFunctionProvenance::None,
+                    )
+                });
 
-            return Some(synthesized_callables.into_type(db, program));
+                return Some(synthesized_callables.into_type(db, program));
+            }
         }
 
         // An ordinary subclass of a frozen dataclass is not itself dataclass-like, so the
@@ -1394,6 +1401,7 @@ impl<'db> StaticClassLiteral<'db> {
         }
 
         let field_policy = CodeGeneratorKind::from_class(db, self.into())?;
+        let program = self.program(db);
 
         let instance_ty =
             Type::instance(db, self.apply_optional_specialization(db, specialization));
@@ -1534,11 +1542,7 @@ impl<'db> StaticClassLiteral<'db> {
             Some(Type::function_like_callable(db, signature))
         };
 
-        let python_version = self
-            .body_scope(db)
-            .analysis_file(db)
-            .program(db)
-            .python_version(db);
+        let python_version = program.python_version(db);
 
         match (field_policy, name) {
             (CodeGeneratorKind::DataclassLike(_), "__init__") => {
@@ -1752,7 +1756,7 @@ impl<'db> StaticClassLiteral<'db> {
             }
             (CodeGeneratorKind::TypedDict, name) => synthesize_typed_dict_method(
                 db,
-                self.program(db),
+                program,
                 instance_ty
                     .as_typed_dict()
                     .expect("TypedDict code generation should use a TypedDict instance"),
@@ -1773,13 +1777,13 @@ impl<'db> StaticClassLiteral<'db> {
         db: &'db dyn Db,
         specialization: Option<Specialization<'db>>,
     ) -> Option<Type<'db>> {
-        let program = self.program(db);
         if CodeGeneratorKind::from_static_class(db, self).is_some() {
             return None;
         }
 
         let frozen_base_fields =
             self.inherited_non_slotted_frozen_dataclass_fields(db, specialization)?;
+        let program = self.program(db);
 
         let instance_ty =
             Type::instance(db, self.apply_optional_specialization(db, specialization));
@@ -2642,7 +2646,6 @@ impl<'db> StaticClassLiteral<'db> {
     /// A helper function for `instance_member` that looks up the `name` attribute only on
     /// this class, not on its superclasses.
     pub(super) fn own_instance_member(self, db: &'db dyn Db, name: &str) -> Member<'db> {
-        let program = self.program(db);
         // TODO: There are many things that are not yet implemented here:
         // - `typing.Final`
         // - Proper diagnostics
@@ -2662,6 +2665,7 @@ impl<'db> StaticClassLiteral<'db> {
         let table = place_table(db, body_scope);
 
         if let Some(symbol_id) = table.symbol_id(name) {
+            let program = self.program(db);
             let use_def = use_def_map(db, body_scope);
 
             let declarations = use_def.end_of_scope_symbol_declarations(symbol_id);
@@ -3251,7 +3255,7 @@ impl<'db> VarianceInferable<'db> for StaticClassLiteral<'db> {
     fn variance_of(
         self,
         db: &'db dyn Db,
-        _program: crate::Program<'db>,
+        _program: crate::Program,
         typevar: BoundTypeVarInstance<'db>,
     ) -> TypeVarVariance {
         self.inferred_variance_of(db, typevar)

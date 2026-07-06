@@ -27,7 +27,7 @@ impl<'db> EnumSpec<'db> {
     fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -152,7 +152,7 @@ impl<'db> DynamicEnumLiteral<'db> {
         }
     }
 
-    fn program(self, db: &'db dyn Db) -> crate::Program<'db> {
+    fn program(self, db: &'db dyn Db) -> crate::Program {
         self.scope(db).program(db)
     }
 

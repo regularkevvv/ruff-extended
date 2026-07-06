@@ -844,7 +844,7 @@ fn is_function_definition<'db>(
 /// Returns the variable kind for an attribute if it should participate in `ClassVar` override checks.
 fn variable_kind<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     class_member: PlaceAndQualifiers<'db>,
     instance_member: PlaceAndQualifiers<'db>,
 ) -> Option<VariableKind> {

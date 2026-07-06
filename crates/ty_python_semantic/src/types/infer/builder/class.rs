@@ -469,7 +469,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
 
 fn apply_class_decorator<'db>(
     db: &'db dyn crate::Db,
-    program: Program<'db>,
+    program: Program,
     decorator_ty: Type<'db>,
     decorated_ty: Type<'db>,
 ) -> Result<Type<'db>, CallError<'db>> {
@@ -494,7 +494,7 @@ fn apply_class_decorator<'db>(
 /// original class object even if the decorator call produced a `SubclassOf` type internally.
 fn class_decorator_preserves_class_binding<'db>(
     db: &'db dyn crate::Db,
-    program: Program<'db>,
+    program: Program,
     original_class: Type<'db>,
     decorated_class: Type<'db>,
 ) -> bool {
@@ -533,7 +533,7 @@ fn class_decorator_preserves_class_binding<'db>(
 /// intersection members.
 fn type_retains_original_class<'db>(
     db: &'db dyn crate::Db,
-    program: Program<'db>,
+    program: Program,
     original_class: Type<'db>,
     decorated_class: Type<'db>,
 ) -> bool {
@@ -573,7 +573,7 @@ fn type_retains_original_class<'db>(
 /// be preserved.
 fn preserve_binding_for_unknown_result<'db>(
     db: &'db dyn crate::Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     decorator_ty: Type<'db>,
     decorator_call_ty: Option<Type<'db>>,
     decorator_result_ty: Type<'db>,
@@ -641,7 +641,7 @@ impl ClassDecoratorUnknownResultPolicy {
     /// intent.
     fn from_decorator<'db>(
         db: &'db dyn crate::Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         decorator_ty: Type<'db>,
         decorator_result_ty: Type<'db>,
     ) -> Self {
@@ -672,7 +672,7 @@ impl ClassDecoratorUnknownResultPolicy {
     /// the decorator value itself is not the function that receives the class.
     fn known_from_decorator<'db>(
         db: &'db dyn crate::Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         decorator_ty: Type<'db>,
         decorator_result_ty: Type<'db>,
     ) -> Option<Self> {
@@ -779,7 +779,7 @@ impl ClassDecoratorUnknownResultPolicy {
 /// returns the original class object again.
 fn merge_class_preserving_decorator_result<'db>(
     db: &'db dyn crate::Db,
-    program: Program<'db>,
+    program: Program,
     original_class: Type<'db>,
     current_binding: Type<'db>,
     decorated_binding: Type<'db>,

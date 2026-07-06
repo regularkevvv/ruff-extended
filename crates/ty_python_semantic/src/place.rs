@@ -88,7 +88,7 @@ impl PublicTypePolicy {
     pub(crate) fn apply_if_needed<'db>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         ty: Type<'db>,
     ) -> Type<'db> {
         match self {
@@ -337,7 +337,7 @@ impl<'db> Place<'db> {
     pub(crate) fn try_call_dunder_get(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         owner: Type<'db>,
     ) -> Place<'db> {
         match self {
@@ -423,7 +423,7 @@ impl<'db> LookupError<'db> {
     pub(crate) fn or_fall_back_to(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         fallback: PlaceAndQualifiers<'db>,
     ) -> LookupResult<'db> {
         let fallback = fallback.into_lookup_result(db, program);
@@ -528,7 +528,7 @@ pub(crate) fn global_symbol<'db>(
 /// `file` should be [`None`] when looking up a symbol on a namespace package.
 pub(crate) fn imported_symbol<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     file: Option<ty_python_core::environment::AnalysisFile<'db>>,
     name: &str,
     requires_explicit_reexport: Option<RequiresExplicitReExport>,
@@ -610,7 +610,7 @@ pub(crate) fn imported_symbol<'db>(
 /// (e.g. `from builtins import int`).
 pub(crate) fn builtins_symbol<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     symbol: &str,
 ) -> PlaceAndQualifiers<'db> {
     let resolver = |module: Module<'_>| {
@@ -653,7 +653,7 @@ pub(crate) fn builtins_symbol<'db>(
 /// Returns `Place::Undefined` if the given known module cannot be resolved for some reason.
 pub(crate) fn known_module_symbol<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     known_module: KnownModule,
     symbol: &str,
 ) -> PlaceAndQualifiers<'db> {
@@ -680,7 +680,7 @@ pub(crate) fn known_module_symbol<'db>(
 #[cfg(test)]
 pub(crate) fn typing_symbol<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     symbol: &str,
 ) -> PlaceAndQualifiers<'db> {
     known_module_symbol(db, program, KnownModule::Typing, symbol)
@@ -692,7 +692,7 @@ pub(crate) fn typing_symbol<'db>(
 #[inline]
 pub(crate) fn typing_extensions_symbol<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     symbol: &str,
 ) -> PlaceAndQualifiers<'db> {
     known_module_symbol(db, program, KnownModule::TypingExtensions, symbol)
@@ -701,21 +701,18 @@ pub(crate) fn typing_extensions_symbol<'db>(
 /// Get the `builtins` module scope.
 ///
 /// Can return `None` if a custom typeshed is used that is missing `builtins.pyi`.
-pub(crate) fn builtins_module_scope<'db>(
-    db: &'db dyn Db,
-    program: Program<'db>,
-) -> Option<ScopeId<'db>> {
+pub(crate) fn builtins_module_scope(db: &dyn Db, program: Program) -> Option<ScopeId<'_>> {
     core_module_scope(db, program, KnownModule::Builtins)
 }
 
 /// Get the scope of a core stdlib module.
 ///
 /// Can return `None` if a custom typeshed is used that is missing the core module in question.
-fn core_module_scope<'db>(
-    db: &'db dyn Db,
-    program: Program<'db>,
+fn core_module_scope(
+    db: &dyn Db,
+    program: Program,
     core_module: KnownModule,
-) -> Option<ScopeId<'db>> {
+) -> Option<ScopeId<'_>> {
     let module = resolve_module_confident(db, program.resolver(db), &core_module.name())?;
     Some(ty_python_core::global_scope(
         db,
@@ -729,7 +726,7 @@ fn core_module_scope<'db>(
 /// The type will be a union if there are multiple bindings with different types.
 pub(super) fn place_from_bindings<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     bindings_with_constraints: BindingWithConstraintsIterator<'_, 'db>,
 ) -> PlaceWithDefinition<'db> {
     place_from_bindings_impl(
@@ -743,7 +740,7 @@ pub(super) fn place_from_bindings<'db>(
 
 pub(super) fn place_from_bindings_with_reachability_cache<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     bindings_with_constraints: BindingWithConstraintsIterator<'_, 'db>,
     reachability_cache: &ReachabilityEvaluationCache<'db>,
 ) -> PlaceWithDefinition<'db> {
@@ -766,7 +763,7 @@ pub(super) fn place_from_bindings_with_reachability_cache<'db>(
 /// [`TypeQualifiers`] that have been specified on the declaration(s).
 pub(crate) fn place_from_declarations<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     declarations: DeclarationsIterator<'_, 'db>,
 ) -> PlaceFromDeclarationsResult<'db> {
     place_from_declarations_impl(
@@ -780,7 +777,7 @@ pub(crate) fn place_from_declarations<'db>(
 
 pub(crate) fn place_from_declarations_with_reachability_cache<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     declarations: DeclarationsIterator<'_, 'db>,
     reachability_cache: &ReachabilityEvaluationCache<'db>,
 ) -> PlaceFromDeclarationsResult<'db> {
@@ -928,7 +925,7 @@ impl<'db> PlaceAndQualifiers<'db> {
     pub(crate) fn into_lookup_result(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> LookupResult<'db> {
         match self {
             PlaceAndQualifiers {
@@ -963,7 +960,7 @@ impl<'db> PlaceAndQualifiers<'db> {
     pub(crate) fn unwrap_with_diagnostic(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         diagnostic_fn: impl FnOnce(LookupError<'db>) -> TypeAndQualifiers<'db>,
     ) -> TypeAndQualifiers<'db> {
         self.into_lookup_result(db, program)
@@ -984,7 +981,7 @@ impl<'db> PlaceAndQualifiers<'db> {
     pub(crate) fn or_fall_back_to(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         fallback_fn: impl FnOnce() -> PlaceAndQualifiers<'db>,
     ) -> Self {
         self.into_lookup_result(db, program)
@@ -995,7 +992,7 @@ impl<'db> PlaceAndQualifiers<'db> {
     pub(crate) fn cycle_normalized(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         previous_place: Self,
         cycle: &salsa::Cycle,
     ) -> Self {
@@ -1559,7 +1556,7 @@ pub(crate) struct ReachableLoopBinding<'db> {
 /// access any AST nodes from the file containing the declarations.
 fn place_from_bindings_impl<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     bindings_with_constraints: BindingWithConstraintsIterator<'_, 'db>,
     requires_explicit_reexport: RequiresExplicitReExport,
     reachability_cache: Option<&ReachabilityEvaluationCache<'db>>,
@@ -1808,7 +1805,7 @@ struct PublicTypeBuilder<'db> {
 }
 
 impl<'db> PublicTypeBuilder<'db> {
-    fn new(db: &'db dyn Db, program: Program<'db>) -> Self {
+    fn new(db: &'db dyn Db, program: Program) -> Self {
         PublicTypeBuilder {
             db,
             queue: None,
@@ -1890,7 +1887,7 @@ struct DeclaredTypeBuilder<'db> {
 }
 
 impl<'db> DeclaredTypeBuilder<'db> {
-    fn new(db: &'db dyn Db, program: Program<'db>) -> Self {
+    fn new(db: &'db dyn Db, program: Program) -> Self {
         DeclaredTypeBuilder {
             inner: PublicTypeBuilder::new(db, program),
             qualifiers: TypeQualifiers::empty(),
@@ -1945,7 +1942,7 @@ impl<'db> DeclaredTypeBuilder<'db> {
 /// access any AST nodes from the file containing the declarations.
 fn place_from_declarations_impl<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     declarations_iterator: DeclarationsIterator<'_, 'db>,
     requires_explicit_reexport: RequiresExplicitReExport,
     reachability_cache: Option<&ReachabilityEvaluationCache<'db>>,
@@ -2100,7 +2097,7 @@ pub(crate) mod implicit_globals {
 
     pub(crate) fn module_type_implicit_global_declaration<'db>(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         name: &str,
     ) -> PlaceAndQualifiers<'db> {
         if !module_type_symbols(db, program)
@@ -2146,7 +2143,7 @@ pub(crate) mod implicit_globals {
     /// global scope if they're being imported **from a different file**.
     pub(crate) fn module_type_implicit_global_symbol<'db>(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         name: &str,
     ) -> PlaceAndQualifiers<'db> {
         match name {
@@ -2238,9 +2235,9 @@ pub(crate) mod implicit_globals {
         cycle_initial=|_, _, _| smallvec::SmallVec::default(),
         heap_size=ruff_memory_usage::heap_size
     )]
-    fn module_type_symbols<'db>(
-        db: &'db dyn Db,
-        program: Program<'db>,
+    fn module_type_symbols(
+        db: &dyn Db,
+        program: Program,
     ) -> smallvec::SmallVec<[ast::name::Name; 8]> {
         let Some(module_type) = KnownClass::ModuleType
             .to_class_literal(db, program)
@@ -2275,10 +2272,10 @@ pub(crate) mod implicit_globals {
     /// This is used for completions in the global scope of a module. It returns
     /// the correct types for special-cased symbols like `__file__` (which is `str`
     /// for the current module, not `str | None`).
-    pub(crate) fn all_implicit_module_globals<'db>(
-        db: &'db dyn Db,
-        program: Program<'db>,
-    ) -> impl Iterator<Item = (Name, Type<'db>)> + 'db {
+    pub(crate) fn all_implicit_module_globals(
+        db: &dyn Db,
+        program: Program,
+    ) -> impl Iterator<Item = (Name, Type<'_>)> + '_ {
         // Special-cased implicit globals that are not in `module_type_symbols`
         let special_cased = ["__builtins__", "__debug__", "__warningregistry__"]
             .into_iter()
@@ -2326,7 +2323,7 @@ pub(crate) mod implicit_globals {
 /// See <https://docs.python.org/3/reference/datamodel.html#creating-the-class-object>
 pub(crate) fn class_body_implicit_symbol<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     name: &str,
 ) -> PlaceAndQualifiers<'db> {
     match name {
@@ -2496,7 +2493,7 @@ mod tests {
     }
 
     #[track_caller]
-    fn assert_bound_string_symbol<'db>(db: &'db dyn Db, program: Program<'db>, symbol: Place<'db>) {
+    fn assert_bound_string_symbol<'db>(db: &'db dyn Db, program: Program, symbol: Place<'db>) {
         assert!(matches!(
             symbol,
             Place::Defined(DefinedPlace {

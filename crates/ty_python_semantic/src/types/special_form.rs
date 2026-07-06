@@ -230,21 +230,17 @@ impl SpecialFormType {
     /// For example, the symbol `typing.Literal` is an instance of `typing._SpecialForm`,
     /// so `SpecialFormType::Literal.instance_fallback(db)`
     /// returns `Type::NominalInstance(NominalInstanceType { class: <typing._SpecialForm> })`.
-    pub(super) fn instance_fallback<'db>(
-        self,
-        db: &'db dyn Db,
-        program: crate::Program<'db>,
-    ) -> Type<'db> {
+    pub(super) fn instance_fallback(self, db: &dyn Db, program: crate::Program) -> Type<'_> {
         self.class().to_instance(db, program)
     }
 
     /// Return the type denoted by this retained special-form value when it is valid without
     /// parameters or a surrounding inference scope.
-    pub(crate) fn type_form_argument<'db>(
+    pub(crate) fn type_form_argument(
         self,
-        db: &'db dyn Db,
-        program: crate::Program<'db>,
-    ) -> Option<Type<'db>> {
+        db: &dyn Db,
+        program: crate::Program,
+    ) -> Option<Type<'_>> {
         match self {
             Self::Never | Self::NoReturn => Some(Type::Never),
             Self::LiteralString => Some(Type::literal_string()),
@@ -576,11 +572,7 @@ impl SpecialFormType {
         }
     }
 
-    pub(super) fn to_meta_type<'db>(
-        self,
-        db: &'db dyn Db,
-        program: crate::Program<'db>,
-    ) -> Type<'db> {
+    pub(super) fn to_meta_type(self, db: &dyn Db, program: crate::Program) -> Type<'_> {
         self.class().to_class_literal(db, program)
     }
 
@@ -799,11 +791,11 @@ impl SpecialFormType {
         }
     }
 
-    pub(super) fn definition<'db>(
+    pub(super) fn definition(
         self,
-        db: &'db dyn Db,
-        program: crate::Program<'db>,
-    ) -> Option<TypeDefinition<'db>> {
+        db: &dyn Db,
+        program: crate::Program,
+    ) -> Option<TypeDefinition<'_>> {
         self.definition_modules()
             .iter()
             .find_map(|module| {
@@ -829,11 +821,11 @@ impl SpecialFormType {
     pub(super) fn in_type_expression<'db>(
         self,
         db: &'db dyn Db,
+        program: crate::Program,
         scope_id: ScopeId<'db>,
         typevar_binding_context: Option<Definition<'db>>,
         inference_flags: InferenceFlags,
     ) -> Result<Type<'db>, InvalidTypeExpression<'db>> {
-        let program = scope_id.program(db);
         match self {
             Self::Never | Self::NoReturn => Ok(Type::Never),
             Self::LiteralString => Ok(Type::literal_string()),

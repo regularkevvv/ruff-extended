@@ -206,7 +206,7 @@ pub fn check_types(
             .map(|error| Diagnostic::invalid_syntax(file, error, error)),
     );
 
-    let diagnostics = check_suppressions(db, analysis_file, diagnostics);
+    let diagnostics = check_suppressions(db, analysis_file.versioned_file(db), diagnostics);
 
     let elapsed = start.elapsed();
     if elapsed >= Duration::from_millis(100) {
@@ -345,7 +345,7 @@ impl<'db> ApplyTypeMappingVisitor<'db> {
     pub(crate) fn is_equivalent_to_materialization(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         left: Type<'db>,
         right: Type<'db>,
     ) -> bool {
@@ -630,7 +630,7 @@ pub struct PropertyInstanceType<'db> {
 
 fn walk_property_instance_type<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     property: PropertyInstanceType<'db>,
     visitor: &V,
 ) {
@@ -677,7 +677,7 @@ impl<'db> PropertyInstanceType<'db> {
         Self::new_internal(db, getter, setter, deleter, self.instance_class(db))
     }
 
-    fn instance_fallback(self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    fn instance_fallback(self, db: &'db dyn Db, program: Program) -> Type<'db> {
         self.instance_class(db).to_instance(db, program)
     }
 
@@ -715,7 +715,7 @@ impl<'db> PropertyInstanceType<'db> {
     fn apply_type_mapping_impl<'a>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'a, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
@@ -735,7 +735,7 @@ impl<'db> PropertyInstanceType<'db> {
     fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -769,7 +769,7 @@ impl<'db> PropertyInstanceType<'db> {
     fn find_legacy_typevars_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         binding_context: Option<Definition<'db>>,
         typevars: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
         visitor: &FindLegacyTypeVarsVisitor<'db>,
@@ -866,11 +866,11 @@ pub struct DataclassParams<'db> {
 impl get_size2::GetSize for DataclassParams<'_> {}
 
 impl<'db> DataclassParams<'db> {
-    fn default_params(db: &'db dyn Db, program: Program<'db>) -> Self {
+    fn default_params(db: &'db dyn Db, program: Program) -> Self {
         Self::from_flags(db, program, DataclassFlags::default())
     }
 
-    fn from_flags(db: &'db dyn Db, program: Program<'db>, flags: DataclassFlags) -> Self {
+    fn from_flags(db: &'db dyn Db, program: Program, flags: DataclassFlags) -> Self {
         let dataclasses_field = known_module_symbol(db, program, KnownModule::Dataclasses, "field")
             .place
             .ignore_possibly_undefined()
@@ -890,7 +890,7 @@ impl<'db> DataclassParams<'db> {
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -1019,7 +1019,7 @@ pub enum Type<'db> {
 /// Helper for `recursive_type_normalized_impl` for `TypeGuardLike` types.
 fn recursive_type_normalize_type_guard_like<'db, T: TypeGuardLike<'db>>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     guard: T,
     div: Type<'db>,
     nested: bool,
@@ -1135,7 +1135,7 @@ impl<'db> Type<'db> {
     }
 
     /// Returns `true` if this type contains a `Self` type variable.
-    pub(crate) fn contains_self(&self, db: &'db dyn Db, program: Program<'db>) -> bool {
+    pub(crate) fn contains_self(&self, db: &'db dyn Db, program: Program) -> bool {
         any_over_type(db, program, *self, false, |ty| {
             ty.as_typevar().is_some_and(|tv| tv.typevar(db).is_self(db))
         })
@@ -1145,7 +1145,7 @@ impl<'db> Type<'db> {
     ///
     /// `FunctionLiteral`, `BoundMethod`, and function-like `Callable` types return `false`
     /// because their `Self` binding is deferred to call time via the signature binding path.
-    fn supports_self_binding(&self, db: &'db dyn Db, program: Program<'db>) -> bool {
+    fn supports_self_binding(&self, db: &'db dyn Db, program: Program) -> bool {
         match self {
             Type::FunctionLiteral(_) | Type::BoundMethod(_) | Type::KnownBoundMethod(_) => false,
             Type::Callable(callable) if callable.is_function_like(db) => false,
@@ -1163,7 +1163,7 @@ impl<'db> Type<'db> {
     pub(crate) fn bind_self_typevars(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         self_type: Type<'db>,
     ) -> Self {
         if !self.supports_self_binding(db, program) {
@@ -1186,7 +1186,7 @@ impl<'db> Type<'db> {
     pub(crate) fn cycle_normalized(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         previous: Self,
         cycle: &salsa::Cycle,
     ) -> Self {
@@ -1232,15 +1232,15 @@ impl<'db> Type<'db> {
         .recursive_type_normalized(db, program, cycle)
     }
 
-    pub fn is_none(&self, db: &'db dyn Db, program: crate::Program<'db>) -> bool {
+    pub fn is_none(&self, db: &'db dyn Db, program: crate::Program) -> bool {
         self.is_instance_of(db, program, KnownClass::NoneType)
     }
 
-    fn is_bool(&self, db: &'db dyn Db, program: crate::Program<'db>) -> bool {
+    fn is_bool(&self, db: &'db dyn Db, program: crate::Program) -> bool {
         self.is_instance_of(db, program, KnownClass::Bool)
     }
 
-    fn is_enum(&self, db: &'db dyn Db, program: crate::Program<'db>) -> bool {
+    fn is_enum(&self, db: &'db dyn Db, program: crate::Program) -> bool {
         self.as_nominal_instance().is_some_and(|instance| {
             enum_metadata(db, instance.class_literal(db, program)).is_some()
         })
@@ -1251,7 +1251,7 @@ impl<'db> Type<'db> {
     }
 
     /// Return true if this type overrides __eq__ or __ne__ methods
-    fn overrides_equality(&self, db: &'db dyn Db, program: crate::Program<'db>) -> bool {
+    fn overrides_equality(&self, db: &'db dyn Db, program: crate::Program) -> bool {
         let check_dunder = |dunder_name, allowed_return_value| {
             // Note that we do explicitly exclude dunder methods on `object`, `int` and `str` here.
             // The reason for this is that we know that these dunder methods behave in a predictable way.
@@ -1279,7 +1279,7 @@ impl<'db> Type<'db> {
         !(check_dunder("__eq__", true) && check_dunder("__ne__", false))
     }
 
-    pub fn is_notimplemented(&self, db: &'db dyn Db, program: crate::Program<'db>) -> bool {
+    pub fn is_notimplemented(&self, db: &'db dyn Db, program: crate::Program) -> bool {
         self.is_instance_of(db, program, KnownClass::NotImplementedType)
     }
 
@@ -1402,7 +1402,7 @@ impl<'db> Type<'db> {
     pub(crate) fn known_specialization(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         known_class: KnownClass,
     ) -> Option<Specialization<'db>> {
         let class_literal = known_class.try_to_class_literal(db, program)?;
@@ -1426,7 +1426,7 @@ impl<'db> Type<'db> {
     pub(crate) fn class_specialization(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Option<(StaticClassLiteral<'db>, Specialization<'db>)> {
         self.nominal_class(db, program)?
             .static_class_literal(db)
@@ -1437,7 +1437,7 @@ impl<'db> Type<'db> {
     pub(crate) fn nominal_class(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Option<ClassType<'db>> {
         match self {
             Type::NominalInstance(instance) => Some(instance.class(db, program)),
@@ -1471,11 +1471,7 @@ impl<'db> Type<'db> {
     ///
     /// This is the case for any type which may contain types in non-covariant position within it,
     /// e.g., nominal instances of a generic class, or callables.
-    pub(crate) fn may_prefer_declared_type(
-        self,
-        db: &'db dyn Db,
-        program: crate::Program<'db>,
-    ) -> bool {
+    pub(crate) fn may_prefer_declared_type(self, db: &'db dyn Db, program: crate::Program) -> bool {
         self.class_specialization(db, program).is_some()
             || self.expand_eagerly(db, program).is_callable_type()
     }
@@ -1486,7 +1482,7 @@ impl<'db> Type<'db> {
     pub(crate) fn top_materialization(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Type<'db> {
         self.materialize(
             db,
@@ -1502,7 +1498,7 @@ impl<'db> Type<'db> {
     pub(crate) fn bottom_materialization(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Type<'db> {
         self.materialize(
             db,
@@ -1519,7 +1515,7 @@ impl<'db> Type<'db> {
     fn tuple_instance_spec(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Option<Cow<'db, TupleSpec<'db>>> {
         self.as_nominal_instance()
             .and_then(|instance| instance.tuple_spec(db, program))
@@ -1560,7 +1556,7 @@ impl<'db> Type<'db> {
     pub(crate) fn materialize(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         materialization_kind: MaterializationKind,
         visitor: &ApplyTypeMappingVisitor<'db>,
     ) -> Type<'db> {
@@ -1573,7 +1569,7 @@ impl<'db> Type<'db> {
         )
     }
 
-    pub(crate) fn has_dynamic(self, db: &'db dyn Db, program: Program<'db>) -> bool {
+    pub(crate) fn has_dynamic(self, db: &'db dyn Db, program: Program) -> bool {
         any_over_type(db, program, self, false, |ty| ty.is_dynamic())
     }
 
@@ -1817,7 +1813,7 @@ impl<'db> Type<'db> {
     pub(crate) fn is_literal_or_union_of_literals(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> bool {
         match self {
             Type::Union(union) => union
@@ -1889,7 +1885,7 @@ impl<'db> Type<'db> {
     }
 
     #[must_use]
-    pub(crate) fn negate(&self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    pub(crate) fn negate(&self, db: &'db dyn Db, program: Program) -> Type<'db> {
         // Avoid invoking the `IntersectionBuilder` for negations that are trivial.
         //
         // We verify that this always produces the same result as
@@ -1947,7 +1943,7 @@ impl<'db> Type<'db> {
     }
 
     #[must_use]
-    pub(crate) fn negate_if(&self, db: &'db dyn Db, program: Program<'db>, yes: bool) -> Type<'db> {
+    pub(crate) fn negate_if(&self, db: &'db dyn Db, program: Program, yes: bool) -> Type<'db> {
         if yes { self.negate(db, program) } else { *self }
     }
 
@@ -2089,7 +2085,7 @@ impl<'db> Type<'db> {
     pub(crate) fn filter_disjoint_elements(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         target: Type<'db>,
         inferable: InferableTypeVars<'db>,
     ) -> Type<'db> {
@@ -2106,7 +2102,7 @@ impl<'db> Type<'db> {
     pub(crate) fn literal_fallback_instance(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
     ) -> Option<Type<'db>> {
         // There are other literal types that could conceivable be included here: class literals
         // falling back to `type[X]`, for instance. For now, there is not much rigorous thought put
@@ -2125,7 +2121,7 @@ impl<'db> Type<'db> {
     /// Note that this function tries to promote literals to a more user-friendly form than their
     /// fallback instance type. For example, `def _() -> int` is promoted to `Callable[[], int]`,
     /// as opposed to `FunctionType`.
-    pub(crate) fn promote(self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    pub(crate) fn promote(self, db: &'db dyn Db, program: Program) -> Type<'db> {
         self.apply_type_mapping(
             db,
             program,
@@ -2135,7 +2131,7 @@ impl<'db> Type<'db> {
     }
 
     /// Promote a top-level singleton type (like `None`, `EllipsisType`) to `T | Unknown`.
-    pub(crate) fn promote_singletons(self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    pub(crate) fn promote_singletons(self, db: &'db dyn Db, program: Program) -> Type<'db> {
         self.promote_singletons_impl(db, program)
     }
 
@@ -2144,11 +2140,7 @@ impl<'db> Type<'db> {
     /// This is intentionally separate from regular promotion. Applying it during collection
     /// inference would lose useful precision for local and module-level collections of class
     /// objects.
-    pub(crate) fn promote_class_literals(
-        self,
-        db: &'db dyn Db,
-        program: Program<'db>,
-    ) -> Type<'db> {
+    pub(crate) fn promote_class_literals(self, db: &'db dyn Db, program: Program) -> Type<'db> {
         self.apply_type_mapping(
             db,
             program,
@@ -2164,7 +2156,7 @@ impl<'db> Type<'db> {
     pub(crate) fn promote_singletons_recursively(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
     ) -> Type<'db> {
         self.apply_type_mapping(
             db,
@@ -2175,7 +2167,7 @@ impl<'db> Type<'db> {
     }
 
     /// Like [`Type::promote`], but does not recurse into nested types.
-    fn promote_impl(self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    fn promote_impl(self, db: &'db dyn Db, program: Program) -> Type<'db> {
         match self {
             Type::LiteralValue(literal) if literal.is_promotable() => {
                 literal.fallback_instance(db, program)
@@ -2186,7 +2178,7 @@ impl<'db> Type<'db> {
     }
 
     /// Like [`Type::promote_singletons_recursively`], but does not recurse into nested types.
-    fn promote_singletons_impl(self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    fn promote_singletons_impl(self, db: &'db dyn Db, program: Program) -> Type<'db> {
         match self {
             Type::NominalInstance(instance) if instance.is_singleton(db) => {
                 UnionType::from_two_elements(db, program, self, Type::unknown())
@@ -2213,7 +2205,7 @@ impl<'db> Type<'db> {
     pub(crate) fn recursive_type_normalized(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         cycle: &salsa::Cycle,
     ) -> Self {
         cycle.head_ids().fold(self, |ty, id| {
@@ -2241,7 +2233,7 @@ impl<'db> Type<'db> {
     fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -2278,16 +2270,16 @@ impl<'db> Type<'db> {
                 .recursive_type_normalized_impl(db, div, nested)
                 .map(Type::BoundMethod),
             Type::BoundSuper(bound_super) => bound_super
-                .recursive_type_normalized_impl(db, div, nested)
+                .recursive_type_normalized_impl(db, program, div, nested)
                 .map(Type::BoundSuper),
             Type::GenericAlias(generic) => generic
-                .recursive_type_normalized_impl(db, div, nested)
+                .recursive_type_normalized_impl(db, program, div, nested)
                 .map(Type::GenericAlias),
             Type::ClassLiteral(class) => class
                 .recursive_type_normalized_impl(db, div, nested)
                 .map(Type::ClassLiteral),
             Type::SubclassOf(subclass_of) => subclass_of
-                .recursive_type_normalized_impl(db, div, nested)
+                .recursive_type_normalized_impl(db, program, div, nested)
                 .map(Type::SubclassOf),
             Type::TypeVar(_) => Some(self),
             Type::KnownInstance(known_instance) => known_instance
@@ -2311,7 +2303,7 @@ impl<'db> Type<'db> {
             }
             Type::TypeAlias(_) => Some(self),
             Type::NewTypeInstance(newtype) => newtype
-                .recursive_type_normalized_impl(db, div, nested)
+                .recursive_type_normalized_impl(db, program, div, nested)
                 .map(Type::NewTypeInstance),
             Type::AlwaysFalsy
             | Type::AlwaysTruthy
@@ -2329,12 +2321,8 @@ impl<'db> Type<'db> {
     ///
     /// The provided closure will be called on any nested types, along with their variance with
     /// respect to the outermost type.
-    pub(crate) fn visit_specialization<F>(
-        self,
-        db: &'db dyn Db,
-        program: crate::Program<'db>,
-        mut f: F,
-    ) where
+    pub(crate) fn visit_specialization<F>(self, db: &'db dyn Db, program: crate::Program, mut f: F)
+    where
         F: FnMut(Type<'db>, TypeVarVariance),
     {
         self.visit_specialization_impl(
@@ -2349,7 +2337,7 @@ impl<'db> Type<'db> {
     fn visit_specialization_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         polarity: TypeVarVariance,
         f: &mut dyn FnMut(Type<'db>, TypeVarVariance),
         visitor: &SpecializationVisitor<'db>,
@@ -2416,7 +2404,7 @@ impl<'db> Type<'db> {
     ///
     /// Note: This function aims to have no false positives, but might return `false`
     /// for more complicated types that are actually singletons.
-    pub(crate) fn is_singleton(self, db: &'db dyn Db, program: crate::Program<'db>) -> bool {
+    pub(crate) fn is_singleton(self, db: &'db dyn Db, program: crate::Program) -> bool {
         match self {
             Type::Dynamic(_) | Type::Divergent(_) | Type::Never => false,
 
@@ -2537,7 +2525,7 @@ impl<'db> Type<'db> {
     }
 
     /// Return true if this type is non-empty and all inhabitants of this type compare equal.
-    pub(crate) fn is_single_valued(self, db: &'db dyn Db, program: crate::Program<'db>) -> bool {
+    pub(crate) fn is_single_valued(self, db: &'db dyn Db, program: crate::Program) -> bool {
         match self {
             // All empty ranges compare equal, but non-empty ranges can contain different values.
             Type::KnownInstance(KnownInstanceType::Range { is_non_empty }) => !is_non_empty,
@@ -2642,7 +2630,7 @@ impl<'db> Type<'db> {
     fn find_name_in_mro(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         name: &str,
     ) -> Option<PlaceAndQualifiers<'db>> {
         self.find_name_in_mro_with_policy(db, program, name, MemberLookupPolicy::default())
@@ -2651,7 +2639,7 @@ impl<'db> Type<'db> {
     fn find_name_in_mro_with_policy(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         name: &str,
         policy: MemberLookupPolicy,
     ) -> Option<PlaceAndQualifiers<'db>> {
@@ -2790,13 +2778,13 @@ impl<'db> Type<'db> {
     fn lookup_dunder_new(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
     ) -> Option<PlaceAndQualifiers<'db>> {
         #[salsa::tracked(cycle_initial=|_, _, _, _, ()| None, heap_size=ruff_memory_usage::heap_size)]
         fn lookup_dunder_new_inner<'db>(
             db: &'db dyn Db,
             ty: Type<'db>,
-            program: Program<'db>,
+            program: Program,
             _: (),
         ) -> Option<PlaceAndQualifiers<'db>> {
             let mut flags = MemberLookupPolicy::MRO_NO_OBJECT_FALLBACK;
@@ -2817,7 +2805,7 @@ impl<'db> Type<'db> {
     fn class_member(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         name: Name,
     ) -> PlaceAndQualifiers<'db> {
         self.class_member_with_policy(db, program, name, MemberLookupPolicy::default())
@@ -2833,7 +2821,7 @@ impl<'db> Type<'db> {
     fn class_member_with_policy(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         name: Name,
         policy: MemberLookupPolicy,
     ) -> PlaceAndQualifiers<'db> {
@@ -2924,7 +2912,7 @@ impl<'db> Type<'db> {
     fn class_object_member(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         name: &str,
         policy: MemberLookupPolicy,
     ) -> PlaceAndQualifiers<'db> {
@@ -2992,7 +2980,7 @@ impl<'db> Type<'db> {
     fn instance_member(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         name: &str,
     ) -> PlaceAndQualifiers<'db> {
         match self {
@@ -3107,12 +3095,7 @@ impl<'db> Type<'db> {
     /// method corresponds to `inspect.getattr_static(<object of type 'self'>, name)`.
     ///
     /// See also: [`Type::member`]
-    fn static_member(
-        &self,
-        db: &'db dyn Db,
-        program: crate::Program<'db>,
-        name: &str,
-    ) -> Place<'db> {
+    fn static_member(&self, db: &'db dyn Db, program: crate::Program, name: &str) -> Place<'db> {
         if let Type::ModuleLiteral(module) = self {
             module.static_member(db, name).place
         } else if let place @ Place::Defined(_) = self.class_member(db, program, name.into()).place
@@ -3151,14 +3134,14 @@ impl<'db> Type<'db> {
     pub(crate) fn try_call_dunder_get(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         instance: Option<Type<'db>>,
         owner: Type<'db>,
     ) -> Option<(Type<'db>, AttributeKind)> {
         #[salsa::tracked(cycle_initial=|_, _, _, _, _, _| None, heap_size=ruff_memory_usage::heap_size)]
         fn try_call_dunder_get_inner<'db>(
             db: &'db dyn Db,
-            program: crate::Program<'db>,
+            program: crate::Program,
             ty: Type<'db>,
             instance: Option<Type<'db>>,
             owner: Type<'db>,
@@ -3300,7 +3283,7 @@ impl<'db> Type<'db> {
     /// and intersections explicitly.
     fn try_call_dunder_get_on_attribute(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         attribute: PlaceAndQualifiers<'db>,
         instance: Option<Type<'db>>,
         owner: Type<'db>,
@@ -3453,7 +3436,7 @@ impl<'db> Type<'db> {
     /// Returns whether this type is a data descriptor, i.e. defines `__set__` or `__delete__`.
     /// If this type is a union, requires all elements of union to be data descriptors.
     /// A directly dynamic type is treated as a data descriptor because it could inhabit one.
-    pub(crate) fn is_data_descriptor(self, db: &'db dyn Db, program: Program<'db>) -> bool {
+    pub(crate) fn is_data_descriptor(self, db: &'db dyn Db, program: Program) -> bool {
         self.is_data_descriptor_impl(db, program, false)
     }
 
@@ -3462,14 +3445,14 @@ impl<'db> Type<'db> {
     /// This is used to determine whether an attribute assignment is valid for narrowing.
     /// For practical convenience, dynamic union elements are not considered possible data
     /// descriptors here, because doing so would disable narrowing too frequently.
-    pub(crate) fn may_be_data_descriptor(self, db: &'db dyn Db, program: Program<'db>) -> bool {
+    pub(crate) fn may_be_data_descriptor(self, db: &'db dyn Db, program: Program) -> bool {
         self.is_data_descriptor_impl(db, program, true)
     }
 
     fn is_data_descriptor_impl(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         any_of_union: bool,
     ) -> bool {
         match self {
@@ -3528,7 +3511,7 @@ impl<'db> Type<'db> {
     fn invoke_descriptor_protocol(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         receiver: Type<'db>,
         name: &str,
         fallback: PlaceAndQualifiers<'db>,
@@ -3663,7 +3646,7 @@ impl<'db> Type<'db> {
     pub(crate) fn member(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         name: &str,
     ) -> PlaceAndQualifiers<'db> {
         self.member_lookup_with_policy(db, program, name.into(), MemberLookupPolicy::default())
@@ -3674,7 +3657,7 @@ impl<'db> Type<'db> {
     pub(crate) fn member_lookup_with_policy(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         name: Name,
         policy: MemberLookupPolicy,
     ) -> PlaceAndQualifiers<'db> {
@@ -3689,7 +3672,7 @@ impl<'db> Type<'db> {
     fn member_lookup_with_policy_and_receiver(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         name: Name,
         policy: MemberLookupPolicy,
         receiver: Option<Type<'db>>,
@@ -3704,14 +3687,14 @@ impl<'db> Type<'db> {
         fn member_lookup_with_policy_inner<'db>(
             db: &'db dyn Db,
             this: Type<'db>,
-            program: Program<'db>,
+            program: Program,
             name: Name,
             policy: MemberLookupPolicy,
             receiver: Option<Type<'db>>,
         ) -> PlaceAndQualifiers<'db> {
             fn promote_inferred_attribute_class_literals<'db>(
                 db: &'db dyn Db,
-                program: Program<'db>,
+                program: Program,
                 result: PlaceAndQualifiers<'db>,
             ) -> PlaceAndQualifiers<'db> {
                 let should_promote = matches!(
@@ -3731,7 +3714,7 @@ impl<'db> Type<'db> {
 
             fn instance_like_member_lookup<'db>(
                 db: &'db dyn Db,
-                program: Program<'db>,
+                program: Program,
                 this: Type<'db>,
                 name: &Name,
                 policy: MemberLookupPolicy,
@@ -4365,10 +4348,10 @@ impl<'db> Type<'db> {
     ///
     /// In the second case, the return type of `len()` in `typeshed` (`int`)
     /// is used as a fallback.
-    fn len(&self, db: &'db dyn Db, program: Program<'db>) -> Option<Type<'db>> {
+    fn len(&self, db: &'db dyn Db, program: Program) -> Option<Type<'db>> {
         fn non_negative_int_literal<'db>(
             db: &'db dyn Db,
-            program: crate::Program<'db>,
+            program: crate::Program,
             ty: Type<'db>,
         ) -> Option<Type<'db>> {
             match ty {
@@ -4419,7 +4402,7 @@ impl<'db> Type<'db> {
     fn getitem_dunder_call(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         key: Option<&str>,
     ) -> Option<Type<'db>> {
         let key = key
@@ -4453,7 +4436,7 @@ impl<'db> Type<'db> {
     fn unpack_keys_and_items(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Option<(Type<'db>, Type<'db>)> {
         let key_ty = match self
             .member_lookup_with_policy(
@@ -4501,7 +4484,7 @@ impl<'db> Type<'db> {
     /// elements might be inconsistent, such that there's no argument list that's valid for all
     /// elements. It's usually best to only worry about "callability" relative to a particular
     /// argument list, via [`try_call`][Self::try_call] and [`CallErrorKind::NotCallable`].
-    fn bindings(self, db: &'db dyn Db, program: Program<'db>) -> Bindings<'db> {
+    fn bindings(self, db: &'db dyn Db, program: Program) -> Bindings<'db> {
         if let Some(fallback) = self.materialized_divergent_fallback() {
             return fallback.bindings(db, program);
         }
@@ -5252,7 +5235,7 @@ impl<'db> Type<'db> {
     fn constructor_bindings(self, db: &'db dyn Db, class: ClassType<'db>) -> Bindings<'db> {
         fn resolve_dunder_new_callable<'db>(
             db: &'db dyn Db,
-            program: Program<'db>,
+            program: Program,
             owner: Type<'db>,
             place: Place<'db>,
         ) -> Option<(Type<'db>, Definedness)> {
@@ -5280,7 +5263,7 @@ impl<'db> Type<'db> {
         }
         fn bind_constructor_new<'db>(
             db: &'db dyn Db,
-            program: crate::Program<'db>,
+            program: crate::Program,
             bindings: Bindings<'db>,
             self_type: Type<'db>,
         ) -> Bindings<'db> {
@@ -5538,7 +5521,7 @@ impl<'db> Type<'db> {
     fn try_call(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         argument_types: &CallArguments<'_, 'db>,
     ) -> Result<Bindings<'db>, CallError<'db>> {
         let constraints = ConstraintSetBuilder::new();
@@ -5561,7 +5544,7 @@ impl<'db> Type<'db> {
     fn try_call_dunder(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         name: &str,
         mut argument_types: CallArguments<'_, 'db>,
         tcx: TypeContext<'db>,
@@ -5586,7 +5569,7 @@ impl<'db> Type<'db> {
     fn try_call_dunder_with_policy(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         name: &str,
         argument_types: &mut CallArguments<'_, 'db>,
         tcx: TypeContext<'db>,
@@ -5662,7 +5645,7 @@ impl<'db> Type<'db> {
     fn try_call_dunder_on_class(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         name: &str,
         argument_types: &CallArguments<'_, 'db>,
         tcx: TypeContext<'db>,
@@ -5706,7 +5689,7 @@ impl<'db> Type<'db> {
     fn fallback_to_getattr(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         name: &Name,
         result: PlaceAndQualifiers<'db>,
         policy: MemberLookupPolicy,
@@ -5791,7 +5774,7 @@ impl<'db> Type<'db> {
     ///
     /// This only flattens typevars directly in unions and intersections; it does not descend
     /// into generic types or other nested structures.
-    fn flatten_typevars(self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    fn flatten_typevars(self, db: &'db dyn Db, program: Program) -> Type<'db> {
         match self {
             Type::TypeVar(tvar) => match tvar.typevar(db).bound_or_constraints(db) {
                 Some(TypeVarBoundOrConstraints::UpperBound(bound)) => {
@@ -5831,11 +5814,7 @@ impl<'db> Type<'db> {
     }
 
     /// Resolve the type of an `await …` expression where `self` is the type of the awaitable.
-    fn try_await(
-        self,
-        db: &'db dyn Db,
-        program: Program<'db>,
-    ) -> Result<Type<'db>, AwaitError<'db>> {
+    fn try_await(self, db: &'db dyn Db, program: Program) -> Result<Type<'db>, AwaitError<'db>> {
         let await_result = self.try_call_dunder(
             db,
             program,
@@ -5860,11 +5839,7 @@ impl<'db> Type<'db> {
     ///
     /// This corresponds to the `ReturnT` parameter of the generic `typing.Generator[YieldT, SendT, ReturnT]`
     /// protocol.
-    fn generator_types(
-        self,
-        db: &'db dyn Db,
-        program: Program<'db>,
-    ) -> Option<GeneratorTypes<'db>> {
+    fn generator_types(self, db: &'db dyn Db, program: Program) -> Option<GeneratorTypes<'db>> {
         // TODO: Ideally, we would first try to upcast `self` to an instance of `Generator` and *then*
         // match on the protocol instance to get the `ReturnType` type parameter. For now, implement
         // an ad-hoc solution that works for protocols and instances of classes that explicitly inherit
@@ -5999,22 +5974,18 @@ impl<'db> Type<'db> {
         }
     }
 
-    fn generator_return_type(self, db: &'db dyn Db, program: Program<'db>) -> Option<Type<'db>> {
+    fn generator_return_type(self, db: &'db dyn Db, program: Program) -> Option<Type<'db>> {
         self.generator_types(db, program)
             .and_then(|generator_types| generator_types.return_ty)
     }
 
-    fn generator_send_type(self, db: &'db dyn Db, program: Program<'db>) -> Option<Type<'db>> {
+    fn generator_send_type(self, db: &'db dyn Db, program: Program) -> Option<Type<'db>> {
         self.generator_types(db, program)
             .and_then(|generator_types| generator_types.send_ty)
     }
 
     #[must_use]
-    pub(crate) fn to_instance(
-        self,
-        db: &'db dyn Db,
-        program: crate::Program<'db>,
-    ) -> Option<Type<'db>> {
+    pub(crate) fn to_instance(self, db: &'db dyn Db, program: crate::Program) -> Option<Type<'db>> {
         match self {
             Type::Dynamic(_) | Type::Divergent(_) | Type::Never => Some(self),
             Type::ClassLiteral(class) => Some(Type::instance(db, class.default_specialization(db))),
@@ -6081,11 +6052,11 @@ impl<'db> Type<'db> {
     pub(crate) fn in_type_expression(
         &self,
         db: &'db dyn Db,
+        program: Program,
         scope_id: ScopeId<'db>,
         typevar_binding_context: Option<Definition<'db>>,
         inference_flags: InferenceFlags,
     ) -> Result<Type<'db>, InvalidTypeExpressionError<'db>> {
-        let program = scope_id.program(db);
         match self {
             // Special cases for `float` and `complex`
             // https://typing.python.org/en/latest/spec/special-types.html#special-cases-for-float-and-complex
@@ -6218,7 +6189,13 @@ impl<'db> Type<'db> {
             },
 
             Type::SpecialForm(special_form) => special_form
-                .in_type_expression(db, scope_id, typevar_binding_context, inference_flags)
+                .in_type_expression(
+                    db,
+                    program,
+                    scope_id,
+                    typevar_binding_context,
+                    inference_flags,
+                )
                 .map_err(|err| {
                     let fallback_type = if matches!(
                         err,
@@ -6244,6 +6221,7 @@ impl<'db> Type<'db> {
                 for element in union.elements(db) {
                     match element.in_type_expression(
                         db,
+                        program,
                         scope_id,
                         typevar_binding_context,
                         inference_flags,
@@ -6288,6 +6266,7 @@ impl<'db> Type<'db> {
 
             Type::TypeAlias(alias) => alias.value_type(db).in_type_expression(
                 db,
+                program,
                 scope_id,
                 typevar_binding_context,
                 inference_flags,
@@ -6303,7 +6282,7 @@ impl<'db> Type<'db> {
     }
 
     /// The type `NoneType` / `None`
-    pub fn none(db: &'db dyn Db, program: crate::Program<'db>) -> Type<'db> {
+    pub fn none(db: &'db dyn Db, program: crate::Program) -> Type<'db> {
         KnownClass::NoneType.to_instance(db, program)
     }
 
@@ -6313,7 +6292,7 @@ impl<'db> Type<'db> {
     /// Note: the return type of `type(obj)` is subtly different from this.
     /// See `Self::dunder_class` for more details.
     #[must_use]
-    pub(crate) fn to_meta_type(self, db: &'db dyn Db, program: crate::Program<'db>) -> Type<'db> {
+    pub(crate) fn to_meta_type(self, db: &'db dyn Db, program: crate::Program) -> Type<'db> {
         match self {
             Type::Never => Type::Never,
             Type::NominalInstance(instance) => instance.to_meta_type(db, program),
@@ -6398,7 +6377,7 @@ impl<'db> Type<'db> {
     /// this returns `type[dict[str, object]]` instead, because inhabitants of a `TypedDict` are
     /// instances of `dict` at runtime.
     #[must_use]
-    pub(crate) fn dunder_class(self, db: &'db dyn Db, program: crate::Program<'db>) -> Type<'db> {
+    pub(crate) fn dunder_class(self, db: &'db dyn Db, program: crate::Program) -> Type<'db> {
         if self.is_typed_dict() {
             return KnownClass::Dict
                 .to_specialized_class_type(
@@ -6515,7 +6494,7 @@ impl<'db> Type<'db> {
     fn apply_type_mapping<'a>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         type_mapping: &TypeMapping<'a, 'db>,
         tcx: TypeContext<'db>,
     ) -> Type<'db> {
@@ -6531,7 +6510,7 @@ impl<'db> Type<'db> {
     fn apply_type_mapping_impl<'a>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         type_mapping: &TypeMapping<'a, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
@@ -6617,7 +6596,7 @@ impl<'db> Type<'db> {
 
             Type::NewTypeInstance(newtype) => visitor.visit(db, self, type_mapping, || {
                 Type::NewTypeInstance(newtype.map_base_class_type(db, |class_type| {
-                    class_type.apply_type_mapping_impl(db, type_mapping, tcx, visitor)
+                    class_type.apply_type_mapping_impl(db, program, type_mapping, tcx, visitor)
                 }))
             }),
 
@@ -6666,7 +6645,13 @@ impl<'db> Type<'db> {
             }),
 
             Type::GenericAlias(generic) => {
-                Type::GenericAlias(generic.apply_type_mapping_impl(db, type_mapping, tcx, visitor))
+                Type::GenericAlias(generic.apply_type_mapping_impl(
+                    db,
+                    program,
+                    type_mapping,
+                    tcx,
+                    visitor,
+                ))
             }
 
             Type::TypedDict(typed_dict) => {
@@ -6873,7 +6858,7 @@ impl<'db> Type<'db> {
     pub(crate) fn find_legacy_typevars(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         binding_context: Option<Definition<'db>>,
         typevars: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
     ) {
@@ -6889,7 +6874,7 @@ impl<'db> Type<'db> {
     pub(crate) fn find_legacy_typevars_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         binding_context: Option<Definition<'db>>,
         typevars: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
         visitor: &FindLegacyTypeVarsVisitor<'db>,
@@ -7009,7 +6994,7 @@ impl<'db> Type<'db> {
             }
 
             Type::GenericAlias(alias) => {
-                alias.find_legacy_typevars_impl(db, binding_context, typevars, visitor);
+                alias.find_legacy_typevars_impl(db, program, binding_context, typevars, visitor);
             }
 
             Type::NominalInstance(instance) => {
@@ -7176,7 +7161,7 @@ impl<'db> Type<'db> {
     pub(crate) fn bind_and_find_all_legacy_typevars(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         binding_context: Option<Definition<'db>>,
         variables: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
     ) {
@@ -7194,11 +7179,7 @@ impl<'db> Type<'db> {
     }
 
     /// Replace default types in parameters of callables with `Unknown`.
-    pub(crate) fn replace_parameter_defaults(
-        self,
-        db: &'db dyn Db,
-        program: Program<'db>,
-    ) -> Type<'db> {
+    pub(crate) fn replace_parameter_defaults(self, db: &'db dyn Db, program: Program) -> Type<'db> {
         self.apply_type_mapping(
             db,
             program,
@@ -7209,7 +7190,7 @@ impl<'db> Type<'db> {
 
     /// Returns the eagerly expanded type.
     /// In the case of recursive type aliases, this will diverge, so that part will be replaced with `Divergent`.
-    fn expand_eagerly(self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    fn expand_eagerly(self, db: &'db dyn Db, program: Program) -> Type<'db> {
         self.expand_eagerly_(db, program, ())
     }
 
@@ -7221,7 +7202,7 @@ impl<'db> Type<'db> {
         },
         heap_size=ruff_memory_usage::heap_size
     )]
-    fn expand_eagerly_(self, db: &'db dyn Db, program: Program<'db>, _unit: ()) -> Type<'db> {
+    fn expand_eagerly_(self, db: &'db dyn Db, program: Program, _unit: ()) -> Type<'db> {
         self.apply_type_mapping(
             db,
             program,
@@ -7236,7 +7217,7 @@ impl<'db> Type<'db> {
     /// When not available, this should fall back to the value of `[Type::repr]`.
     /// Note: this method is used in the builtins `format`, `print`, `str.format` and `f-strings`.
     #[must_use]
-    pub(crate) fn str(&self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    pub(crate) fn str(&self, db: &'db dyn Db, program: Program) -> Type<'db> {
         match self {
             Type::LiteralValue(literal) => match literal.kind() {
                 LiteralValueTypeKind::Int(_) | LiteralValueTypeKind::Bool(_) => {
@@ -7276,7 +7257,7 @@ impl<'db> Type<'db> {
     /// Return the string representation of this type as it would be provided by the  `__repr__`
     /// method at runtime.
     #[must_use]
-    pub(crate) fn repr(&self, db: &'db dyn Db, program: crate::Program<'db>) -> Type<'db> {
+    pub(crate) fn repr(&self, db: &'db dyn Db, program: crate::Program) -> Type<'db> {
         match self {
             Type::LiteralValue(literal) => match literal.kind() {
                 LiteralValueTypeKind::Int(number) => Type::string_literal(db, &number.to_string()),
@@ -7306,11 +7287,7 @@ impl<'db> Type<'db> {
     /// should be handled, especially when some variants don't have definitions, is
     /// specific to the call site. Exact singleton finite intersections delegate to
     /// their only alternative, since there is no ambiguity to preserve there.
-    pub fn definition(
-        &self,
-        db: &'db dyn Db,
-        program: Program<'db>,
-    ) -> Option<TypeDefinition<'db>> {
+    pub fn definition(&self, db: &'db dyn Db, program: Program) -> Option<TypeDefinition<'db>> {
         match self {
             Self::BoundMethod(method) => {
                 Some(TypeDefinition::Function(method.function(db).definition(db)))
@@ -7503,7 +7480,7 @@ impl<'db> Type<'db> {
     pub(crate) fn generic_origin(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Option<StaticClassLiteral<'db>> {
         match self {
             Type::GenericAlias(generic) => Some(generic.origin(db)),
@@ -7521,7 +7498,7 @@ impl<'db> Type<'db> {
     /// Default-specialize all legacy typevars in this type.
     ///
     /// This is used when an implicit type alias is referenced without explicitly specializing it.
-    pub(crate) fn default_specialize(self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    pub(crate) fn default_specialize(self, db: &'db dyn Db, program: Program) -> Type<'db> {
         let mut variables = FxOrderSet::default();
         self.find_legacy_typevars(db, program, None, &mut variables);
         let generic_context = GenericContext::from_typevar_instances(db, program, variables);
@@ -7533,7 +7510,7 @@ impl<'db> Type<'db> {
 
     pub(crate) fn from_truthiness(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         truthiness: Truthiness,
     ) -> Self {
         match truthiness {
@@ -7548,7 +7525,7 @@ impl<'db> Type<'db> {
     pub(crate) fn negation_is_subtype_of_cached(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         target: Type<'db>,
         negated_cache: &mut Option<Type<'db>>,
     ) -> bool {
@@ -7573,7 +7550,7 @@ impl<'db> IntersectionType<'db> {
     pub(crate) fn negation_is_subtype_of(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         target: Type<'db>,
     ) -> bool {
         self.positive(db).iter().all(|positive| {
@@ -7595,7 +7572,7 @@ impl<'db> IntersectionType<'db> {
     fn try_call_dunder_with_policy(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         name: &str,
         argument_types: &mut CallArguments<'_, 'db>,
         tcx: TypeContext<'db>,
@@ -7663,7 +7640,7 @@ impl<'db> UnionType<'db> {
     fn try_call_dunder_with_policy(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         name: &str,
         argument_types: &mut CallArguments<'_, 'db>,
         tcx: TypeContext<'db>,
@@ -7751,7 +7728,7 @@ impl<'db> VarianceInferable<'db> for Type<'db> {
     fn variance_of(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         typevar: BoundTypeVarInstance<'db>,
     ) -> TypeVarVariance {
         tracing::trace!(
@@ -7884,7 +7861,7 @@ pub enum PromotionKind {
 /// Returns the [`ClassLiteral`] that "owns" a `Self` typevar (i.e., the class from its upper bound).
 fn self_typevar_owner_class_literal<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     bound_typevar: BoundTypeVarInstance<'db>,
 ) -> Option<ClassLiteral<'db>> {
     bound_typevar
@@ -7930,7 +7907,7 @@ impl<'db> SelfBinding<'db> {
 impl<'db> SelfBinding<'db> {
     pub(crate) fn new(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         self_type: Type<'db>,
         binding_context: Option<BindingContext<'db>>,
     ) -> Self {
@@ -7954,7 +7931,7 @@ impl<'db> SelfBinding<'db> {
     fn should_bind(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         bound_typevar: BoundTypeVarInstance<'db>,
     ) -> bool {
         if !bound_typevar.typevar(db).is_self(db) {
@@ -8027,7 +8004,7 @@ impl<'db> TypeMapping<'_, 'db> {
     pub(crate) fn update_signature_generic_context(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         context: GenericContext<'db>,
     ) -> GenericContext<'db> {
         match self {
@@ -8454,13 +8431,13 @@ impl<'db> InvalidTypeExpression<'db> {
     const fn reason(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         flags: InferenceFlags,
     ) -> impl std::fmt::Display + 'db {
         struct Display<'db> {
             error: InvalidTypeExpression<'db>,
             db: &'db dyn Db,
-            program: Program<'db>,
+            program: Program,
             flags: InferenceFlags,
         }
 
@@ -8595,7 +8572,7 @@ impl<'db> InvalidTypeExpression<'db> {
     fn add_subdiagnostics(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         mut diagnostic: LintDiagnosticGuard,
         node: &impl Ranged,
     ) {
@@ -8617,7 +8594,7 @@ impl<'db> InvalidTypeExpression<'db> {
                 return;
             };
             if module_member_with_same_name
-                .in_type_expression(db, scope, None, InferenceFlags::empty())
+                .in_type_expression(db, program, scope, None, InferenceFlags::empty())
                 .is_err()
             {
                 return;
@@ -8772,7 +8749,7 @@ pub struct ModuleLiteralType<'db> {
     /// The imported module.
     pub module: Module<'db>,
 
-    pub program: Program<'db>,
+    pub program: Program,
 
     /// The file in which this module was imported.
     ///
@@ -9012,7 +8989,7 @@ pub struct TypeIsType<'db> {
 
 fn walk_typeis_type<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     typeis_type: TypeIsType<'db>,
     visitor: &V,
 ) {
@@ -9045,7 +9022,7 @@ impl<'db> TypeIsType<'db> {
         Type::TypeIs(Self::new(db, ty, None))
     }
 
-    pub(crate) fn return_type(self, db: &'db dyn Db, program: crate::Program<'db>) -> Type<'db> {
+    pub(crate) fn return_type(self, db: &'db dyn Db, program: crate::Program) -> Type<'db> {
         // N.B. Using the top materialization here is a pragmatic decision that
         // makes us produce more intuitive results given how `TypeIs` is used in
         // the real world (in particular, in typeshed). However, there's some
@@ -9080,7 +9057,7 @@ impl<'db> VarianceInferable<'db> for TypeIsType<'db> {
     fn variance_of(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         typevar: BoundTypeVarInstance<'db>,
     ) -> TypeVarVariance {
         self.type_argument(db)
@@ -9099,7 +9076,7 @@ pub struct TypeGuardType<'db> {
 
 fn walk_typeguard_type<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     typeguard_type: TypeGuardType<'db>,
     visitor: &V,
 ) {
@@ -9156,7 +9133,7 @@ impl<'db> VarianceInferable<'db> for TypeGuardType<'db> {
     fn variance_of(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         typevar: BoundTypeVarInstance<'db>,
     ) -> TypeVarVariance {
         self.return_type(db).variance_of(db, program, typevar)

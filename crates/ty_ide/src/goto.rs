@@ -258,7 +258,7 @@ impl<'db> Definitions<'db> {
 
     pub(crate) fn from_ty(
         db: &'db dyn crate::Db,
-        program: ty_python_core::program::Program<'db>,
+        program: ty_python_core::program::Program,
         ty: Type<'db>,
     ) -> Option<Self> {
         let ty_def = ty.definition(db, program)?;
@@ -388,7 +388,7 @@ impl<'db> Definitions<'db> {
     pub(crate) fn docstring(
         self,
         db: &'db dyn crate::Db,
-        program: ty_python_core::program::Program<'db>,
+        program: ty_python_core::program::Program,
     ) -> Option<Docstring> {
         for definition in &self {
             // If we got a docstring from the original definition, use it

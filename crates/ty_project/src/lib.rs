@@ -79,9 +79,8 @@ pub struct Project {
     #[returns(deref)]
     pub settings: Box<Settings>,
 
-    /// The Python environment settings used when constructing an analysis context.
-    #[returns(deref)]
-    pub program_settings: Box<ProgramSettings>,
+    /// The default Python environment used to analyze this project.
+    pub program: Program,
 
     /// The paths that should be included when checking this project.
     ///
@@ -183,7 +182,7 @@ impl Project {
         db: &dyn Db,
         metadata: ProjectMetadata,
         settings: Settings,
-        program_settings: ProgramSettings,
+        program_settings: &ProgramSettings,
         settings_diagnostics: Vec<OptionDiagnostic>,
         program_settings_diagnostics: Vec<ProgramSettingsDiagnostic>,
     ) -> Self {
@@ -192,32 +191,14 @@ impl Project {
             settings_diagnostics,
             program_settings_diagnostics,
         );
+        let program =
+            Program::from_settings(db, program_settings, &Self::inference_settings(&settings));
 
-        Project::builder(
-            Box::new(metadata),
-            Box::new(settings),
-            Box::new(program_settings),
-            diagnostics,
-        )
-        .durability(Durability::MEDIUM)
-        .open_fileset_durability(Durability::LOW)
-        .file_set_durability(Durability::LOW)
-        .new(db)
-    }
-
-    #[salsa::tracked(heap_size = ruff_memory_usage::heap_size)]
-    pub fn program(self, db: &dyn Db) -> Program<'_> {
-        Program::from_settings(
-            db,
-            self.program_settings(db),
-            &InferenceSettings {
-                replace_imports_with_any: self
-                    .settings(db)
-                    .analysis()
-                    .replace_imports_with_any
-                    .clone(),
-            },
-        )
+        Project::builder(Box::new(metadata), Box::new(settings), program, diagnostics)
+            .durability(Durability::MEDIUM)
+            .open_fileset_durability(Durability::LOW)
+            .file_set_durability(Durability::LOW)
+            .new(db)
     }
 
     /// Permanently freezes the most heavily read immutable project inputs.
@@ -227,6 +208,7 @@ impl Project {
         let durability = Durability::NEVER_CHANGE;
         let metadata = Box::new(self.metadata(db).clone());
         let settings = Box::new(self.settings(db).clone());
+        let program = self.program(db);
         let included_paths = self.included_paths_list(db).to_vec();
         let open_files = self.open_fileset(db).clone();
         let check_mode = self.check_mode(db);
@@ -239,6 +221,8 @@ impl Project {
         self.set_settings(db)
             .with_durability(durability)
             .to(settings);
+        self.set_program(db).with_durability(durability).to(program);
+        program.freeze(db);
         self.set_included_paths_list(db)
             .with_durability(durability)
             .to(included_paths);
@@ -316,6 +300,18 @@ impl Project {
             program_settings_diagnostics,
         );
 
+        let program = self.program(db);
+        let next_inference_settings = settings
+            .as_ref()
+            .map(Self::inference_settings)
+            .unwrap_or_else(|| program.settings(db).clone());
+        let program_settings_changed = program_settings
+            .map(|settings| program.update_from_settings(db, settings))
+            .unwrap_or(false);
+        let inference_settings_changed =
+            program.update_inference_settings(db, next_inference_settings);
+        let program_changed = program_settings_changed || inference_settings_changed;
+
         let root_changed = metadata.root() != self.root(db);
         let (settings_changed, files_changed) = if let Some(settings) = settings
             && self.settings(db) != &settings
@@ -331,15 +327,6 @@ impl Project {
             self.set_settings_diagnostics(db).to(settings_diagnostics);
         }
 
-        let program_settings_changed = program_settings.is_some_and(|program_settings| {
-            if self.program_settings(db) != &program_settings {
-                self.set_program_settings(db).to(Box::new(program_settings));
-                true
-            } else {
-                false
-            }
-        });
-
         if files_changed {
             // The project file set only depends on the project root, explicit check paths,
             // force-exclude, and `src` settings. Check paths and force-exclude are updated
@@ -352,7 +339,7 @@ impl Project {
             self.set_metadata(db).to(Box::new(metadata));
         }
 
-        if metadata_changed || settings_changed || program_settings_changed {
+        if metadata_changed || settings_changed || program_changed {
             ProjectReloadResult::Changed { files_changed }
         } else {
             ProjectReloadResult::Unchanged
@@ -385,8 +372,12 @@ impl Project {
         db: &mut dyn Db,
         program_settings: ProgramSettings,
     ) {
-        if self.program_settings(db) != &program_settings {
-            self.set_program_settings(db).to(Box::new(program_settings));
+        self.program(db).update_from_settings(db, program_settings);
+    }
+
+    fn inference_settings(settings: &Settings) -> InferenceSettings {
+        InferenceSettings {
+            replace_imports_with_any: settings.analysis().replace_imports_with_any.clone(),
         }
     }
 

@@ -78,7 +78,7 @@ pub fn resolve_module<'db>(
 /// we don't have a well-defined importing file.
 pub fn resolve_module_confident<'db>(
     db: &'db dyn Db,
-    program: ResolverProgram<'db>,
+    program: ResolverProgram,
     module_name: &ModuleName,
 ) -> Option<Module<'db>> {
     let interned_name =
@@ -110,7 +110,7 @@ pub fn resolve_real_module<'db>(
 /// we don't have a well-defined importing file.
 pub fn resolve_real_module_confident<'db>(
     db: &'db dyn Db,
-    program: ResolverProgram<'db>,
+    program: ResolverProgram,
     module_name: &ModuleName,
 ) -> Option<Module<'db>> {
     let interned_name =
@@ -173,7 +173,7 @@ pub enum ModuleResolveMode {
 #[salsa::interned(heap_size=ruff_memory_usage::heap_size)]
 #[derive(Debug)]
 pub(crate) struct ModuleResolveModeIngredient<'db> {
-    program: ResolverProgram<'db>,
+    program: ResolverProgram,
     mode: ModuleResolveMode,
 }
 
@@ -287,7 +287,7 @@ fn desperately_resolve_module<'db>(
 #[allow(unused)]
 pub(crate) fn path_to_module<'db>(
     db: &'db dyn Db,
-    program: ResolverProgram<'db>,
+    program: ResolverProgram,
     path: &FilePath,
 ) -> Option<Module<'db>> {
     // It's not entirely clear on first sight why this method calls `file_to_module` instead of
@@ -380,11 +380,11 @@ fn file_to_module_impl<'db, 'a>(
     None
 }
 
-pub fn search_paths<'db>(
-    db: &'db dyn Db,
-    program: ResolverProgram<'db>,
+pub fn search_paths(
+    db: &dyn Db,
+    program: ResolverProgram,
     resolve_mode: ModuleResolveMode,
-) -> SearchPathIterator<'db> {
+) -> SearchPathIterator<'_> {
     program.search_paths(db).iter(db, program, resolve_mode)
 }
 
@@ -432,10 +432,7 @@ impl StubPackageSearchPaths {
 /// Returns the search paths that may contain a top-level stub package, preserving their
 /// resolution order relative to stdlib.
 #[salsa::tracked(returns(ref), heap_size=ruff_memory_usage::heap_size)]
-fn stub_package_search_paths<'db>(
-    db: &'db dyn Db,
-    program: ResolverProgram<'db>,
-) -> StubPackageSearchPaths {
+fn stub_package_search_paths(db: &dyn Db, program: ResolverProgram) -> StubPackageSearchPaths {
     StubPackageSearchPaths::from_search_paths(
         db,
         search_paths(db, program, ModuleResolveMode::StubsAllowed),
@@ -803,7 +800,7 @@ impl SearchPaths {
     pub(super) fn iter<'a>(
         &'a self,
         db: &'a dyn Db,
-        program: ResolverProgram<'a>,
+        program: ResolverProgram,
         mode: ModuleResolveMode,
     ) -> SearchPathIterator<'a> {
         let stdlib_path = self.stdlib(mode);
@@ -829,7 +826,7 @@ impl SearchPaths {
     pub fn display<'a>(
         &'a self,
         db: &'a dyn Db,
-        program: ResolverProgram<'a>,
+        program: ResolverProgram,
         mode: ModuleResolveMode,
     ) -> DisplaySearchPaths<'a> {
         DisplaySearchPaths {
@@ -854,7 +851,7 @@ impl SearchPaths {
 pub struct DisplaySearchPaths<'a> {
     search_paths: &'a SearchPaths,
     db: &'a dyn Db,
-    program: ResolverProgram<'a>,
+    program: ResolverProgram,
     mode: ModuleResolveMode,
 }
 
@@ -1071,7 +1068,7 @@ impl FusedIterator for SearchPathIterator<'_> {}
 /// This is needed because Salsa requires that all query arguments are salsa ingredients.
 #[salsa::interned(debug, heap_size=ruff_memory_usage::heap_size)]
 struct ModuleNameIngredient<'db> {
-    pub(super) program: ResolverProgram<'db>,
+    pub(super) program: ResolverProgram,
     #[returns(ref)]
     pub(super) name: ModuleName,
     pub(super) mode: ModuleResolveMode,
@@ -1079,9 +1076,9 @@ struct ModuleNameIngredient<'db> {
 
 /// Given a module name and a list of search paths in which to lookup modules,
 /// attempt to resolve the module name
-fn resolve_name<'db>(
-    db: &'db dyn Db,
-    program: ResolverProgram<'db>,
+fn resolve_name(
+    db: &dyn Db,
+    program: ResolverProgram,
     name: &ModuleName,
     mode: ModuleResolveMode,
 ) -> Option<ResolvedNames> {
@@ -1171,12 +1168,7 @@ impl ModuleResolutionCandidate {
     }
 
     // This is the module we were actually interested in resolving, complete the resolution
-    fn into_module<'db>(
-        self,
-        db: &'db dyn Db,
-        program: ResolverProgram<'db>,
-        name: ModuleName,
-    ) -> Module<'db> {
+    fn into_module(self, db: &dyn Db, program: ResolverProgram, name: ModuleName) -> Module<'_> {
         match self.module {
             ResolvedModule::NamespacePackage => {
                 tracing::trace!("Resolve namespace package `{name}`");
@@ -1910,8 +1902,8 @@ mod tests {
 
     use super::*;
 
-    fn resolver_program(db: &TestDb) -> ResolverProgram<'_> {
-        ResolverProgram::create(db, db.python_version(), db.search_paths())
+    fn resolver_program(db: &TestDb) -> ResolverProgram {
+        db.resolver_program()
     }
 
     fn program_file(db: &TestDb, file: File) -> ProgramFile<'_> {

@@ -225,7 +225,7 @@ fn documentation_for_parameter(docstring: &Docstring, name: &str) -> Option<Docs
 }
 
 pub struct Hover<'db> {
-    program: Program<'db>,
+    program: Program,
     contents: Vec<HoverContent<'db>>,
 }
 
@@ -317,7 +317,7 @@ impl<'db> HoverContent<'db> {
     fn display(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         kind: MarkupKind,
     ) -> DisplayHoverContent<'_, 'db> {
         DisplayHoverContent {
@@ -331,7 +331,7 @@ impl<'db> HoverContent<'db> {
 
 pub(crate) struct DisplayHoverContent<'a, 'db> {
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     content: &'a HoverContent<'db>,
     kind: MarkupKind,
 }

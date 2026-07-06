@@ -72,7 +72,7 @@ impl<'db> ExpectedReturnType<'db> {
         function_node: &ast::StmtFunctionDef,
     ) -> Self {
         /// Normalizes special return annotations to the type actually returned by expressions.
-        fn normalize<'db>(db: &'db dyn Db, program: Program<'db>, ty: Type<'db>) -> Type<'db> {
+        fn normalize<'db>(db: &'db dyn Db, program: Program, ty: Type<'db>) -> Type<'db> {
             match ty {
                 Type::TypeIs(_) | Type::TypeGuard(_) => KnownClass::Bool.to_instance(db, program),
                 ty => ty,
@@ -109,7 +109,7 @@ impl<'db> ExpectedReturnType<'db> {
 
     /// Returns `true` if `ty` is accepted by either the public return type or the lexical return
     /// type.
-    fn accepts(self, db: &'db dyn Db, program: Program<'db>, ty: Type<'db>) -> bool {
+    fn accepts(self, db: &'db dyn Db, program: Program, ty: Type<'db>) -> bool {
         ty.is_assignable_to(db, program, self.public)
             || self
                 .lexical

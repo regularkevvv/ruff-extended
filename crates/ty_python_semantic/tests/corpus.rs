@@ -186,7 +186,7 @@ pub struct CorpusDb {
     system: TestSystem,
     vendored: VendoredFileSystem,
     analysis_settings: Arc<AnalysisSettings>,
-    program_settings: ProgramSettings,
+    program: Option<Program>,
 }
 
 impl CorpusDb {
@@ -204,19 +204,21 @@ impl CorpusDb {
                 .to_search_paths(&system, &vendored, &FallibleStrategy)
                 .unwrap(),
         };
-        Self {
+        let mut db = Self {
             storage: salsa::Storage::new(None),
             system,
             vendored,
             rule_selection: RuleSelection::from_registry(default_lint_registry()),
             files: Files::default(),
             analysis_settings: Arc::new(AnalysisSettings::default()),
-            program_settings,
-        }
+            program: None,
+        };
+        db.program = Some(Program::create(&db, &program_settings));
+        db
     }
 
-    fn program(&self) -> Program<'_> {
-        Program::create(self, &self.program_settings)
+    fn program(&self) -> Program {
+        self.program.expect("corpus database has a program")
     }
 }
 
@@ -245,7 +247,7 @@ impl ruff_db::Db for CorpusDb {
     }
 
     fn python_version(&self) -> PythonVersion {
-        self.program_settings.python_version.version
+        self.program().python_version(self)
     }
 }
 

@@ -12,7 +12,7 @@ use crate::collector::CollectedImport;
 /// Collect all imports for a given Python file.
 pub(crate) struct Resolver<'a> {
     db: &'a ModuleDb,
-    program: ResolverProgram<'a>,
+    program: ResolverProgram,
     file: Option<ProgramFile<'a>>,
 }
 

@@ -123,7 +123,7 @@ impl<'db> TypedDictOpenness<'db> {
     fn apply_type_mapping_impl<'a>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'a, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
@@ -147,7 +147,7 @@ impl<'db> TypedDictOpenness<'db> {
     pub(crate) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -325,7 +325,7 @@ impl<'db> TypedDictType<'db> {
     ///
     /// An implicitly open `TypedDict` immediately returns `object` because hidden items may have
     /// any value type. This also avoids unnecessarily materializing its declared items.
-    pub(crate) fn value_type(self, db: &'db dyn Db, program: crate::Program<'db>) -> Type<'db> {
+    pub(crate) fn value_type(self, db: &'db dyn Db, program: crate::Program) -> Type<'db> {
         let openness = self.openness(db);
         if openness.is_implicitly_open() {
             return Type::object();
@@ -345,7 +345,7 @@ impl<'db> TypedDictType<'db> {
     ///
     /// A closed `TypedDict` has a finite set of literal keys. Open and extra-items `TypedDict`s may
     /// contain arbitrary string keys.
-    pub(crate) fn key_type(self, db: &'db dyn Db, program: crate::Program<'db>) -> Type<'db> {
+    pub(crate) fn key_type(self, db: &'db dyn Db, program: crate::Program) -> Type<'db> {
         if !self.openness(db).is_closed() {
             return KnownClass::Str.to_instance(db, program);
         }
@@ -383,7 +383,7 @@ impl<'db> TypedDictType<'db> {
     pub(crate) fn arbitrary_key_initialization_type(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Option<Type<'db>> {
         self.arbitrary_key_initialization_type_excluding(db, program, &OrderSet::new())
     }
@@ -396,7 +396,7 @@ impl<'db> TypedDictType<'db> {
     fn arbitrary_key_initialization_type_excluding(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         excluded_keys: &OrderSet<Name>,
     ) -> Option<Type<'db>> {
         let extra_items = self.explicit_extra_items(db)?;
@@ -420,7 +420,7 @@ impl<'db> TypedDictType<'db> {
     pub(crate) fn arbitrary_key_mutation_type(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Option<Type<'db>> {
         if self
             .explicit_extra_items(db)
@@ -458,7 +458,7 @@ impl<'db> TypedDictType<'db> {
     pub(crate) fn dict_value_type(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Option<Type<'db>> {
         let extra_items = self.explicit_extra_items(db)?;
         if extra_items.is_read_only()
@@ -482,7 +482,7 @@ impl<'db> TypedDictType<'db> {
     pub(crate) fn assignable_dict_value_type(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Option<Type<'db>> {
         let extra_items = self.explicit_extra_items(db)?;
         if extra_items.is_read_only()
@@ -554,16 +554,20 @@ impl<'db> TypedDictType<'db> {
     pub(crate) fn apply_type_mapping_impl<'a>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'a, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
     ) -> Self {
         // TODO: Materialization of gradual TypedDicts needs more logic
         match self {
-            Self::Class(defining_class) => {
-                Self::Class(defining_class.apply_type_mapping_impl(db, type_mapping, tcx, visitor))
-            }
+            Self::Class(defining_class) => Self::Class(defining_class.apply_type_mapping_impl(
+                db,
+                program,
+                type_mapping,
+                tcx,
+                visitor,
+            )),
             Self::Synthesized(synthesized) => Self::Synthesized(
                 synthesized.apply_type_mapping_impl(db, program, type_mapping, tcx, visitor),
             ),
@@ -1282,7 +1286,7 @@ impl<'c, 'db> DisjointnessChecker<'_, 'c, 'db> {
 
 pub(crate) fn walk_typed_dict_type<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     typed_dict: TypedDictType<'db>,
     visitor: &V,
 ) {
@@ -1569,7 +1573,7 @@ impl<'db> TypedDictKeyAssignment<'_, 'db, '_> {
     fn add_object_type_annotation(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         diagnostic: &mut Diagnostic,
     ) {
         if let Some(full_object_ty) = self.full_object_ty {
@@ -1683,7 +1687,7 @@ pub(crate) struct UnpackedTypedDict<'db> {
 /// writes through the synthesized policy.
 fn intersect_unpacked_typed_dict_openness<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     openness: impl IntoIterator<Item = TypedDictOpenness<'db>>,
 ) -> TypedDictOpenness<'db> {
     let mut explicit_value_types = Vec::new();
@@ -1722,7 +1726,7 @@ fn intersect_unpacked_typed_dict_openness<'db>(
 /// observes its values.
 fn union_unpacked_typed_dict_openness<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     openness: impl IntoIterator<Item = TypedDictOpenness<'db>>,
 ) -> TypedDictOpenness<'db> {
     let mut value_types = UnionBuilder::new(db, program);
@@ -1762,7 +1766,7 @@ fn union_unpacked_typed_dict_openness<'db>(
 /// and a key is only considered required if every arm requires it.
 pub(crate) fn extract_unpacked_typed_dict_keys_from_value_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     ty: Type<'db>,
 ) -> Option<BTreeMap<Name, UnpackedTypedDictKey<'db>>> {
     extract_unpacked_typed_dict_from_value_type(db, program, ty).map(|unpacked| unpacked.keys)
@@ -1771,7 +1775,7 @@ pub(crate) fn extract_unpacked_typed_dict_keys_from_value_type<'db>(
 /// Extracts the declared keys and openness from a `TypedDict`-shaped value.
 pub(crate) fn extract_unpacked_typed_dict_from_value_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     ty: Type<'db>,
 ) -> Option<UnpackedTypedDict<'db>> {
     match ty {
@@ -2037,7 +2041,7 @@ pub(super) fn unpacked_keyword_is_gradual<'db>(db: &'db dyn Db, ty: Type<'db>) -
 /// key diagnostics for the positional mapping.
 pub(super) fn collect_guaranteed_keyword_keys<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     typed_dict: TypedDictType<'db>,
     arguments: &Arguments,
     unpacked_keyword_types: &[Option<Type<'db>>],
@@ -2085,7 +2089,7 @@ pub(super) fn collect_guaranteed_keyword_keys<'db>(
 /// Collects keys guaranteed by one unpacked constructor argument.
 fn collect_guaranteed_keys_from_merged_unpacked_keyword<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     typed_dict: TypedDictType<'db>,
     expr: &ast::Expr,
     unpacked_type: Type<'db>,
@@ -3001,7 +3005,7 @@ impl<'db> SynthesizedTypedDictType<'db> {
     pub(super) fn apply_type_mapping_impl<'a>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'a, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
@@ -3037,7 +3041,7 @@ impl<'db> TypedDictSchema<'db> {
     pub(super) fn recursive_type_normalized_impl(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -3125,7 +3129,7 @@ impl<'db> TypedDictField<'db> {
     pub(crate) fn apply_type_mapping_impl<'a>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'a, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,

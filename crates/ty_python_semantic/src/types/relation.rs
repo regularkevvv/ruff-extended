@@ -311,7 +311,7 @@ impl<'db> Type<'db> {
     pub(crate) fn is_subtype_of(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         target: Type<'db>,
     ) -> bool {
         let constraints = ConstraintSetBuilder::new();
@@ -322,7 +322,7 @@ impl<'db> Type<'db> {
     pub(super) fn when_subtype_of<'c>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         target: Type<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
         inferable: InferableTypeVars<'db>,
@@ -344,7 +344,7 @@ impl<'db> Type<'db> {
     pub(super) fn when_subtype_of_assuming<'c>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         target: Type<'db>,
         assuming: ConstraintSet<'db, 'c>,
         constraints: &'c ConstraintSetBuilder<'db>,
@@ -373,12 +373,7 @@ impl<'db> Type<'db> {
     /// Return true if this type is assignable to type `target`.
     ///
     /// See `TypeRelation::Assignability` for more details.
-    pub fn is_assignable_to(
-        self,
-        db: &'db dyn Db,
-        program: Program<'db>,
-        target: Type<'db>,
-    ) -> bool {
+    pub fn is_assignable_to(self, db: &'db dyn Db, program: Program, target: Type<'db>) -> bool {
         let constraints = ConstraintSetBuilder::new();
         self.when_assignable_to(db, program, target, &constraints, InferableTypeVars::None)
             .is_always_satisfied(db, program)
@@ -394,7 +389,7 @@ impl<'db> Type<'db> {
     pub(crate) fn assignability_error_context(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         target: Type<'db>,
     ) -> ErrorContextTree<'db> {
         let builder = ConstraintSetBuilder::new();
@@ -419,7 +414,7 @@ impl<'db> Type<'db> {
     pub fn is_constraint_set_assignable_to(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         target: Type<'db>,
     ) -> bool {
         let constraints = ConstraintSetBuilder::new();
@@ -431,7 +426,7 @@ impl<'db> Type<'db> {
     pub(super) fn is_constraint_set_subtype_of(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         target: Type<'db>,
     ) -> bool {
         let constraints = ConstraintSetBuilder::new();
@@ -442,7 +437,7 @@ impl<'db> Type<'db> {
     pub(super) fn when_assignable_to<'c>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         target: Type<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
         inferable: InferableTypeVars<'db>,
@@ -490,7 +485,7 @@ impl<'db> Type<'db> {
     pub(super) fn when_constraint_set_assignable_to_owned(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         target: Type<'db>,
     ) -> Cow<'db, OwnedConstraintSet<'db>> {
         #[salsa::tracked(
@@ -501,7 +496,7 @@ impl<'db> Type<'db> {
         fn when_constraint_set_assignable_to_owned_impl<'db>(
             db: &'db dyn Db,
             source: Type<'db>,
-            program: Program<'db>,
+            program: Program,
             target: Type<'db>,
         ) -> OwnedConstraintSet<'db> {
             let constraints = ConstraintSetBuilder::new();
@@ -530,7 +525,7 @@ impl<'db> Type<'db> {
     pub(super) fn when_constraint_set_assignable_to<'c>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         target: Type<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
     ) -> ConstraintSet<'db, 'c> {
@@ -548,7 +543,7 @@ impl<'db> Type<'db> {
     pub(super) fn when_constraint_set_subtype_of<'c>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         target: Type<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
     ) -> ConstraintSet<'db, 'c> {
@@ -569,14 +564,14 @@ impl<'db> Type<'db> {
     pub(super) fn is_redundant_with(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         other: Type<'db>,
     ) -> bool {
         #[salsa::tracked(cycle_initial=|_, _, _, _, _| true, heap_size=ruff_memory_usage::heap_size)]
         fn is_redundant_with_impl<'db>(
             db: &'db dyn Db,
             self_ty: Type<'db>,
-            program: Program<'db>,
+            program: Program,
             other: Type<'db>,
         ) -> bool {
             self_ty
@@ -601,7 +596,7 @@ impl<'db> Type<'db> {
     pub(super) fn has_relation_to<'c>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         target: Type<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
         inferable: InferableTypeVars<'db>,
@@ -622,7 +617,7 @@ impl<'db> Type<'db> {
     fn has_relation_to_with_typevar_evaluation<'c>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         target: Type<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
         inferable: InferableTypeVars<'db>,
@@ -664,7 +659,7 @@ impl<'db> Type<'db> {
     pub(crate) fn is_equivalent_to(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         other: Type<'db>,
     ) -> bool {
         self.when_equivalent_to(db, program, other, &ConstraintSetBuilder::new())
@@ -674,7 +669,7 @@ impl<'db> Type<'db> {
     pub(crate) fn is_equivalent_to_with_materialization_visitor(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         other: Type<'db>,
         materialization_visitor: &ApplyTypeMappingVisitor<'db>,
     ) -> bool {
@@ -691,7 +686,7 @@ impl<'db> Type<'db> {
     pub(crate) fn when_equivalent_to<'c>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         other: Type<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
     ) -> ConstraintSet<'db, 'c> {
@@ -708,7 +703,7 @@ impl<'db> Type<'db> {
     pub(crate) fn when_equivalent_to_with_materialization_visitor<'c>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         other: Type<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
         materialization_visitor: &ApplyTypeMappingVisitor<'db>,
@@ -746,7 +741,7 @@ impl<'db> Type<'db> {
     pub(crate) fn is_disjoint_from(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         other: Type<'db>,
     ) -> bool {
         let constraints = ConstraintSetBuilder::new();
@@ -757,7 +752,7 @@ impl<'db> Type<'db> {
     pub(crate) fn when_disjoint_from<'c>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         other: Type<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
         inferable: InferableTypeVars<'db>,
@@ -808,7 +803,7 @@ impl<'db, 'c> IsDisjointVisitor<'db, 'c> {
 
 #[derive(Clone)]
 pub(super) struct TypeRelationChecker<'a, 'c, 'db> {
-    pub(super) program: Program<'db>,
+    pub(super) program: Program,
     pub(super) constraints: &'c ConstraintSetBuilder<'db>,
     pub(super) inferable: InferableTypeVars<'db>,
     pub(super) relation: TypeRelation,
@@ -830,7 +825,7 @@ pub(super) struct TypeRelationChecker<'a, 'c, 'db> {
 
 impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
     pub(super) fn subtyping(
-        program: Program<'db>,
+        program: Program,
         constraints: &'c ConstraintSetBuilder<'db>,
         inferable: InferableTypeVars<'db>,
         relation_visitor: &'a HasRelationToVisitor<'db, 'c>,
@@ -854,7 +849,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
     }
 
     pub(super) fn constraint_set_assignability(
-        program: Program<'db>,
+        program: Program,
         constraints: &'c ConstraintSetBuilder<'db>,
         relation_visitor: &'a HasRelationToVisitor<'db, 'c>,
         disjointness_visitor: &'a IsDisjointVisitor<'db, 'c>,
@@ -877,7 +872,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
     }
 
     pub(super) fn constraint_set_assignability_with_context(
-        program: Program<'db>,
+        program: Program,
         constraints: &'c ConstraintSetBuilder<'db>,
         relation_visitor: &'a HasRelationToVisitor<'db, 'c>,
         disjointness_visitor: &'a IsDisjointVisitor<'db, 'c>,
@@ -900,7 +895,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
     }
 
     pub(super) fn assignability_with_context(
-        program: Program<'db>,
+        program: Program,
         constraints: &'c ConstraintSetBuilder<'db>,
         relation_visitor: &'a HasRelationToVisitor<'db, 'c>,
         disjointness_visitor: &'a IsDisjointVisitor<'db, 'c>,
@@ -2453,7 +2448,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
 }
 
 pub(super) struct EquivalenceChecker<'a, 'c, 'db> {
-    pub(super) program: Program<'db>,
+    pub(super) program: Program,
     pub(super) constraints: &'c ConstraintSetBuilder<'db>,
     given: ConstraintSet<'db, 'c>,
 
@@ -2521,7 +2516,7 @@ impl<'c, 'db> EquivalenceChecker<'_, 'c, 'db> {
 }
 
 pub(super) struct DisjointnessChecker<'a, 'c, 'db> {
-    pub(super) program: Program<'db>,
+    pub(super) program: Program,
     pub(super) constraints: &'c ConstraintSetBuilder<'db>,
     pub(super) inferable: InferableTypeVars<'db>,
     given: ConstraintSet<'db, 'c>,
@@ -2540,7 +2535,7 @@ pub(super) struct DisjointnessChecker<'a, 'c, 'db> {
 
 impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
     pub(super) fn new(
-        program: Program<'db>,
+        program: Program,
         constraints: &'c ConstraintSetBuilder<'db>,
         inferable: InferableTypeVars<'db>,
         relation_visitor: &'a HasRelationToVisitor<'db, 'c>,

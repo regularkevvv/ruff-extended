@@ -20,11 +20,11 @@ use crate::types::{
     infer_same_file_expression_type,
 };
 
-pub(crate) fn singleton_pattern_type<'db>(
-    db: &'db dyn Db,
-    program: crate::Program<'db>,
+pub(crate) fn singleton_pattern_type(
+    db: &dyn Db,
+    program: crate::Program,
     singleton: ast::Singleton,
-) -> Type<'db> {
+) -> Type<'_> {
     let ty = match singleton {
         ast::Singleton::None => Type::none(db, program),
         ast::Singleton::True => Type::bool_literal(true),
@@ -34,19 +34,13 @@ pub(crate) fn singleton_pattern_type<'db>(
     ty
 }
 
-pub(crate) fn mapping_pattern_type<'db>(
-    db: &'db dyn Db,
-    program: crate::Program<'db>,
-) -> Type<'db> {
+pub(crate) fn mapping_pattern_type(db: &dyn Db, program: crate::Program) -> Type<'_> {
     KnownClass::Mapping
         .to_instance(db, program)
         .top_materialization(db, program)
 }
 
-pub(crate) fn callable_pattern_type<'db>(
-    db: &'db dyn Db,
-    program: crate::Program<'db>,
-) -> Type<'db> {
+pub(crate) fn callable_pattern_type(db: &dyn Db, program: crate::Program) -> Type<'_> {
     Type::Callable(CallableType::unknown(db)).top_materialization(db, program)
 }
 
@@ -105,10 +99,10 @@ fn is_typed_dict_pattern_domain(db: &dyn Db, ty: Type<'_>) -> bool {
     typed_dict_pattern_domain_satisfies(db, ty, &|_| true)
 }
 
-pub(crate) fn sequence_pattern_type_builder<'db>(
-    db: &'db dyn Db,
-    program: crate::Program<'db>,
-) -> IntersectionBuilder<'db> {
+pub(crate) fn sequence_pattern_type_builder(
+    db: &dyn Db,
+    program: crate::Program,
+) -> IntersectionBuilder<'_> {
     IntersectionBuilder::new(db, program)
         .add_positive(
             KnownClass::Sequence
@@ -124,7 +118,7 @@ pub(crate) fn sequence_pattern_type_builder<'db>(
 
 fn sequence_pattern_getitem_method<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     indexed_element_types: impl IntoIterator<Item = (i64, Type<'db>)>,
     fallback_return_type: Option<Type<'db>>,
 ) -> CallableType<'db> {
@@ -182,7 +176,7 @@ fn sequence_pattern_getitem_method<'db>(
 /// and element types.
 pub(crate) fn exact_sequence_pattern_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     element_types: impl ExactSizeIterator<Item = Type<'db>>,
 ) -> Type<'db> {
     let Ok(length) = i64::try_from(element_types.len()) else {
@@ -234,7 +228,7 @@ pub(crate) fn exact_sequence_pattern_type<'db>(
 /// negative indices. Other integer indices retain the sequence's element type.
 pub(crate) fn starred_sequence_pattern_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     prefix_element_types: impl ExactSizeIterator<Item = Type<'db>>,
     suffix_element_types: impl ExactSizeIterator<Item = Type<'db>>,
 ) -> Type<'db> {
@@ -516,7 +510,7 @@ pub(crate) fn class_pattern_positional_sources(
 /// Return whether `name` is definitely bound and `pattern` consumes its entire static member type.
 fn member_pattern_is_exhaustive(
     db: &dyn Db,
-    program: crate::Program<'_>,
+    program: crate::Program,
     instance_ty: Type<'_>,
     name: &str,
     pattern: &PatternPredicateKind<'_>,
@@ -531,7 +525,7 @@ fn member_pattern_is_exhaustive(
 /// Return whether `pattern` is statically guaranteed to match every value in `subject_ty`.
 fn pattern_is_exhaustive_for_subject(
     db: &dyn Db,
-    program: crate::Program<'_>,
+    program: crate::Program,
     pattern: &PatternPredicateKind<'_>,
     subject_ty: Type<'_>,
 ) -> bool {
@@ -549,7 +543,7 @@ fn pattern_is_exhaustive_for_subject(
 /// guarantee that a particular key is present.
 fn mapping_pattern_is_exhaustive(
     db: &dyn Db,
-    program: crate::Program<'_>,
+    program: crate::Program,
     kind: &MappingPatternPredicateKind<'_>,
     subject_ty: Type<'_>,
 ) -> bool {
@@ -578,7 +572,7 @@ fn mapping_pattern_is_exhaustive(
 /// tuple element's actual static type.
 fn sequence_pattern_is_exhaustive_for_subject(
     db: &dyn Db,
-    program: crate::Program<'_>,
+    program: crate::Program,
     kind: &SequencePatternPredicateKind<'_>,
     subject_ty: Type<'_>,
 ) -> bool {
@@ -653,7 +647,7 @@ fn sequence_pattern_is_exhaustive_for_subject(
 /// ```
 pub(crate) fn definite_match_pattern_type_for_subject<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     kind: &PatternPredicateKind<'db>,
     subject_ty: Type<'db>,
 ) -> Type<'db> {
@@ -772,7 +766,7 @@ pub(crate) fn definite_match_pattern_type_for_subject<'db>(
 /// ```
 pub(crate) fn pattern_fallthrough_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     kind: &PatternPredicateKind<'db>,
     subject_ty: Type<'db>,
 ) -> Type<'db> {
@@ -828,7 +822,7 @@ pub(crate) fn pattern_fallthrough_type<'db>(
 /// ```
 pub(crate) fn pattern_binding_fallthrough_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     kind: &PatternPredicateKind<'db>,
     subject_ty: Type<'db>,
 ) -> Type<'db> {
@@ -844,7 +838,7 @@ pub(crate) fn pattern_binding_fallthrough_type<'db>(
 /// complete pattern conservatively.
 fn try_pattern_binding_fallthrough_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     kind: &PatternPredicateKind<'db>,
     subject_ty: Type<'db>,
     budget: &mut ExactTuplePatternExpansionBudget,
@@ -871,7 +865,7 @@ fn try_pattern_binding_fallthrough_type<'db>(
 /// used when the precise traversal exceeds its expansion budget.
 fn conservative_pattern_binding_fallthrough_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     kind: &PatternPredicateKind<'db>,
     subject_ty: Type<'db>,
 ) -> Type<'db> {
@@ -894,7 +888,7 @@ fn conservative_pattern_binding_fallthrough_type<'db>(
 /// expansion cannot exceed the configured limits.
 fn try_sequence_pattern_binding_fallthrough_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     kind: &SequencePatternPredicateKind<'db>,
     subject_ty: Type<'db>,
     budget: &mut ExactTuplePatternExpansionBudget,
@@ -992,7 +986,7 @@ impl ExactTuplePatternExpansionBudget {
 /// representation used by the general fallthrough path.
 fn exact_tuple_sequence_pattern_fallthrough_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     kind: &SequencePatternPredicateKind<'db>,
     subject_ty: Type<'db>,
     budget: &mut ExactTuplePatternExpansionBudget,
@@ -1045,7 +1039,7 @@ fn exact_tuple_sequence_pattern_fallthrough_type<'db>(
 /// bounded type variables nested inside unions or intersections.
 fn is_same_enum_pattern_domain<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     ty: Type<'db>,
     right: EnumLiteralType<'db>,
 ) -> bool {
@@ -1077,7 +1071,7 @@ fn is_same_enum_pattern_domain<'db>(
 /// the static subject type.
 fn subject_independent_definite_match_pattern_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     kind: &PatternPredicateKind<'db>,
 ) -> Option<Type<'db>> {
     match kind {
@@ -1127,7 +1121,7 @@ fn subject_independent_definite_match_pattern_type<'db>(
 /// Reachability and negative narrowing can only subtract this under-approximation.
 pub(crate) fn definite_match_pattern_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     kind: &PatternPredicateKind<'db>,
 ) -> Type<'db> {
     match kind {
@@ -1183,7 +1177,7 @@ pub(crate) fn definite_match_pattern_type<'db>(
 /// Return the values that are guaranteed to match a sequence pattern.
 fn definite_sequence_pattern_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     kind: &SequencePatternPredicateKind<'db>,
 ) -> Type<'db> {
     build_definite_sequence_pattern_type(db, program, kind, |pattern| {
@@ -1194,7 +1188,7 @@ fn definite_sequence_pattern_type<'db>(
 
 fn build_definite_sequence_pattern_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     kind: &SequencePatternPredicateKind<'db>,
     mut element_type: impl FnMut(&PatternPredicateKind<'db>) -> Option<Type<'db>>,
 ) -> Option<Type<'db>> {

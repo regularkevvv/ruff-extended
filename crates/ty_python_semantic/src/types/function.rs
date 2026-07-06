@@ -435,11 +435,11 @@ impl<'db> OverloadLiteral<'db> {
     /// Returns the overload immediately before this one in the AST. Returns `None` if there is no
     /// previous overload.
     fn previous_overload(self, db: &'db dyn Db) -> Option<FunctionLiteral<'db>> {
-        let program = self.body_scope(db).program(db);
         // The semantic model records a use for each function on the name node. This is used
         // here to get the previous function definition with the same name.
         let definition = self.definition(db);
         let analysis_file = definition.analysis_file(db);
+        let program = analysis_file.program(db);
         let scope = definition.scope(db);
         let module = parsed_module(db, analysis_file.versioned_file(db)).load(db);
         let use_def = semantic_index(db, analysis_file).use_def_map(scope.file_scope_id(db));
@@ -490,11 +490,11 @@ impl<'db> OverloadLiteral<'db> {
     /// a cross-module dependency directly on the full AST which will lead to cache
     /// over-invalidation.
     pub(crate) fn signature(self, db: &'db dyn Db) -> Signature<'db> {
-        let program = self.body_scope(db).program(db);
         let mut signature = self.raw_signature(db, ReturnCallableTypeVarScope::Public);
 
         let scope = self.body_scope(db);
         let analysis_file = scope.analysis_file(db);
+        let program = analysis_file.program(db);
         let module = parsed_module(db, analysis_file.versioned_file(db)).load(db);
         let function_node = scope.node(db).expect_function().node(&module);
         let index = semantic_index(db, analysis_file);
@@ -579,9 +579,9 @@ impl<'db> OverloadLiteral<'db> {
                 .is_some_and(|class| class.is_protocol(db))
         }
 
-        let program = self.body_scope(db).program(db);
         let scope = self.body_scope(db);
         let analysis_file = scope.analysis_file(db);
+        let program = analysis_file.program(db);
         let module = parsed_module(db, analysis_file.versioned_file(db)).load(db);
         let function_stmt_node = scope.node(db).expect_function().node(&module);
         let definition = self.definition(db);
@@ -748,7 +748,7 @@ impl<'db> FunctionLiteral<'db> {
         }
     }
 
-    fn program(self, db: &'db dyn Db) -> crate::Program<'db> {
+    fn program(self, db: &'db dyn Db) -> crate::Program {
         self.last_definition.body_scope(db).program(db)
     }
 
@@ -1062,7 +1062,7 @@ pub struct FunctionType<'db> {
 impl get_size2::GetSize for FunctionType<'_> {}
 
 impl<'db> FunctionType<'db> {
-    pub(crate) fn program(self, db: &'db dyn Db) -> crate::Program<'db> {
+    pub(crate) fn program(self, db: &'db dyn Db) -> crate::Program {
         self.literal(db).program(db)
     }
 
@@ -1076,7 +1076,7 @@ impl<'db> FunctionType<'db> {
 
 pub(super) fn walk_function_type<'db, V: super::visitor::TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     function: FunctionType<'db>,
     visitor: &V,
 ) {
@@ -1611,7 +1611,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
 /// (e.g., when it's stored in a variable).
 fn check_classinfo_in_isinstance<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     context: &InferContext<'db, '_>,
     call_expression: &ast::ExprCall,
     function: KnownFunction,
@@ -1698,7 +1698,7 @@ fn report_invalid_union_type_elements<'db>(
 ) {
     fn find_invalid_elements<'db>(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         function: KnownFunction,
         ty: Type<'db>,
         invalid_elements: &mut Vec<Type<'db>>,
@@ -1956,7 +1956,7 @@ pub(crate) fn function_has_stub_body(node: &ast::StmtFunctionDef) -> bool {
 /// the analysis is only done on the remaining statements if the first is a docstring.
 pub(super) fn function_body_kind<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     node: &ast::StmtFunctionDef,
     infer_type: impl Fn(&ast::Expr) -> Type<'db>,
 ) -> FunctionBodyKind {

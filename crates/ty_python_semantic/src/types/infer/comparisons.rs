@@ -878,7 +878,7 @@ fn infer_binary_intersection_type_comparison<'db>(
 /// see `<https://docs.python.org/3/reference/datamodel.html#object.__lt__>`
 fn infer_rich_comparison<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     left: Type<'db>,
     right: Type<'db>,
     op: RichCompareOperator,

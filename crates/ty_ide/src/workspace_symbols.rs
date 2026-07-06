@@ -7,11 +7,7 @@ use ty_python_core::program::Program;
 
 /// Get all workspace symbols matching the query string.
 /// Returns symbols from all files in the workspace, filtered by the query.
-pub fn workspace_symbols(
-    db: &dyn Db,
-    program: Program<'_>,
-    query: &str,
-) -> Vec<WorkspaceSymbolInfo> {
+pub fn workspace_symbols(db: &dyn Db, program: Program, query: &str) -> Vec<WorkspaceSymbolInfo> {
     // If the query is empty, return immediately to avoid expensive file scanning
     if query.is_empty() {
         return Vec::new();

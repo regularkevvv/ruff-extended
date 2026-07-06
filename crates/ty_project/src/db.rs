@@ -139,7 +139,7 @@ impl ProjectDatabase {
             &db,
             project_metadata,
             settings,
-            program_settings,
+            &program_settings,
             settings_diagnostics,
             program_settings_diagnostics,
         ));
@@ -546,17 +546,9 @@ impl SemanticDb for ProjectDatabase {
 
     fn python_version_source(
         &self,
-        program: ty_python_core::program::Program<'_>,
+        program: ty_python_core::program::Program,
     ) -> ty_python_semantic::PythonVersionSource {
-        if program == self.project().program(self) {
-            self.project()
-                .program_settings(self)
-                .python_version
-                .source
-                .clone()
-        } else {
-            ty_python_semantic::PythonVersionSource::Default
-        }
+        program.python_version_source(self).clone()
     }
 
     fn verbose(&self) -> bool {
@@ -591,7 +583,7 @@ impl SourceDb for ProjectDatabase {
     }
 
     fn python_version(&self) -> ruff_python_ast::PythonVersion {
-        self.project().program_settings(self).python_version.version
+        self.project().program(self).python_version(self)
     }
 }
 
@@ -683,7 +675,7 @@ pub(crate) mod testing {
                 &db,
                 project,
                 settings,
-                ProgramSettings {
+                &ProgramSettings {
                     python_version: PythonVersionWithSource::default(),
                     python_platform: PythonPlatform::default(),
                     search_paths: ty_module_resolver::SearchPaths::empty(db.vendored()),
@@ -766,7 +758,7 @@ pub(crate) mod testing {
         }
 
         fn python_version(&self) -> ruff_python_ast::PythonVersion {
-            self.project().program_settings(self).python_version.version
+            self.project().program(self).python_version(self)
         }
     }
 
@@ -858,7 +850,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_program_has_default_python_version_source() -> anyhow::Result<()> {
+    fn program_retains_its_python_version_source() -> anyhow::Result<()> {
         let system = TestSystem::default();
         let project = SystemPathBuf::from("/project");
         system.memory_file_system().create_directory_all(&project)?;
@@ -879,10 +871,66 @@ mod tests {
             &InferenceSettings::default(),
         );
 
-        assert_ne!(alternate_program, project_program);
         assert_eq!(
             ty_python_semantic::Db::python_version_source(&db, alternate_program),
-            PythonVersionSource::Default
+            PythonVersionSource::Cli
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn updating_program_settings_updates_the_project_program() -> anyhow::Result<()> {
+        let system = TestSystem::default();
+        let project_root = SystemPathBuf::from("/project");
+        system
+            .memory_file_system()
+            .create_directory_all(&project_root)?;
+
+        let metadata = ProjectMetadata::discover(&project_root, &system)?;
+        let mut db = ProjectDatabase::fallible(metadata, system)?;
+        let project = db.project();
+        let original = project.program(&db);
+        let (python_version, python_platform, search_paths) = {
+            let original = project.program(&db);
+            let python_version = if original.python_version(&db) == PythonVersion::PY310 {
+                PythonVersion::PY311
+            } else {
+                PythonVersion::PY310
+            };
+            (
+                python_version,
+                original.python_platform(&db).clone(),
+                original.search_paths(&db).clone(),
+            )
+        };
+
+        let mut settings = ProgramSettings {
+            python_version: PythonVersionWithSource {
+                version: python_version,
+                source: PythonVersionSource::Cli,
+            },
+            python_platform,
+            search_paths,
+        };
+        project.update_program_settings(&mut db, settings.clone());
+
+        let updated = project.program(&db);
+        assert_eq!(updated, original);
+        assert_eq!(updated.python_version(&db), python_version);
+        assert_eq!(
+            ty_python_semantic::Db::python_version_source(&db, updated),
+            PythonVersionSource::Cli
+        );
+
+        settings.python_version.source = PythonVersionSource::Editor;
+        project.update_program_settings(&mut db, settings);
+
+        let updated = project.program(&db);
+        assert_eq!(updated, original);
+        assert_eq!(
+            ty_python_semantic::Db::python_version_source(&db, updated),
+            PythonVersionSource::Editor
         );
 
         Ok(())
@@ -913,14 +961,6 @@ mod tests {
         let metadata = ProjectMetadata::discover(&project, &system)?;
         let db = ProjectDatabase::fallible(metadata, system)?;
 
-        let program = db.project().program(&db).resolver(&db);
-        let modules = list_modules(&db, program);
-        assert!(
-            modules
-                .iter()
-                .any(|module| module.name(&db).as_str() == "bar")
-        );
-
         let project_src_root = db
             .files()
             .root(&db, &project_src)
@@ -947,6 +987,15 @@ mod tests {
             venv_root.kind_at_time_of_creation(&db),
             FileRootKind::SearchPath
         );
+
+        let program = db.project().program(&db).resolver(&db);
+        let modules = list_modules(&db, program);
+        assert!(
+            modules
+                .iter()
+                .any(|module| module.name(&db).as_str() == "bar")
+        );
+
         Ok(())
     }
 }

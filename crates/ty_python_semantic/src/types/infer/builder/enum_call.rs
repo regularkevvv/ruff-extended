@@ -136,7 +136,7 @@ fn enum_functional_call_keyword_is_valid(name: &str, python_version: PythonVersi
 ///
 /// This includes the string form, iterables of strings, iterables of
 /// iterable-like `(name, value)` pairs, and mappings from `str` to values.
-fn enum_names_type<'db>(db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+fn enum_names_type(db: &dyn Db, program: Program) -> Type<'_> {
     let str_type = KnownClass::Str.to_instance(db, program);
     let iterable_str = KnownClass::Iterable.to_specialized_instance(db, program, &[str_type]);
     let iterable_object =
@@ -163,7 +163,7 @@ fn enum_names_type<'db>(db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
 /// literal `start` value when available, and widen to `int` when `start` is a non-literal int.
 fn first_enum_auto_value<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     base_class: KnownClass,
     name: &str,
     start: EnumStart,
@@ -186,7 +186,7 @@ fn first_enum_auto_value<'db>(
 /// - Others: `last_value + 1`
 fn next_auto_value<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     base_class: KnownClass,
     name: &str,
     last_int_value: Option<i64>,
@@ -220,13 +220,13 @@ fn next_auto_value<'db>(
     }
 }
 
-fn enum_members_from_names<'db>(
-    db: &'db dyn Db,
-    program: Program<'db>,
+fn enum_members_from_names(
+    db: &dyn Db,
+    program: Program,
     names: Vec<Name>,
     start: EnumStart,
     base_class: KnownClass,
-) -> Vec<(Name, Type<'db>)> {
+) -> Vec<(Name, Type<'_>)> {
     let mut members = Vec::with_capacity(names.len());
     let mut last_int_value = None;
 
@@ -252,7 +252,7 @@ fn enum_members_from_names<'db>(
 /// compatible with the corresponding builtin conversion.
 fn apply_generated_type_mixin_member_values<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     mixin_type: Type<'_>,
     members: Vec<(Name, Type<'db>)>,
 ) -> Option<Vec<(Name, Type<'db>)>> {

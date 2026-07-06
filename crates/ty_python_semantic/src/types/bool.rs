@@ -18,7 +18,7 @@ impl<'db> Type<'db> {
     /// This method should only be used outside type checking or when evaluating if a type
     /// is truthy or falsy in a context where Python doesn't make an implicit `bool` call.
     /// Use [`try_bool`](Self::try_bool) for type checking or implicit `bool` calls.
-    pub(crate) fn bool(&self, db: &'db dyn Db, program: Program<'db>) -> Truthiness {
+    pub(crate) fn bool(&self, db: &'db dyn Db, program: Program) -> Truthiness {
         self.try_bool_impl(
             db,
             program,
@@ -37,7 +37,7 @@ impl<'db> Type<'db> {
     pub(crate) fn try_bool(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
     ) -> Result<Truthiness, BoolError<'db>> {
         self.try_bool_impl(
             db,
@@ -62,7 +62,7 @@ impl<'db> Type<'db> {
     fn try_bool_impl(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         allow_short_circuit: bool,
         visitor: &TryBoolVisitor<'db>,
     ) -> Result<Truthiness, BoolError<'db>> {

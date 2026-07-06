@@ -18,6 +18,7 @@ use ty_project::metadata::Options;
 use ty_project::metadata::options::EnvironmentOptions;
 use ty_project::metadata::value::RelativePathBuf;
 use ty_project::{Db as _, ProjectDatabase, ProjectMetadata};
+use ty_python_core::environment::AnalysisFile;
 
 #[derive(Debug, clap::Parser)]
 #[command(
@@ -143,7 +144,7 @@ fn get_completions<'db>(
         db,
         &settings,
         CompletionCapabilities::default(),
-        db.project().analysis_file(db, file),
+        AnalysisFile::new(db, db.project().program(db), file),
         offset,
     ))
 }

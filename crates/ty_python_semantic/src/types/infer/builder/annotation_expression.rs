@@ -241,6 +241,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                                 .inner_type()
                                 .in_type_expression(
                                     self.db(),
+                                    self.program,
                                     self.scope(),
                                     None,
                                     self.inference_flags(),

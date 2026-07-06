@@ -247,7 +247,7 @@ impl<'db> LiteralValueType<'db> {
         matches!(self.kind(), LiteralValueTypeKind::Bytes(..))
     }
 
-    pub(crate) fn fallback_instance(self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    pub(crate) fn fallback_instance(self, db: &'db dyn Db, program: Program) -> Type<'db> {
         match self.kind() {
             LiteralValueTypeKind::String(_) | LiteralValueTypeKind::LiteralString => {
                 KnownClass::Str.to_instance(db, program)

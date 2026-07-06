@@ -45,6 +45,7 @@ impl<'db> ClassBase<'db> {
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
+        program: Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -52,7 +53,7 @@ impl<'db> ClassBase<'db> {
             Self::Dynamic(dynamic) => Some(Self::Dynamic(dynamic.recursive_type_normalized())),
             Self::Divergent(_) => Some(self),
             Self::Class(class) => Some(Self::Class(
-                class.recursive_type_normalized_impl(db, div, nested)?,
+                class.recursive_type_normalized_impl(db, program, div, nested)?,
             )),
             Self::Any | Self::Protocol | Self::Generic | Self::TypedDict(_) => Some(self),
         }
@@ -84,7 +85,7 @@ impl<'db> ClassBase<'db> {
     }
 
     /// Return a `ClassBase` representing the class `builtins.object`
-    pub(super) fn object(db: &'db dyn Db, program: crate::Program<'db>) -> Self {
+    pub(super) fn object(db: &'db dyn Db, program: crate::Program) -> Self {
         Self::Class(ClassType::object(db, program))
     }
 
@@ -118,7 +119,7 @@ impl<'db> ClassBase<'db> {
     /// Convert an explicit base while preserving a direct use of the `Any` special form.
     pub(super) fn try_from_explicit_base(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         ty: Type<'db>,
         subclass: Option<ClassLiteral<'db>>,
     ) -> Option<Self> {
@@ -134,7 +135,7 @@ impl<'db> ClassBase<'db> {
     /// Return `None` if `ty` is not an acceptable type for a class base.
     pub(super) fn try_from_type(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         ty: Type<'db>,
         subclass: Option<ClassLiteral<'db>>,
     ) -> Option<Self> {
@@ -368,7 +369,7 @@ impl<'db> ClassBase<'db> {
     }
 
     /// Return the metaclass of this class base.
-    pub(crate) fn metaclass(self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    pub(crate) fn metaclass(self, db: &'db dyn Db, program: Program) -> Type<'db> {
         match self {
             Self::Class(class) => class.metaclass(db),
             Self::Any => Type::Dynamic(DynamicType::Any),
@@ -384,13 +385,14 @@ impl<'db> ClassBase<'db> {
     fn apply_type_mapping_impl<'a>(
         self,
         db: &'db dyn Db,
+        program: Program,
         type_mapping: &TypeMapping<'a, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
     ) -> Self {
         match self {
             Self::Class(class) => {
-                Self::Class(class.apply_type_mapping_impl(db, type_mapping, tcx, visitor))
+                Self::Class(class.apply_type_mapping_impl(db, program, type_mapping, tcx, visitor))
             }
             Self::Any
             | Self::Dynamic(_)
@@ -407,8 +409,10 @@ impl<'db> ClassBase<'db> {
         specialization: Option<Specialization<'db>>,
     ) -> Self {
         if let Some(specialization) = specialization {
+            let program = specialization.generic_context(db).program(db);
             let new_self = self.apply_type_mapping_impl(
                 db,
+                program,
                 &TypeMapping::ApplySpecialization(ApplySpecialization::Specialization(
                     specialization,
                 )),
@@ -417,16 +421,19 @@ impl<'db> ClassBase<'db> {
             );
             match specialization.materialization_kind(db) {
                 None => new_self,
-                Some(materialization_kind) => new_self.materialize(db, materialization_kind),
+                Some(materialization_kind) => {
+                    new_self.materialize(db, program, materialization_kind)
+                }
             }
         } else {
             self
         }
     }
 
-    fn materialize(self, db: &'db dyn Db, kind: MaterializationKind) -> Self {
+    fn materialize(self, db: &'db dyn Db, program: Program, kind: MaterializationKind) -> Self {
         self.apply_type_mapping_impl(
             db,
+            program,
             &TypeMapping::Materialize(kind),
             TypeContext::default(),
             &ApplyTypeMappingVisitor::default(),
@@ -460,7 +467,7 @@ impl<'db> ClassBase<'db> {
     pub(super) fn mro(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         additional_specialization: Option<Specialization<'db>>,
     ) -> impl Iterator<Item = ClassBase<'db>> + Clone {
         match self {
@@ -481,7 +488,7 @@ impl<'db> ClassBase<'db> {
     pub(super) fn display(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> impl std::fmt::Display {
         self.display_with(db, program, DisplaySettings::default())
     }
@@ -489,12 +496,12 @@ impl<'db> ClassBase<'db> {
     pub(super) fn display_with(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         display_settings: DisplaySettings<'db>,
     ) -> impl std::fmt::Display {
         struct ClassBaseDisplay<'db> {
             db: &'db dyn Db,
-            program: crate::Program<'db>,
+            program: crate::Program,
             base: ClassBase<'db>,
             settings: DisplaySettings<'db>,
         }
@@ -560,18 +567,14 @@ enum ClassBaseMroIterator<'db> {
 
 impl<'db> ClassBaseMroIterator<'db> {
     /// Iterate over an MRO of length 2 that consists of `first_element` and then `object`.
-    fn length_2(
-        db: &'db dyn Db,
-        program: crate::Program<'db>,
-        first_element: ClassBase<'db>,
-    ) -> Self {
+    fn length_2(db: &'db dyn Db, program: crate::Program, first_element: ClassBase<'db>) -> Self {
         ClassBaseMroIterator::Length2([first_element, ClassBase::object(db, program)].into_iter())
     }
 
     /// Iterate over an MRO of length 3 that consists of `first_element`, then `second_element`, then `object`.
     fn length_3(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         element_1: ClassBase<'db>,
         element_2: ClassBase<'db>,
     ) -> Self {

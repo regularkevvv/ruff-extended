@@ -848,7 +848,7 @@ fn c3_merge(mut sequences: Vec<VecDeque<ClassBase>>) -> Option<Mro> {
 /// the `Generic[]` base. If not, this function will return `None`.
 fn check_generic_reorder_fixes_mro<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     resolved_bases: &[ClassBase<'db>],
     original_bases: &[Type<'db>],
 ) -> Option<usize> {

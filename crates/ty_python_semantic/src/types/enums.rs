@@ -63,7 +63,7 @@ impl KnownEnumDataTypeMixin {
     fn normalize_value<'db>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         value: Type<'db>,
     ) -> Type<'db> {
         if let Type::Union(union) = value {
@@ -169,7 +169,7 @@ impl<'db> EnumValueConstruction<'db> {
     fn normalize_value(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         value: Type<'db>,
     ) -> Option<Type<'db>> {
         match self.data_type {
@@ -193,7 +193,7 @@ impl<'db> EnumValueConstruction<'db> {
     fn alias_detection_value(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         value_ty: Type<'db>,
         is_auto: bool,
     ) -> Option<Type<'db>> {
@@ -407,7 +407,7 @@ impl<'db> EnumClassLiteral<'db> {
     pub(crate) fn name_type(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         name: &Name,
     ) -> Option<Type<'db>> {
         if !self.aliases_are_known(db) {
@@ -490,7 +490,7 @@ fn special_member_for_enum_complement<'db>(
 /// are normalized to the annotated class by constructors such as `int.__new__`.
 fn known_constructor_preserves_value_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     value: Type<'db>,
     annotation: Type<'db>,
 ) -> bool {
@@ -509,7 +509,7 @@ fn known_constructor_preserves_value_type<'db>(
 /// constructor may return an instance of the built-in base.
 fn value_has_exact_known_class<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     value: Type<'db>,
     data_type: KnownClass,
 ) -> bool {
@@ -549,7 +549,7 @@ impl<'db> EnumMetadata<'db> {
     pub(crate) fn value_type(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         member_name: &Name,
     ) -> Option<Type<'db>> {
         if !self.members.contains_key(member_name) {
@@ -579,7 +579,7 @@ impl<'db> EnumMetadata<'db> {
     pub(super) fn concrete_value_type(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         member_name: &Name,
     ) -> Option<Type<'db>> {
         let declared_value = self.members.get(member_name).copied()?;
@@ -621,7 +621,7 @@ impl<'db> EnumMetadata<'db> {
     pub(crate) fn instance_value_type(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
     ) -> Option<Type<'db>> {
         if self.members.is_empty() {
             return None;
@@ -653,7 +653,7 @@ impl<'db> EnumMetadata<'db> {
     pub(crate) fn instance_name_type(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
     ) -> Option<Type<'db>> {
         if self.members.is_empty() {
             return None;
@@ -708,7 +708,7 @@ impl<'db> EnumComplementType<'db> {
     /// Recognize the compact enum-complement shape inside an intersection.
     pub(crate) fn from_intersection_parts(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         positive: &FxOrderSet<Type<'db>>,
         negative: &NegativeIntersectionElements<'db>,
     ) -> Option<Self> {
@@ -1626,7 +1626,7 @@ pub(crate) fn is_enum_class_by_inheritance<'db>(
 /// Returns `Some(value_type)` if the type is a `nonmember[T]`, otherwise `None`.
 pub(crate) fn try_unwrap_nonmember_value<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     ty: Type<'db>,
 ) -> Option<Type<'db>> {
     match ty {

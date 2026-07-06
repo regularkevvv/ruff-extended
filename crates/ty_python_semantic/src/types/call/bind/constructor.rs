@@ -69,7 +69,7 @@ impl<'db> ConstructorBinding<'db> {
     pub(super) fn match_parameters(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         arguments: &CallArguments<'_, 'db>,
     ) {
         self.entry.match_parameters(db, program, arguments);
@@ -87,7 +87,7 @@ impl<'db> ConstructorBinding<'db> {
     pub(super) fn check_types(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         constraints: &ConstraintSetBuilder<'db>,
         argument_types: &CallArguments<'_, 'db>,
         call_expression_tcx: TypeContext<'db>,
@@ -102,7 +102,7 @@ impl<'db> ConstructorBinding<'db> {
         fn should_check_downstream<'db>(
             binding: &ConstructorBinding<'db>,
             db: &'db dyn Db,
-            program: Program<'db>,
+            program: Program,
         ) -> bool {
             let constructor_kind = binding.constructor_kind();
             if constructor_kind.is_init() || binding.downstream_constructor().is_none() {
@@ -148,7 +148,7 @@ impl<'db> ConstructorBinding<'db> {
     pub(super) fn check_downstream_constructor(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         constraints: &ConstraintSetBuilder<'db>,
         argument_types: &CallArguments<'_, 'db>,
         call_expression_tcx: TypeContext<'db>,
@@ -191,7 +191,7 @@ impl<'db> ConstructorBinding<'db> {
     }
 
     /// Compute the overall effective return type of this `ConstructorBinding`.
-    pub(super) fn return_type(&self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    pub(super) fn return_type(&self, db: &'db dyn Db, program: Program) -> Type<'db> {
         let constructed_instance_type = self.constructed_instance_type();
 
         // If we are checking downstream constructors, and the downstream constructor resolves to a
@@ -237,7 +237,7 @@ impl<'db> ConstructorBinding<'db> {
     fn instance_return_specialization(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
     ) -> Option<Specialization<'db>> {
         let constructed_instance_type = self.constructed_instance_type();
         // This will be `None` if we're constructing a non-generic class. If we're constructing a
@@ -356,7 +356,7 @@ impl<'db> ConstructorBinding<'db> {
     ///
     /// This must be called only after downstream constructor bindings have been type-checked,
     /// because instance-returning constructor paths may incorporate downstream specializations.
-    fn explicit_return_type(&self, db: &'db dyn Db, program: Program<'db>) -> Option<Type<'db>> {
+    fn explicit_return_type(&self, db: &'db dyn Db, program: Program) -> Option<Type<'db>> {
         if self.constructor_kind().is_init()
             || self.constructed_class_literal(db, program).is_none()
         {
@@ -383,7 +383,7 @@ impl<'db> ConstructorBinding<'db> {
     fn analyze_overload_returns<'a>(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         overloads: impl IntoIterator<Item = &'a Binding<'db>>,
     ) -> Option<Type<'db>>
     where
@@ -436,7 +436,7 @@ impl<'db> ConstructorBinding<'db> {
     fn single_overload_return(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         overload: &Binding<'db>,
     ) -> (Type<'db>, bool) {
         let return_ty = overload
@@ -478,7 +478,7 @@ impl<'db> ConstructorBinding<'db> {
     fn unspecialize_class_type_variables(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         specialization: Specialization<'db>,
     ) -> Specialization<'db> {
         let Some(class_context) = self
@@ -519,7 +519,7 @@ impl<'db> ConstructorBinding<'db> {
     fn constructed_class_literal(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Option<ClassLiteral<'db>> {
         self.constructed_instance_type()
             .as_nominal_instance()

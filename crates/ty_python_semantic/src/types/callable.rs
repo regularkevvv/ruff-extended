@@ -44,7 +44,7 @@ impl<'db> Type<'db> {
     pub(crate) fn try_upcast_to_callable(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Option<CallableTypes<'db>> {
         self.try_upcast_to_callable_with_policy(db, program, UpcastPolicy::default())
     }
@@ -52,7 +52,7 @@ impl<'db> Type<'db> {
     pub(crate) fn try_upcast_to_callable_with_recursive_fallback(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         recursive_definition: Option<Definition<'db>>,
     ) -> Option<CallableTypes<'db>> {
         self.try_upcast_to_callable_with_policy_and_context(
@@ -68,7 +68,7 @@ impl<'db> Type<'db> {
     pub(crate) fn try_upcast_to_callable_with_policy(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         policy: UpcastPolicy,
     ) -> Option<CallableTypes<'db>> {
         self.try_upcast_to_callable_with_policy_and_context(
@@ -82,7 +82,7 @@ impl<'db> Type<'db> {
     fn try_upcast_to_callable_with_policy_and_context(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         policy: UpcastPolicy,
         context: CallableUpcastContext<'db>,
     ) -> Option<CallableTypes<'db>> {
@@ -445,7 +445,7 @@ pub struct CallableType<'db> {
 
 pub(super) fn walk_callable_type<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     ty: CallableType<'db>,
     visitor: &V,
 ) {
@@ -527,7 +527,7 @@ impl<'db> CallableType<'db> {
     /// Returns the reduced callable produced by partially applying selected overloads.
     pub(crate) fn partially_apply(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         overloads: impl IntoIterator<Item = PartialSignatureApplication<'db>>,
     ) -> Option<Self> {
         Some(Self::new(
@@ -542,7 +542,7 @@ impl<'db> CallableType<'db> {
     pub(crate) fn into_functools_partial_instance(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Type<'db> {
         let return_ty = self
             .signatures(db)
@@ -564,7 +564,7 @@ impl<'db> CallableType<'db> {
     pub(crate) fn bind_self(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         self_type: Option<Type<'db>>,
     ) -> CallableType<'db> {
         CallableType::new(
@@ -578,7 +578,7 @@ impl<'db> CallableType<'db> {
     pub(crate) fn apply_self(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         self_type: Type<'db>,
     ) -> CallableType<'db> {
         CallableType::new(
@@ -605,7 +605,7 @@ impl<'db> CallableType<'db> {
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -621,7 +621,7 @@ impl<'db> CallableType<'db> {
     pub(super) fn apply_type_mapping_impl<'a>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         type_mapping: &TypeMapping<'a, 'db>,
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'db>,
@@ -642,7 +642,7 @@ impl<'db> CallableType<'db> {
     pub(super) fn find_legacy_typevars_impl(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         binding_context: Option<Definition<'db>>,
         typevars: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
         visitor: &FindLegacyTypeVarsVisitor<'db>,
@@ -702,7 +702,7 @@ impl<'db> CallableTypes<'db> {
         self.0.iter()
     }
 
-    pub(crate) fn into_type(self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    pub(crate) fn into_type(self, db: &'db dyn Db, program: Program) -> Type<'db> {
         assert!(!self.0.is_empty(), "CallableTypes should not be empty");
         UnionType::from_elements(db, program, self.0.into_iter().map(Type::Callable))
     }

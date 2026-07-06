@@ -27,7 +27,7 @@ enum ReflectedMethodPriority {
 ///
 /// This is intentionally conservative: a false negative only widens a binary operation's result,
 /// while a false positive could discard a valid normal-method result.
-fn has_exact_runtime_class<'db>(db: &'db dyn Db, program: Program<'db>, ty: Type<'db>) -> bool {
+fn has_exact_runtime_class<'db>(db: &'db dyn Db, program: Program, ty: Type<'db>) -> bool {
     match ty {
         Type::LiteralValue(_) => true,
         Type::NominalInstance(instance) => instance.class(db, program).is_final(db),
@@ -52,7 +52,7 @@ fn has_exact_runtime_class<'db>(db: &'db dyn Db, program: Program<'db>, ty: Type
 /// ```
 fn reflected_method_priority<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     left_ty: Type<'db>,
     right_ty: Type<'db>,
 ) -> ReflectedMethodPriority {
@@ -83,7 +83,7 @@ impl<'db> Type<'db> {
     /// expressions don't re-run overload selection at every call site.
     pub(crate) fn try_call_bin_op_return_type(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         left_ty: Type<'db>,
         op: ast::Operator,
         right_ty: Type<'db>,
@@ -91,7 +91,7 @@ impl<'db> Type<'db> {
         #[salsa::tracked(cycle_initial=|_, _, _, _, _, _| None, heap_size=ruff_memory_usage::heap_size)]
         fn try_call_bin_op_return_type_impl<'db>(
             db: &'db dyn Db,
-            program: Program<'db>,
+            program: Program,
             left_ty: Type<'db>,
             op: ast::Operator,
             right_ty: Type<'db>,
@@ -106,7 +106,7 @@ impl<'db> Type<'db> {
 
     pub(crate) fn try_call_bin_op(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         left_ty: Type<'db>,
         op: ast::Operator,
         right_ty: Type<'db>,
@@ -123,7 +123,7 @@ impl<'db> Type<'db> {
 
     pub(crate) fn try_call_bin_op_with_policy(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         left_ty: Type<'db>,
         op: ast::Operator,
         right_ty: Type<'db>,
@@ -240,7 +240,7 @@ impl<'db> Type<'db> {
 pub(crate) struct CallError<'db>(pub(crate) CallErrorKind, pub(crate) Box<Bindings<'db>>);
 
 impl<'db> CallError<'db> {
-    pub(crate) fn return_type(&self, db: &'db dyn Db, program: crate::Program<'db>) -> Type<'db> {
+    pub(crate) fn return_type(&self, db: &'db dyn Db, program: crate::Program) -> Type<'db> {
         self.1.return_type(db, program)
     }
 
@@ -341,7 +341,7 @@ impl<'db> CallDunderError<'db> {
     pub(super) fn return_type(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Option<Type<'db>> {
         match self {
             Self::MethodNotAvailable | Self::CallError(CallErrorKind::NotCallable, _, _) => None,
@@ -353,7 +353,7 @@ impl<'db> CallDunderError<'db> {
     pub(super) fn fallback_return_type(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
     ) -> Type<'db> {
         self.return_type(db, program).unwrap_or(Type::unknown())
     }

@@ -36,7 +36,7 @@ impl get_size2::GetSize for PEP695TypeAliasType<'_> {}
 
 pub(super) fn walk_pep_695_type_alias<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     type_alias: PEP695TypeAliasType<'db>,
     visitor: &V,
 ) {
@@ -166,7 +166,7 @@ impl get_size2::GetSize for ManualPEP695TypeAliasType<'_> {}
 
 pub(super) fn walk_manual_pep_695_type_alias<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     type_alias: ManualPEP695TypeAliasType<'db>,
     visitor: &V,
 ) {
@@ -216,7 +216,7 @@ pub enum TypeAliasType<'db> {
 
 pub(super) fn walk_type_alias_type<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     type_alias: TypeAliasType<'db>,
     visitor: &V,
 ) {
@@ -234,7 +234,7 @@ pub(super) fn walk_type_alias_type<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
 }
 
 impl<'db> TypeAliasType<'db> {
-    pub(crate) fn program(self, db: &'db dyn Db) -> crate::Program<'db> {
+    pub(crate) fn program(self, db: &'db dyn Db) -> crate::Program {
         match self {
             TypeAliasType::PEP695(type_alias) => type_alias.rhs_scope(db).program(db),
             TypeAliasType::ManualPEP695(type_alias) => {
@@ -336,7 +336,7 @@ impl<'db> VarianceInferable<'db> for TypeAliasType<'db> {
     fn variance_of(
         self,
         db: &'db dyn Db,
-        _program: crate::Program<'db>,
+        _program: crate::Program,
         typevar: BoundTypeVarInstance<'db>,
     ) -> TypeVarVariance {
         type_alias_variance_of(db, self, typevar)

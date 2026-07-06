@@ -674,7 +674,7 @@ impl<'db> ReachabilityConstraintsExtension<'db> for ReachabilityConstraints {
 
 pub(crate) fn narrow_type_by_constraint<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     constraints: &NarrowingConstraints,
     predicates: &IndexSlice<ScopedPredicateId, Predicate<'db>>,
     id: ScopedNarrowingConstraint,
@@ -702,7 +702,7 @@ pub(crate) fn narrow_type_by_constraint<'db>(
 
 fn apply_accumulated_narrowing<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     base_ty: Type<'db>,
     accumulated: Option<NarrowingConstraint<'db>>,
 ) -> Type<'db> {
@@ -1048,7 +1048,7 @@ impl<'a, 'db> NarrowingProjector<'a, 'db> {
 /// Evaluates narrowed types over a projected narrowing graph.
 struct ProjectedNarrowingContext<'a, 'db> {
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     base_ty: Type<'db>,
     graph: &'a ProjectedNarrowingGraph<'db>,
     /// Marks join boundaries in the projected DAG.
@@ -1135,7 +1135,7 @@ impl<'db> ProjectedNarrowingContext<'_, 'db> {
 
 fn analyze_single_pattern_predicate_kind<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     predicate_kind: &PatternPredicateKind<'db>,
     subject_ty: Type<'db>,
     precomputed_definite_match_ty: Option<Type<'db>>,

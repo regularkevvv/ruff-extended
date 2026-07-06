@@ -22,7 +22,7 @@ pub struct ScopeId<'db> {
 impl get_size2::GetSize for ScopeId<'_> {}
 
 impl<'db> ScopeId<'db> {
-    pub fn program(self, db: &'db dyn Db) -> Program<'db> {
+    pub fn program(self, db: &'db dyn Db) -> Program {
         self.analysis_file(db).program(db)
     }
 

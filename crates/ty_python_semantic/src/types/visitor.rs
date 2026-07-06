@@ -35,16 +35,16 @@ pub(crate) trait TypeVisitor<'db> {
     /// Should the visitor trigger inference of and visit lazily-inferred type attributes?
     fn should_visit_lazy_type_attributes(&self) -> bool;
 
-    fn visit_type(&self, db: &'db dyn Db, program: Program<'db>, ty: Type<'db>);
+    fn visit_type(&self, db: &'db dyn Db, program: Program, ty: Type<'db>);
 
-    fn visit_union_type(&self, db: &'db dyn Db, program: Program<'db>, union: UnionType<'db>) {
+    fn visit_union_type(&self, db: &'db dyn Db, program: Program, union: UnionType<'db>) {
         walk_union(db, program, union, self);
     }
 
     fn visit_intersection_type(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         intersection: IntersectionType<'db>,
     ) {
         walk_intersection_type(db, program, intersection, self);
@@ -53,7 +53,7 @@ pub(crate) trait TypeVisitor<'db> {
     fn visit_enum_complement_type(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         complement: EnumComplementType<'db>,
     ) {
         for rest in complement.rest(db) {
@@ -61,50 +61,35 @@ pub(crate) trait TypeVisitor<'db> {
         }
     }
 
-    fn visit_callable_type(
-        &self,
-        db: &'db dyn Db,
-        program: Program<'db>,
-        callable: CallableType<'db>,
-    ) {
+    fn visit_callable_type(&self, db: &'db dyn Db, program: Program, callable: CallableType<'db>) {
         walk_callable_type(db, program, callable, self);
     }
 
     fn visit_property_instance_type(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         property: PropertyInstanceType<'db>,
     ) {
         walk_property_instance_type(db, program, property, self);
     }
 
-    fn visit_typeis_type(&self, db: &'db dyn Db, program: Program<'db>, type_is: TypeIsType<'db>) {
+    fn visit_typeis_type(&self, db: &'db dyn Db, program: Program, type_is: TypeIsType<'db>) {
         walk_typeis_type(db, program, type_is, self);
     }
 
-    fn visit_typeguard_type(
-        &self,
-        db: &'db dyn Db,
-        program: Program<'db>,
-        type_is: TypeGuardType<'db>,
-    ) {
+    fn visit_typeguard_type(&self, db: &'db dyn Db, program: Program, type_is: TypeGuardType<'db>) {
         walk_typeguard_type(db, program, type_is, self);
     }
 
-    fn visit_typeform_type(
-        &self,
-        db: &'db dyn Db,
-        program: Program<'db>,
-        typeform: TypeFormType<'db>,
-    ) {
+    fn visit_typeform_type(&self, db: &'db dyn Db, program: Program, typeform: TypeFormType<'db>) {
         walk_typeform_type(db, program, typeform, self);
     }
 
     fn visit_subclass_of_type(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         subclass_of: SubclassOfType<'db>,
     ) {
         walk_subclass_of_type(db, program, subclass_of, self);
@@ -113,25 +98,20 @@ pub(crate) trait TypeVisitor<'db> {
     fn visit_generic_alias_type(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         alias: GenericAlias<'db>,
     ) {
         walk_generic_alias(db, program, alias, self);
     }
 
-    fn visit_function_type(
-        &self,
-        db: &'db dyn Db,
-        program: Program<'db>,
-        function: FunctionType<'db>,
-    ) {
+    fn visit_function_type(&self, db: &'db dyn Db, program: Program, function: FunctionType<'db>) {
         walk_function_type(db, program, function, self);
     }
 
     fn visit_bound_method_type(
         &self,
         db: &'db dyn Db,
-        _program: Program<'db>,
+        _program: Program,
         method: BoundMethodType<'db>,
     ) {
         walk_bound_method_type(db, method, self);
@@ -140,7 +120,7 @@ pub(crate) trait TypeVisitor<'db> {
     fn visit_bound_super_type(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         bound_super: BoundSuperType<'db>,
     ) {
         walk_bound_super_type(db, program, bound_super, self);
@@ -149,7 +129,7 @@ pub(crate) trait TypeVisitor<'db> {
     fn visit_nominal_instance_type(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         nominal: NominalInstanceType<'db>,
     ) {
         walk_nominal_instance_type(db, program, nominal, self);
@@ -158,7 +138,7 @@ pub(crate) trait TypeVisitor<'db> {
     fn visit_bound_type_var_type(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         bound_typevar: BoundTypeVarInstance<'db>,
     ) {
         walk_bound_type_var_type(db, program, bound_typevar, self);
@@ -167,7 +147,7 @@ pub(crate) trait TypeVisitor<'db> {
     fn visit_type_var_type(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         typevar: TypeVarInstance<'db>,
     ) {
         walk_type_var_type(db, program, typevar, self);
@@ -176,7 +156,7 @@ pub(crate) trait TypeVisitor<'db> {
     fn visit_protocol_instance_type(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         protocol: ProtocolInstanceType<'db>,
     ) {
         walk_protocol_instance_type(db, program, protocol, self);
@@ -185,7 +165,7 @@ pub(crate) trait TypeVisitor<'db> {
     fn visit_method_wrapper_type(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         method_wrapper: KnownBoundMethodType<'db>,
     ) {
         walk_method_wrapper_type(db, program, method_wrapper, self);
@@ -194,7 +174,7 @@ pub(crate) trait TypeVisitor<'db> {
     fn visit_known_instance_type(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         known_instance: KnownInstanceType<'db>,
     ) {
         walk_known_instance_type(db, program, known_instance, self);
@@ -203,7 +183,7 @@ pub(crate) trait TypeVisitor<'db> {
     fn visit_type_alias_type(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         type_alias: TypeAliasType<'db>,
     ) {
         walk_type_alias_type(db, program, type_alias, self);
@@ -212,7 +192,7 @@ pub(crate) trait TypeVisitor<'db> {
     fn visit_typed_dict_type(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         typed_dict: TypedDictType<'db>,
     ) {
         walk_typed_dict_type(db, program, typed_dict, self);
@@ -221,7 +201,7 @@ pub(crate) trait TypeVisitor<'db> {
     fn visit_newtype_instance_type(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         newtype: NewType<'db>,
     ) {
         walk_newtype_instance_type(db, program, newtype, self);
@@ -331,7 +311,7 @@ impl<'db> From<Type<'db>> for TypeKind<'db> {
 
 pub(super) fn walk_non_atomic_type<'db, V: TypeVisitor<'db> + ?Sized>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     non_atomic_type: NonAtomicType<'db>,
     visitor: &V,
 ) {
@@ -392,7 +372,7 @@ pub(super) fn walk_non_atomic_type<'db, V: TypeVisitor<'db> + ?Sized>(
 
 pub(crate) fn walk_type_with_recursion_guard<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     ty: Type<'db>,
     visitor: &impl TypeVisitor<'db>,
     recursion_guard: &TypeCollector<'db>,
@@ -421,7 +401,7 @@ impl<'db> TypeCollector<'db> {
 /// Implementation for `any_over_type` and `find_over_type`.
 fn any_over_type_impl<'db, F, T>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     ty: Type<'db>,
     should_visit_lazy_type_attributes: bool,
     query: F,
@@ -445,7 +425,7 @@ where
             self.should_visit_lazy_type_attributes
         }
 
-        fn visit_type(&self, db: &'db dyn Db, program: Program<'db>, ty: Type<'db>) {
+        fn visit_type(&self, db: &'db dyn Db, program: Program, ty: Type<'db>) {
             let default_value = U::default();
             let pre_existing = self.found_matching_type.get();
             if pre_existing != default_value {
@@ -480,7 +460,7 @@ where
 /// are visited or not.
 pub(super) fn any_over_type<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     ty: Type<'db>,
     should_visit_lazy_type_attributes: bool,
     query: impl Fn(Type<'db>) -> bool,
@@ -503,7 +483,7 @@ pub(super) fn any_over_type<'db>(
 /// are visited or not.
 pub(super) fn find_over_type<'db, T>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     ty: Type<'db>,
     should_visit_lazy_type_attributes: bool,
     query: impl Fn(Type<'db>) -> Option<T>,

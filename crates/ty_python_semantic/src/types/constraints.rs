@@ -170,7 +170,7 @@ pub(crate) trait IteratorConstraintsExtension<T> {
     fn when_any<'db, 'c>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &'c ConstraintSetBuilder<'db>,
         f: impl FnMut(T) -> ConstraintSet<'db, 'c>,
     ) -> ConstraintSet<'db, 'c>;
@@ -183,7 +183,7 @@ pub(crate) trait IteratorConstraintsExtension<T> {
     fn when_all<'db, 'c>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &'c ConstraintSetBuilder<'db>,
         f: impl FnMut(T) -> ConstraintSet<'db, 'c>,
     ) -> ConstraintSet<'db, 'c>;
@@ -196,7 +196,7 @@ where
     fn when_any<'db, 'c>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &'c ConstraintSetBuilder<'db>,
         mut f: impl FnMut(T) -> ConstraintSet<'db, 'c>,
     ) -> ConstraintSet<'db, 'c> {
@@ -216,7 +216,7 @@ where
     fn when_all<'db, 'c>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &'c ConstraintSetBuilder<'db>,
         mut f: impl FnMut(T) -> ConstraintSet<'db, 'c>,
     ) -> ConstraintSet<'db, 'c> {
@@ -370,7 +370,7 @@ impl<'db, 'c> ConstraintSet<'db, 'c> {
     /// Returns a constraint set that constrains a typevar to an explicit range of types.
     pub(crate) fn constrain_typevar(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &'c ConstraintSetBuilder<'db>,
         typevar: BoundTypeVarInstance<'db>,
         lower: Type<'db>,
@@ -382,7 +382,7 @@ impl<'db, 'c> ConstraintSet<'db, 'c> {
     /// Returns a constraint set that constrains a typevar with explicit lower and/or upper bounds.
     pub(crate) fn constrain_typevar_with_bounds(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &'c ConstraintSetBuilder<'db>,
         typevar: BoundTypeVarInstance<'db>,
         lower: Option<Type<'db>>,
@@ -397,7 +397,7 @@ impl<'db, 'c> ConstraintSet<'db, 'c> {
     /// Returns a constraint set that constrains a typevar to be a supertype of `lower`.
     pub(crate) fn constrain_typevar_lower_bound(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &'c ConstraintSetBuilder<'db>,
         typevar: BoundTypeVarInstance<'db>,
         lower: Type<'db>,
@@ -408,7 +408,7 @@ impl<'db, 'c> ConstraintSet<'db, 'c> {
     /// Returns a constraint set that constrains a typevar to be a subtype of `upper`.
     pub(crate) fn constrain_typevar_upper_bound(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &'c ConstraintSetBuilder<'db>,
         typevar: BoundTypeVarInstance<'db>,
         upper: Type<'db>,
@@ -423,12 +423,12 @@ impl<'db, 'c> ConstraintSet<'db, 'c> {
     }
 
     /// Returns whether this constraint set never holds
-    pub(crate) fn is_never_satisfied(self, db: &'db dyn Db, program: crate::Program<'db>) -> bool {
+    pub(crate) fn is_never_satisfied(self, db: &'db dyn Db, program: crate::Program) -> bool {
         self.node.is_never_satisfied(db, program, self.builder)
     }
 
     /// Returns whether this constraint set always holds
-    pub(crate) fn is_always_satisfied(self, db: &'db dyn Db, program: crate::Program<'db>) -> bool {
+    pub(crate) fn is_always_satisfied(self, db: &'db dyn Db, program: crate::Program) -> bool {
         self.node.is_always_satisfied(db, program, self.builder)
     }
 
@@ -438,7 +438,7 @@ impl<'db, 'c> ConstraintSet<'db, 'c> {
     pub(crate) fn implies_subtype_of(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &'c ConstraintSetBuilder<'db>,
         lhs: Type<'db>,
         rhs: Type<'db>,
@@ -467,7 +467,7 @@ impl<'db, 'c> ConstraintSet<'db, 'c> {
     pub(crate) fn satisfied_by_all_typevars(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &'c ConstraintSetBuilder<'db>,
         inferable: InferableTypeVars<'db>,
     ) -> bool {
@@ -521,7 +521,7 @@ impl<'db, 'c> ConstraintSet<'db, 'c> {
     pub(crate) fn and(
         mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &'c ConstraintSetBuilder<'db>,
         other: impl FnOnce() -> Self,
     ) -> Self {
@@ -543,7 +543,7 @@ impl<'db, 'c> ConstraintSet<'db, 'c> {
     pub(crate) fn or(
         mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &'c ConstraintSetBuilder<'db>,
         other: impl FnOnce() -> Self,
     ) -> Self {
@@ -563,7 +563,7 @@ impl<'db, 'c> ConstraintSet<'db, 'c> {
     pub(crate) fn implies(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &'c ConstraintSetBuilder<'db>,
         other: impl FnOnce() -> Self,
     ) -> Self {
@@ -592,7 +592,7 @@ impl<'db, 'c> ConstraintSet<'db, 'c> {
     pub(crate) fn reduce_inferable(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &'c ConstraintSetBuilder<'db>,
         to_remove: impl IntoIterator<Item = BoundTypeVarIdentity<'db>>,
     ) -> Self {
@@ -603,7 +603,7 @@ impl<'db, 'c> ConstraintSet<'db, 'c> {
     pub(crate) fn remove_noninferable(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &'c ConstraintSetBuilder<'db>,
         inferable: InferableTypeVars<'db>,
     ) -> Self {
@@ -634,7 +634,7 @@ impl<'db, 'c> ConstraintSet<'db, 'c> {
     pub(crate) fn solutions(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &'c ConstraintSetBuilder<'db>,
     ) -> Solutions<'db> {
         self.solutions_with(db, program, builder, |_variance, path_bound| {
@@ -645,7 +645,7 @@ impl<'db, 'c> ConstraintSet<'db, 'c> {
     pub(crate) fn solutions_with(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &'c ConstraintSetBuilder<'db>,
         choose: impl FnMut(TypeVarVariance, &PathBound<'db>) -> Result<Option<Type<'db>>, ()>,
     ) -> Solutions<'db> {
@@ -653,7 +653,7 @@ impl<'db, 'c> ConstraintSet<'db, 'c> {
         self.node.solutions_with(db, program, builder, choose)
     }
 
-    pub(crate) fn display(self, db: &'db dyn Db, program: Program<'db>) -> impl Display {
+    pub(crate) fn display(self, db: &'db dyn Db, program: Program) -> impl Display {
         self.node
             .simplify_for_display(db, program, self.builder)
             .display(db, program, self.builder)
@@ -663,7 +663,7 @@ impl<'db, 'c> ConstraintSet<'db, 'c> {
     pub(crate) fn display_graph<'a>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         prefix: &'a dyn Display,
     ) -> impl Display + 'a
     where
@@ -890,7 +890,7 @@ impl<'db> ConstraintSetBuilder<'db> {
     pub(crate) fn load<'c>(
         &'c self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         other: &OwnedConstraintSet<'db>,
     ) -> ConstraintSet<'db, 'c> {
         fn rebuild_node<'db>(
@@ -978,12 +978,7 @@ impl<'db> ConstraintSetBuilder<'db> {
     }
 
     /// Interns all of the typevars mentioned in a type in a stable order.
-    fn intern_mentioned_typevars_in_type(
-        &self,
-        db: &'db dyn Db,
-        program: Program<'db>,
-        ty: Type<'db>,
-    ) {
+    fn intern_mentioned_typevars_in_type(&self, db: &'db dyn Db, program: Program, ty: Type<'db>) {
         struct InternMentionedTypevars<'a, 'db> {
             builder: &'a ConstraintSetBuilder<'db>,
             recursion_guard: TypeCollector<'db>,
@@ -997,7 +992,7 @@ impl<'db> ConstraintSetBuilder<'db> {
             fn visit_bound_type_var_type(
                 &self,
                 db: &'db dyn Db,
-                program: Program<'db>,
+                program: Program,
                 bound_typevar: BoundTypeVarInstance<'db>,
             ) {
                 self.builder.intern_typevar(db, bound_typevar);
@@ -1007,7 +1002,7 @@ impl<'db> ConstraintSetBuilder<'db> {
             fn visit_generic_alias_type(
                 &self,
                 db: &'db dyn Db,
-                program: Program<'db>,
+                program: Program,
                 alias: GenericAlias<'db>,
             ) {
                 for ty in alias.specialization(db).types(db) {
@@ -1015,7 +1010,7 @@ impl<'db> ConstraintSetBuilder<'db> {
                 }
             }
 
-            fn visit_type(&self, db: &'db dyn Db, program: Program<'db>, ty: Type<'db>) {
+            fn visit_type(&self, db: &'db dyn Db, program: Program, ty: Type<'db>) {
                 walk_type_with_recursion_guard(db, program, ty, self, &self.recursion_guard);
             }
         }
@@ -1031,7 +1026,7 @@ impl<'db> ConstraintSetBuilder<'db> {
     fn intern_constraint_typevars(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         typevar: BoundTypeVarInstance<'db>,
         bounds: ConstraintBounds<'db>,
     ) {
@@ -1047,7 +1042,7 @@ impl<'db> ConstraintSetBuilder<'db> {
     fn intern_constraint(
         &self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         data: Constraint<'db>,
     ) -> ConstraintId {
         self.intern_constraint_typevars(db, program, data.typevar, data.bounds);
@@ -1103,7 +1098,7 @@ impl<'db> ConstraintSetBuilder<'db> {
     fn cached_constraint_implies(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         ante: ConstraintId,
         post: ConstraintId,
     ) -> bool {
@@ -1123,7 +1118,7 @@ impl<'db> ConstraintSetBuilder<'db> {
     fn cached_is_constraint_set_subtype_of(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         source: Type<'db>,
         target: Type<'db>,
     ) -> bool {
@@ -1330,7 +1325,7 @@ impl<'db> UpperBound<'db> {
     #[cfg(test)]
     pub(crate) fn from_clauses(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         clauses: impl IntoIterator<Item = Type<'db>>,
     ) -> Self {
         let mut upper = Self::none();
@@ -1352,7 +1347,7 @@ impl<'db> UpperBound<'db> {
         self.clauses.len() == 1 && self.clauses.contains(&Type::Never)
     }
 
-    pub(crate) fn add_clause(&mut self, db: &'db dyn Db, program: Program<'db>, clause: Type<'db>) {
+    pub(crate) fn add_clause(&mut self, db: &'db dyn Db, program: Program, clause: Type<'db>) {
         // This `Never` fast path is an optimization. The general redundancy-pruning loop below
         // should also handle it correctly, but spelling it out avoids unnecessary relation checks
         // and keeps the stored representation canonical.
@@ -1396,7 +1391,7 @@ impl<'db> UpperBound<'db> {
     /// Exact conversion to an ordinary [`Type`]. This may be expensive: if any stored clause is a
     /// union, [`IntersectionType::from_elements`] converts this factored CNF representation into
     /// ty's ordinary DNF representation by distributing intersections over unions.
-    pub(crate) fn materialize_exact(&self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
+    pub(crate) fn materialize_exact(&self, db: &'db dyn Db, program: Program) -> Type<'db> {
         IntersectionType::from_elements(db, program, self.clauses.iter().copied())
     }
 
@@ -1404,12 +1399,7 @@ impl<'db> UpperBound<'db> {
         self.clauses.iter().copied().any(Type::is_union)
     }
 
-    pub(crate) fn is_satisfied_by(
-        &self,
-        db: &'db dyn Db,
-        program: Program<'db>,
-        ty: Type<'db>,
-    ) -> bool {
+    pub(crate) fn is_satisfied_by(&self, db: &'db dyn Db, program: Program, ty: Type<'db>) -> bool {
         self.clauses
             .iter()
             .all(|clause| ty.is_constraint_set_assignable_to(db, program, *clause))
@@ -1419,7 +1409,7 @@ impl<'db> UpperBound<'db> {
     fn when_satisfied_by<'c>(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &'c ConstraintSetBuilder<'db>,
         lower: Type<'db>,
     ) -> ConstraintSet<'db, 'c> {
@@ -1436,7 +1426,7 @@ impl<'db> UpperBound<'db> {
 impl ConstraintId {
     fn new<'db>(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         typevar: BoundTypeVarInstance<'db>,
         lower: Type<'db>,
@@ -1447,7 +1437,7 @@ impl ConstraintId {
 
     fn new_with_bounds<'db>(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         typevar: BoundTypeVarInstance<'db>,
         lower: Option<Type<'db>>,
@@ -1470,7 +1460,7 @@ impl<'db> Constraint<'db> {
     /// Panics if `lower` and `upper` are not both fully static.
     fn new_node(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         typevar: BoundTypeVarInstance<'db>,
         lower: Type<'db>,
@@ -1484,7 +1474,7 @@ impl<'db> Constraint<'db> {
     /// Panics if present `lower` and `upper` bounds are not fully static.
     fn new_node_with_bounds(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         typevar: BoundTypeVarInstance<'db>,
         mut lower: Option<Type<'db>>,
@@ -1787,7 +1777,7 @@ impl ConstraintId {
     fn implies<'db>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         other: Self,
     ) -> bool {
@@ -1821,7 +1811,7 @@ impl ConstraintId {
     fn intersect<'db>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         other: Self,
     ) -> IntersectionResult<'db> {
@@ -1879,7 +1869,7 @@ impl ConstraintId {
     pub(crate) fn display<'db>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
     ) -> impl Display {
         self.when_true().display(db, program, builder)
@@ -2177,7 +2167,7 @@ impl NodeId {
     fn simple_lower_bound_conjunction<'db, 'c>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &'c ConstraintSetBuilder<'db>,
     ) -> impl Iterator<Item = Result<SimpleLowerBound<'db>, ()>> + use<'db, 'c> {
         let mut node = Some(self);
@@ -2214,7 +2204,7 @@ impl NodeId {
     fn for_each_path<'db>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         mut f: impl FnMut(&PathAssignments),
     ) {
@@ -2231,7 +2221,7 @@ impl NodeId {
     fn for_each_path_inner<'db>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &ConstraintSetBuilder<'db>,
         f: &mut dyn FnMut(&PathAssignments),
         path: &mut PathAssignments,
@@ -2285,7 +2275,7 @@ impl NodeId {
     fn is_always_satisfied<'db>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &ConstraintSetBuilder<'db>,
     ) -> bool {
         match self.node() {
@@ -2301,7 +2291,7 @@ impl NodeId {
     fn is_always_satisfied_inner<'db>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &ConstraintSetBuilder<'db>,
         path: &mut PathAssignments,
     ) -> bool {
@@ -2358,7 +2348,7 @@ impl NodeId {
     fn is_never_satisfied<'db>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &ConstraintSetBuilder<'db>,
     ) -> bool {
         match self.node() {
@@ -2384,7 +2374,7 @@ impl NodeId {
     fn is_never_satisfied_inner<'db>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &ConstraintSetBuilder<'db>,
         path: &mut PathAssignments,
     ) -> bool {
@@ -2458,7 +2448,7 @@ impl NodeId {
     fn solutions_with<'db>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &ConstraintSetBuilder<'db>,
         choose: impl FnMut(TypeVarVariance, &PathBound<'db>) -> Result<Option<Type<'db>>, ()>,
     ) -> Solutions<'db> {
@@ -2618,7 +2608,7 @@ impl NodeId {
 
     fn distributed_or<'db>(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &ConstraintSetBuilder<'db>,
         nodes: impl Iterator<Item = NodeId>,
     ) -> Self {
@@ -2634,7 +2624,7 @@ impl NodeId {
 
     fn distributed_and<'db>(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &ConstraintSetBuilder<'db>,
         nodes: impl Iterator<Item = NodeId>,
     ) -> Self {
@@ -2799,7 +2789,7 @@ impl NodeId {
     fn implies_subtype_of<'db>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &ConstraintSetBuilder<'db>,
         lhs: Type<'db>,
         rhs: Type<'db>,
@@ -2838,7 +2828,7 @@ impl NodeId {
     fn satisfied_by_all_typevars<'db>(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &ConstraintSetBuilder<'db>,
         inferable: InferableTypeVars<'db>,
     ) -> bool {
@@ -2918,7 +2908,7 @@ impl NodeId {
     fn exists<'db>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         bound_typevars: impl IntoIterator<Item = BoundTypeVarIdentity<'db>>,
     ) -> Self {
@@ -2932,7 +2922,7 @@ impl NodeId {
     fn exists_one<'db>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         bound_typevar: BoundTypeVarIdentity<'db>,
     ) -> Self {
@@ -2946,7 +2936,7 @@ impl NodeId {
     fn remove_noninferable<'db>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         inferable: InferableTypeVars<'db>,
     ) -> Self {
@@ -2962,7 +2952,7 @@ impl NodeId {
     fn abstract_one_inner<'db>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         should_remove: &mut dyn FnMut(ConstraintId) -> bool,
         path: &mut PathAssignments,
@@ -3188,7 +3178,7 @@ impl NodeId {
     fn simplify_for_display<'db>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
     ) -> Self {
         match self.node() {
@@ -3238,7 +3228,7 @@ impl NodeId {
     fn display<'db>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
     ) -> impl Display {
         // To render a BDD in DNF form, you perform a depth-first search of the BDD tree, looking
@@ -3249,7 +3239,7 @@ impl NodeId {
         struct DisplayNode<'db, 'c> {
             node: NodeId,
             db: &'db dyn Db,
-            program: Program<'db>,
+            program: Program,
             builder: &'c ConstraintSetBuilder<'db>,
         }
 
@@ -3296,13 +3286,13 @@ impl NodeId {
     fn display_graph<'db, 'a>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &'a ConstraintSetBuilder<'db>,
         prefix: &'a dyn Display,
     ) -> impl Display + 'a {
         struct DisplayNode<'a, 'db> {
             db: &'db dyn Db,
-            program: Program<'db>,
+            program: Program,
             builder: &'a ConstraintSetBuilder<'db>,
             node: NodeId,
             prefix: &'a dyn Display,
@@ -3311,7 +3301,7 @@ impl NodeId {
 
         fn format_node<'db>(
             db: &'db dyn Db,
-            program: Program<'db>,
+            program: Program,
             builder: &ConstraintSetBuilder<'db>,
             node: NodeId,
             prefix: &dyn Display,
@@ -3476,14 +3466,14 @@ impl<'db> ConstraintBoundsBuilder<'db> {
         self.lower.insert(ty);
     }
 
-    fn add_upper(&mut self, db: &'db dyn Db, program: Program<'db>, ty: Type<'db>) {
+    fn add_upper(&mut self, db: &'db dyn Db, program: Program, ty: Type<'db>) {
         self.upper.add_clause(db, program, ty);
     }
 
     fn finish(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         bound_typevar: BoundTypeVarInstance<'db>,
     ) -> PathBound<'db> {
         let Self { lower, mut upper } = self;
@@ -3538,7 +3528,7 @@ impl<'db> Type<'db> {
     pub(crate) fn assignable_solutions_with_inferable(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         target: Type<'db>,
         inferable: InferableTypeVars<'db>,
     ) -> &'db PathBounds<'db> {
@@ -3549,7 +3539,7 @@ impl<'db> Type<'db> {
         )]
         fn assignable_solutions_impl<'db>(
             db: &'db dyn Db,
-            program: Program<'db>,
+            program: Program,
             source: Type<'db>,
             target: Type<'db>,
             inferable: InferableTypeVars<'db>,
@@ -3571,7 +3561,7 @@ impl<'db> Type<'db> {
 )]
 fn is_possibly_constraint_set_assignable<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    program: Program,
     source: Type<'db>,
     target: Type<'db>,
 ) -> bool {
@@ -3595,7 +3585,7 @@ impl<'db> PathBounds<'db> {
     /// typevar that appears in the path's constraints.
     fn compute(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         node: NodeId,
     ) -> Self {
@@ -3677,7 +3667,7 @@ impl<'db> PathBounds<'db> {
     /// declared bound or constraints.
     fn compute_simple_lower_bound_conjunction(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         node: NodeId,
     ) -> Option<Self> {
@@ -3703,7 +3693,7 @@ impl<'db> PathBounds<'db> {
     pub(crate) fn solve(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
     ) -> Solutions<'db> {
         self.solve_with(|_variance, path_bound| {
@@ -3762,7 +3752,7 @@ impl<'db> PathBounds<'db> {
     /// - `Err(())` if the path is invalid (bounds violate the typevar's declared constraints)
     pub(crate) fn default_solve(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         path_bound: &PathBound<'db>,
     ) -> Result<Option<Type<'db>>, ()> {
@@ -4062,7 +4052,7 @@ impl InteriorNode {
     fn exists_one<'db>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         bound_typevar: BoundTypeVarIdentity<'db>,
     ) -> NodeId {
@@ -4115,7 +4105,7 @@ impl InteriorNode {
     fn remove_noninferable<'db>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         inferable: InferableTypeVars<'db>,
     ) -> NodeId {
@@ -4156,7 +4146,7 @@ impl InteriorNode {
     fn abstract_one_inner<'db>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         should_remove: &mut dyn FnMut(ConstraintId) -> bool,
         path: &mut PathAssignments,
@@ -4452,7 +4442,7 @@ impl InteriorNode {
     fn simplify<'db>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
     ) -> NodeId {
         let key = self.node();
@@ -4965,7 +4955,7 @@ impl ConstraintAssignment {
     fn implies<'db>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         other: Self,
     ) -> bool {
@@ -5028,13 +5018,13 @@ impl ConstraintAssignment {
     fn display<'db>(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
     ) -> impl Display {
         struct DisplayConstraintAssignment<'db, 'c> {
             assignment: ConstraintAssignment,
             db: &'db dyn Db,
-            program: Program<'db>,
+            program: Program,
             builder: &'c ConstraintSetBuilder<'db>,
         }
 
@@ -5169,7 +5159,7 @@ impl SequentMap {
     /// constraint.
     fn for_constraint<'db, 'c>(
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &'c ConstraintSetBuilder<'db>,
         constraint: ConstraintId,
     ) -> Ref<'c, Self> {
@@ -5204,7 +5194,7 @@ impl SequentMap {
     /// that retain that ordering.)
     fn for_constraint_pair<'db, 'c>(
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &'c ConstraintSetBuilder<'db>,
         left: ConstraintId,
         right: ConstraintId,
@@ -5262,7 +5252,7 @@ impl SequentMap {
     fn add_single_tautology<'db>(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         ante: ConstraintId,
     ) {
@@ -5278,7 +5268,7 @@ impl SequentMap {
     fn add_pair_impossibility<'db>(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         ante1: ConstraintId,
         ante2: ConstraintId,
@@ -5302,7 +5292,7 @@ impl SequentMap {
     fn add_pair_implication<'db>(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         ante1: ConstraintId,
         ante2: ConstraintId,
@@ -5315,7 +5305,7 @@ impl SequentMap {
     fn add_pair_implication_with_provenance<'db>(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         ante1: ConstraintId,
         ante2: ConstraintId,
@@ -5368,7 +5358,7 @@ impl SequentMap {
     fn add_single_implication<'db>(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         ante: ConstraintId,
         post: ConstraintId,
@@ -5397,7 +5387,7 @@ impl SequentMap {
     fn add_sequents_for_single<'db>(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         constraint: ConstraintId,
     ) {
@@ -5539,7 +5529,7 @@ impl SequentMap {
     fn add_sequents_for_pair<'db>(
         &mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &ConstraintSetBuilder<'db>,
         left_constraint: ConstraintId,
         right_constraint: ConstraintId,
@@ -5617,7 +5607,7 @@ impl SequentMap {
     fn add_mutual_sequents_for_different_typevars<'db>(
         &mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &ConstraintSetBuilder<'db>,
         left_constraint: ConstraintId,
         right_constraint: ConstraintId,
@@ -5803,7 +5793,7 @@ impl SequentMap {
     fn add_nested_typevar_sequents<'db>(
         &mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &ConstraintSetBuilder<'db>,
         left_constraint: ConstraintId,
         right_constraint: ConstraintId,
@@ -6177,7 +6167,7 @@ impl SequentMap {
     fn add_mutual_sequents_for_same_typevars<'db>(
         &mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &ConstraintSetBuilder<'db>,
         left_constraint: ConstraintId,
         right_constraint: ConstraintId,
@@ -6294,7 +6284,7 @@ impl SequentMap {
     fn add_concrete_sequents<'db>(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
         left_constraint: ConstraintId,
         right_constraint: ConstraintId,
@@ -6385,7 +6375,7 @@ impl SequentMap {
     fn display<'db, 'a>(
         &'a self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &'a ConstraintSetBuilder<'db>,
         prefix: &'a dyn Display,
     ) -> impl Display + 'a {
@@ -6393,7 +6383,7 @@ impl SequentMap {
             map: &'a SequentMap,
             prefix: &'a dyn Display,
             db: &'db dyn Db,
-            program: Program<'db>,
+            program: Program,
             builder: &'a ConstraintSetBuilder<'db>,
         }
 
@@ -6518,7 +6508,7 @@ impl PathAssignments {
     fn walk_edge<'db, R>(
         &mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &ConstraintSetBuilder<'db>,
         assignment: ConstraintAssignment,
         source_order: usize,
@@ -6603,7 +6593,7 @@ impl PathAssignments {
     fn discover_constraint<'db>(
         &mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &ConstraintSetBuilder<'db>,
         constraint: ConstraintId,
     ) {
@@ -6631,7 +6621,7 @@ impl PathAssignments {
     fn add_assignment<'db>(
         &mut self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &ConstraintSetBuilder<'db>,
         assignment: ConstraintAssignment,
         source_order: usize,
@@ -6843,7 +6833,7 @@ impl SatisfiedClause {
     fn simplify<'db>(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
     ) -> bool {
         let mut changes_made = false;
@@ -6880,7 +6870,7 @@ impl SatisfiedClause {
     fn display<'db>(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
     ) -> String {
         if self.constraints.is_empty() {
@@ -6932,7 +6922,7 @@ impl SatisfiedClauses {
     fn simplify<'db>(
         &mut self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
     ) {
         // First simplify each clause individually, by removing constraints that are implied by
@@ -7013,7 +7003,7 @@ impl SatisfiedClauses {
     fn display<'db>(
         &self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        program: Program,
         builder: &ConstraintSetBuilder<'db>,
     ) -> String {
         // This is a bit heavy-handed, but we need to output the clauses in a consistent order
@@ -7040,7 +7030,7 @@ impl<'db> BoundTypeVarInstance<'db> {
     fn valid_specializations(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &ConstraintSetBuilder<'db>,
     ) -> NodeId {
         if self.paramspec_attr(db).is_some() {
@@ -7102,7 +7092,7 @@ impl<'db> BoundTypeVarInstance<'db> {
     fn required_specializations(
         self,
         db: &'db dyn Db,
-        program: crate::Program<'db>,
+        program: crate::Program,
         builder: &ConstraintSetBuilder<'db>,
     ) -> (NodeId, Vec<NodeId>) {
         // For upper bounds and constraints, we are free to choose any materialization that makes

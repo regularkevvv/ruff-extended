@@ -18,7 +18,7 @@ const MAX_TUPLE_EXPANSION: usize = 64;
 /// Returns [`None`] if the type cannot be expanded.
 pub(crate) fn expand_type<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    program: crate::Program,
     ty: Type<'db>,
 ) -> Option<Vec<Type<'db>>> {
     match ty {
