@@ -761,22 +761,13 @@ pub(super) fn walk_protocol_instance_type<'db, V: super::visitor::TypeVisitor<'d
     protocol: ProtocolInstanceType<'db>,
     visitor: &V,
 ) {
-    if visitor.should_visit_lazy_type_attributes() {
-        walk_protocol_interface(db, protocol.inner.interface(db), visitor);
-    } else {
-        match protocol.inner {
-            Protocol::FromClass(class) => {
-                if let Some((_, Some(specialization))) = class.static_class_literal(db) {
-                    walk_specialization(db, specialization, visitor);
-                }
-            }
-            Protocol::Materialized(materialized) => {
-                walk_protocol_interface(db, materialized.interface(db), visitor);
-            }
-            Protocol::Synthesized(synthesized) => {
-                walk_protocol_interface(db, synthesized.interface(db), visitor);
+    match protocol.inner {
+        Protocol::FromClass(class) if !visitor.should_visit_lazy_type_attributes() => {
+            if let Some((_, Some(specialization))) = class.static_class_literal(db) {
+                walk_specialization(db, specialization, visitor);
             }
         }
+        _ => walk_protocol_interface(db, protocol.inner.interface(db), visitor),
     }
 
     if let Protocol::Materialized(materialized) = protocol.inner
@@ -1025,15 +1016,13 @@ impl<'db> ProtocolInstanceType<'db> {
             Protocol::FromClass(class) => class.instance_member(db, name),
             Protocol::Materialized(materialized) => {
                 let interface = materialized.interface(db);
+                let origin = materialized.origin(db);
                 if interface.includes_member(db, name)
-                    && !materialized
-                        .origin(db)
-                        .interface(db)
-                        .member_has_todo_type(db, name)
+                    && !origin.interface(db).member_has_todo_type(db, name)
                 {
                     interface.instance_member(db, name)
                 } else {
-                    materialized.origin(db).instance_member(db, name)
+                    origin.instance_member(db, name)
                 }
             }
             Protocol::Synthesized(synthesized) => {
@@ -1051,13 +1040,20 @@ impl<'db> ProtocolInstanceType<'db> {
     ) -> Self {
         match self.inner {
             Protocol::FromClass(class) => {
-                let Some(materialization_kind) = type_mapping.materialization_kind() else {
-                    return Self::from_class(class.apply_type_mapping_impl(
-                        db,
-                        type_mapping,
-                        tcx,
-                        visitor,
-                    ));
+                let materialization_kind = match type_mapping {
+                    TypeMapping::Materialize(kind)
+                    | TypeMapping::ApplySpecializationWithMaterialization {
+                        materialization_kind: kind,
+                        ..
+                    } => *kind,
+                    _ => {
+                        return Self::from_class(class.apply_type_mapping_impl(
+                            db,
+                            type_mapping,
+                            tcx,
+                            visitor,
+                        ));
+                    }
                 };
                 let interface = class.interface(db);
                 let mapped_class = class.apply_type_mapping_impl(db, type_mapping, tcx, visitor);

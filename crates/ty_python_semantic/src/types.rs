@@ -2750,25 +2750,23 @@ impl<'db> Type<'db> {
             Type::ProtocolInstance(ProtocolInstanceType {
                 inner: Protocol::Materialized(materialized),
                 ..
-            }) if !materialized.interface(db).includes_member(db, &name)
-                || materialized
-                    .origin(db)
-                    .interface(db)
-                    .member_has_todo_type(db, &name) =>
-            {
-                Type::instance(db, *materialized.origin(db))
-                    .class_member_with_policy(db, name, policy)
+            }) => {
+                let interface = materialized.interface(db);
+                let origin = materialized.origin(db);
+                if !interface.includes_member(db, &name)
+                    || origin.interface(db).member_has_todo_type(db, &name)
+                {
+                    Type::instance(db, *origin).class_member_with_policy(db, name, policy)
+                } else {
+                    self.instance_member(db, &name)
+                }
             }
             // TODO: Once `to_meta_type` for synthesized protocols is fully implemented, this
             // handling should be removed.
-            Type::ProtocolInstance(protocol)
-                if matches!(
-                    protocol.inner,
-                    Protocol::Materialized(_) | Protocol::Synthesized(_)
-                ) =>
-            {
-                self.instance_member(db, &name)
-            }
+            Type::ProtocolInstance(ProtocolInstanceType {
+                inner: Protocol::Synthesized(_),
+                ..
+            }) => self.instance_member(db, &name),
 
             Type::LiteralValue(literal) if name == "__len__" => {
                 if let Some(length) = match literal.kind() {
@@ -7634,17 +7632,6 @@ impl<'db> TypeMapping<'_, 'db> {
                     }
                 }),
             ),
-        }
-    }
-
-    pub(crate) const fn materialization_kind(&self) -> Option<MaterializationKind> {
-        match self {
-            TypeMapping::Materialize(kind)
-            | TypeMapping::ApplySpecializationWithMaterialization {
-                materialization_kind: kind,
-                ..
-            } => Some(*kind),
-            _ => None,
         }
     }
 
