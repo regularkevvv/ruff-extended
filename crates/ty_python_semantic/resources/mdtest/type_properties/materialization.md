@@ -1025,6 +1025,19 @@ def property_deletion(
     if is_read_only_property(value):
         del value.property  # error: [invalid-assignment]
 
+class TransformingProperty(Protocol):
+    marker: Any
+
+    @property
+    def value(self) -> int: ...
+
+    @value.setter
+    def value(self, value: int) -> None: ...
+
+def property_assignment_narrowing(top: Top[TransformingProperty]) -> None:
+    top.value = 1
+    reveal_type(top.value)  # revealed: int
+
 class OriginGeneric[T](Protocol):
     value: Any
 

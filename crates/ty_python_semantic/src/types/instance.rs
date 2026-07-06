@@ -511,7 +511,8 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         let mut result = self.never();
 
         let source_protocol = ty.as_protocol_instance();
-        let materialized_source = source_protocol.is_some_and(ProtocolInstanceType::is_materialized);
+        let materialized_source =
+            source_protocol.is_some_and(ProtocolInstanceType::is_materialized);
 
         if !protocol.is_materialized()
             && !materialized_source
