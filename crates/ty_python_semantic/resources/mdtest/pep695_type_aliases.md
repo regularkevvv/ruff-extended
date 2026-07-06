@@ -644,7 +644,7 @@ def stable_wrapped(x: StableWrapped[int], y: StableWrapped[str]):
 Type relation for recursive aliases is checked structurally.
 
 ```py
-from typing import Callable
+from typing import Callable, Never
 from ty_extensions import static_assert, is_assignable_to, is_subtype_of
 
 type DirectCovariantA[T] = T | tuple[DirectCovariantA[T], ...]
@@ -695,7 +695,7 @@ Mutually recursive aliases can be structurally equivalent even when they have di
 but their type arguments still have to satisfy the alias variance.
 
 ```py
-from typing import Callable
+from typing import Callable, Never
 from ty_extensions import static_assert, is_assignable_to, is_subtype_of
 
 type CovariantA[T] = T | tuple[CovariantB[T], ...]
@@ -748,6 +748,16 @@ type SwapGrowA[T, U] = T | tuple[SwapGrowB[U | SwapGrowA[T, U], T]]
 type SwapGrowB[T, U] = U | tuple[SwapGrowA[U | SwapGrowB[T, U], T]]
 
 static_assert(is_subtype_of(SwapGrowA[int, str], SwapGrowB[str, int]))
+
+type DifferentGrowA[T] = T | tuple[DifferentGrowA[list[T]]]
+type DifferentGrowB[T] = T | tuple[DifferentGrowB[set[T]]]
+
+static_assert(not is_subtype_of(DifferentGrowA[int], DifferentGrowB[int]))
+
+type NeverGrowA[T] = T | tuple[NeverGrowA[Never | NeverGrowA[T]]]
+type NeverGrowB[T] = T | tuple[NeverGrowB[Never]]
+
+static_assert(not is_subtype_of(NeverGrowA[int], NeverGrowB[int]))
 ```
 
 ### Subtyping of materializations of cyclic aliases

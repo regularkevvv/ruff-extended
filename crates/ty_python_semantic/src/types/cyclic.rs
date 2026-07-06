@@ -86,12 +86,7 @@ impl<'db> HasIdentity<'db> for (Type<'db>, Type<'db>) {
 /// paths inline even when that makes `seen` slightly larger than an `FxIndexSet<T>`.
 #[derive(Debug)]
 pub struct CycleDetector<'db, Tag, T: HasIdentity<'db>, R, const INLINE_CAPACITY: usize> {
-    /// If the type we're visiting is present in `seen`, it indicates that we've hit a cycle (due
-    /// to a recursive type); we need to immediately short circuit the whole operation and return
-    /// the fallback value. That's why we pop items off the end of `seen` after we've visited them.
-    /// Actually, what is contained here is not the `Type` itself, but its identity.
-    /// `Type` has extra data than the type structure that should be equated,
-    /// so it is compared using identity, which removes extra data.
+    /// The active recursion stack, stored by abstract identity.
     seen: RefCell<SmallVec<[T::Id; INLINE_CAPACITY]>>,
     /// Tracks full items that are either pending in the current recursion stack or completed
     /// earlier in the same recursive operation.
@@ -125,7 +120,7 @@ where
     pub fn visit(&self, db: &'db dyn Db, item: T, compute: impl FnOnce() -> R) -> R {
         match self.begin_visit(db, item) {
             CycleDetectorVisit::Ready(result) => result,
-            CycleDetectorVisit::Cycle(_) => self.fallback.clone(),
+            CycleDetectorVisit::Cycle { .. } => self.fallback.clone(),
             CycleDetectorVisit::Pending(item) => {
                 let result = compute();
                 self.finish_visit(&item, result)
@@ -152,7 +147,16 @@ where
 
         let identity = item.to_identity(db);
         if self.seen.borrow().contains(&identity) {
-            return CycleDetectorVisit::Cycle(item);
+            let active = self
+                .cache
+                .borrow()
+                .pending_with_identity(db, &identity)
+                .expect("active identity should have a pending item")
+                .clone();
+            return CycleDetectorVisit::Cycle {
+                active,
+                current: item,
+            };
         }
 
         self.seen.borrow_mut().push(identity);
@@ -176,9 +180,8 @@ pub(crate) enum CycleDetectorVisit<T, R> {
     /// exact recursive edge.
     Ready(R),
     /// A different item with the same abstract identity is already pending.
-    /// The wrapped value here is the input when recursion is detected. For complete results,
-    /// implement recursive-only fallback handling using the wrapped value.
-    Cycle(T),
+    /// The active item is the pending obligation; the current item is the input that hit it.
+    Cycle { active: T, current: T },
     /// The caller should compute the result and pass it to [`CycleDetector::finish_visit`].
     Pending(T),
 }
@@ -213,7 +216,10 @@ impl<'db, Tag> TypeTransformer<'db, Tag> {
         compute: impl FnOnce() -> Type<'db>,
     ) -> Type<'db> {
         match self.begin_visit(db, ty) {
-            CycleDetectorVisit::Ready(result) | CycleDetectorVisit::Cycle(result) => result,
+            CycleDetectorVisit::Ready(result)
+            | CycleDetectorVisit::Cycle {
+                current: result, ..
+            } => result,
             CycleDetectorVisit::Pending(ty) => {
                 let result = compute();
                 self.finish_visit(ty, result)
@@ -228,7 +234,10 @@ impl<'db, Tag> TypeTransformer<'db, Tag> {
     ) -> CycleDetectorVisit<Type<'db>, Type<'db>> {
         if let Some(entry) = self.cache.borrow().get(&ty) {
             return match entry {
-                CycleDetectorCacheEntry::Pending => CycleDetectorVisit::Cycle(ty),
+                CycleDetectorCacheEntry::Pending => CycleDetectorVisit::Cycle {
+                    active: ty,
+                    current: ty,
+                },
                 CycleDetectorCacheEntry::Completed(result) => CycleDetectorVisit::Ready(*result),
             };
         }
@@ -237,7 +246,10 @@ impl<'db, Tag> TypeTransformer<'db, Tag> {
         if self.seen.borrow().contains(&identity) {
             // When a cycle is encountered, the type being visited is returned as a fallback
             // (typically a recursive type alias).
-            return CycleDetectorVisit::Cycle(ty);
+            return CycleDetectorVisit::Cycle {
+                active: ty,
+                current: ty,
+            };
         }
 
         self.seen.borrow_mut().push(identity);
@@ -296,6 +308,28 @@ impl<T, R> CycleDetectorCache<T, R> {
                 .iter()
                 .find_map(|(cached_item, result)| (cached_item == item).then_some(result)),
             Self::Spilled(cache) => cache.get(item),
+        }
+    }
+
+    fn pending_with_identity<'db>(&self, db: &'db dyn Db, identity: &T::Id) -> Option<&T>
+    where
+        T: HasIdentity<'db>,
+    {
+        match self {
+            Self::Empty => None,
+            Self::One((cached_item, entry)) => (matches!(entry, CycleDetectorCacheEntry::Pending)
+                && cached_item.to_identity(db) == *identity)
+                .then_some(cached_item),
+            Self::Two(entries) => entries.iter().find_map(|(cached_item, entry)| {
+                (matches!(entry, CycleDetectorCacheEntry::Pending)
+                    && cached_item.to_identity(db) == *identity)
+                    .then_some(cached_item)
+            }),
+            Self::Spilled(cache) => cache.iter().find_map(|(cached_item, entry)| {
+                (matches!(entry, CycleDetectorCacheEntry::Pending)
+                    && cached_item.to_identity(db) == *identity)
+                    .then_some(cached_item)
+            }),
         }
     }
 
@@ -430,7 +464,7 @@ impl<T: Hash + Eq> Drop for ActiveRecursionGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CycleDetector, Db, HasIdentity};
+    use super::{CycleDetector, CycleDetectorVisit, Db, HasIdentity};
     use crate::db::tests::setup_db;
 
     struct TestCycleDetector;
@@ -504,5 +538,32 @@ mod tests {
             10
         );
         assert_eq!(detector.visit(&db, second, || 30), 30);
+    }
+
+    #[test]
+    fn identity_cycle_reports_active_and_current_items() {
+        let db = setup_db();
+        let detector = IdentityDetector::new(0);
+        let first = TestItem {
+            value: 1,
+            identity: 1,
+        };
+        let second = TestItem {
+            value: 2,
+            identity: 1,
+        };
+
+        let CycleDetectorVisit::Pending(active_item) = detector.begin_visit(&db, first) else {
+            panic!("first visit should be pending");
+        };
+
+        let CycleDetectorVisit::Cycle { active, current } = detector.begin_visit(&db, second)
+        else {
+            panic!("second visit should detect an identity cycle");
+        };
+        assert_eq!(active, first);
+        assert_eq!(current, second);
+
+        detector.finish_visit(&active_item, 10);
     }
 }

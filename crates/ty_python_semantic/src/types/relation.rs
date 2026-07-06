@@ -785,6 +785,88 @@ struct RecursiveAliasArgument<'db> {
     ty: Type<'db>,
 }
 
+#[derive(Clone, Debug, Eq)]
+enum RecursiveAliasSchemaType<'db> {
+    SourceAlias,
+    TargetAlias,
+    Concrete(Type<'db>),
+    Union(Box<[Self]>),
+}
+
+impl PartialEq for RecursiveAliasSchemaType<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::SourceAlias, Self::SourceAlias) | (Self::TargetAlias, Self::TargetAlias) => true,
+            (Self::Concrete(left), Self::Concrete(right)) => left == right,
+            (Self::Union(left), Self::Union(right)) => {
+                left.len() == right.len()
+                    && left.iter().all(|left_element| {
+                        right
+                            .iter()
+                            .any(|right_element| left_element == right_element)
+                    })
+            }
+            _ => false,
+        }
+    }
+}
+
+impl<'db> RecursiveAliasSchemaType<'db> {
+    fn from_type(
+        db: &'db dyn Db,
+        ty: Type<'db>,
+        active_source: TypeAliasType<'db>,
+        active_target: TypeAliasType<'db>,
+    ) -> Self {
+        match ty {
+            Type::TypeAlias(alias) if alias.definition(db) == active_source.definition(db) => {
+                Self::SourceAlias
+            }
+            Type::TypeAlias(alias) if alias.definition(db) == active_target.definition(db) => {
+                Self::TargetAlias
+            }
+            Type::Union(union) => Self::union(
+                union
+                    .elements(db)
+                    .iter()
+                    .map(|element| Self::from_type(db, *element, active_source, active_target)),
+            ),
+            _ => Self::Concrete(ty),
+        }
+    }
+
+    fn union(elements: impl IntoIterator<Item = Self>) -> Self {
+        let mut flattened = Vec::new();
+        for element in elements {
+            Self::push_union_element(&mut flattened, element);
+        }
+
+        if flattened.len() > 1 {
+            flattened.retain(|element| !matches!(element, Self::Concrete(Type::Never)));
+        }
+
+        let mut deduplicated = Vec::new();
+        for element in flattened {
+            if !deduplicated.contains(&element) {
+                deduplicated.push(element);
+            }
+        }
+
+        match deduplicated.len() {
+            0 => Self::Concrete(Type::Never),
+            1 => deduplicated.pop().expect("length was just checked"),
+            _ => Self::Union(deduplicated.into_boxed_slice()),
+        }
+    }
+
+    fn push_union_element(elements: &mut Vec<Self>, element: Self) {
+        match element {
+            Self::Union(nested) => elements.extend(nested),
+            element => elements.push(element),
+        }
+    }
+}
+
 impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
     pub(super) fn subtyping(
         constraints: &'c ConstraintSetBuilder<'db>,
@@ -964,8 +1046,8 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             .begin_visit(db, (source, target, self.relation, self.typevar_evaluation))
         {
             CycleDetectorVisit::Ready(result) => result,
-            CycleDetectorVisit::Cycle((source, target, _, _)) => {
-                self.recursive_type_pair_fallback(db, source, target)
+            CycleDetectorVisit::Cycle { active, current } => {
+                self.recursive_type_pair_fallback(db, active.0, active.1, current.0, current.1)
             }
             CycleDetectorVisit::Pending(item) => {
                 let result = work();
@@ -977,10 +1059,27 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
     fn recursive_type_pair_fallback(
         &self,
         db: &'db dyn Db,
+        active_source: Type<'db>,
+        active_target: Type<'db>,
         source: Type<'db>,
         target: Type<'db>,
     ) -> ConstraintSet<'db, 'c> {
-        if let (Type::TypeAlias(source_alias), Type::TypeAlias(target_alias)) = (source, target) {
+        if let (
+            Type::TypeAlias(active_source_alias),
+            Type::TypeAlias(active_target_alias),
+            Type::TypeAlias(source_alias),
+            Type::TypeAlias(target_alias),
+        ) = (active_source, active_target, source, target)
+        {
+            if Self::recursive_type_alias_pair_matches_active_schema(
+                db,
+                active_source_alias,
+                active_target_alias,
+                source_alias,
+                target_alias,
+            ) {
+                return self.always();
+            }
             return self.check_recursive_type_alias_specialization_pair(
                 db,
                 source_alias,
@@ -989,6 +1088,109 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
         }
 
         self.always()
+    }
+
+    fn recursive_type_alias_pair_matches_active_schema(
+        db: &'db dyn Db,
+        active_source: TypeAliasType<'db>,
+        active_target: TypeAliasType<'db>,
+        current_source: TypeAliasType<'db>,
+        current_target: TypeAliasType<'db>,
+    ) -> bool {
+        // Growing aliases can revisit the same alias pair with larger arguments such as
+        // `U | A[T, U]`. For schema matching, the recursive alias part is the guarded recursive
+        // obligation, so compare the finite argument skeleton around it.
+        if active_source.definition(db) != current_source.definition(db)
+            || active_target.definition(db) != current_target.definition(db)
+        {
+            return false;
+        }
+
+        let Some(active_source_specialization) =
+            Self::type_alias_specialization_or_default(db, active_source)
+        else {
+            return false;
+        };
+        let Some(active_target_specialization) =
+            Self::type_alias_specialization_or_default(db, active_target)
+        else {
+            return false;
+        };
+        let Some(current_source_specialization) =
+            Self::type_alias_specialization_or_default(db, current_source)
+        else {
+            return false;
+        };
+        let Some(current_target_specialization) =
+            Self::type_alias_specialization_or_default(db, current_target)
+        else {
+            return false;
+        };
+
+        if active_source_specialization.materialization_kind(db)
+            != current_source_specialization.materialization_kind(db)
+            || active_target_specialization.materialization_kind(db)
+                != current_target_specialization.materialization_kind(db)
+        {
+            return false;
+        }
+
+        let active_source_types: Vec<_> = active_source_specialization
+            .types(db)
+            .iter()
+            .map(|ty| RecursiveAliasSchemaType::from_type(db, *ty, active_source, active_target))
+            .collect();
+        let active_target_types: Vec<_> = active_target_specialization
+            .types(db)
+            .iter()
+            .map(|ty| RecursiveAliasSchemaType::from_type(db, *ty, active_source, active_target))
+            .collect();
+        let current_source_types: Vec<_> = current_source_specialization
+            .types(db)
+            .iter()
+            .map(|ty| RecursiveAliasSchemaType::from_type(db, *ty, active_source, active_target))
+            .collect();
+        let current_target_types: Vec<_> = current_target_specialization
+            .types(db)
+            .iter()
+            .map(|ty| RecursiveAliasSchemaType::from_type(db, *ty, active_source, active_target))
+            .collect();
+
+        if active_source_types.len() != active_target_types.len()
+            || active_source_types.len() != current_source_types.len()
+            || active_target_types.len() != current_target_types.len()
+        {
+            return false;
+        }
+
+        let active_source_types_are_unique = active_source_types
+            .iter()
+            .enumerate()
+            .all(|(index, source_type)| !active_source_types[..index].contains(source_type));
+        if !active_source_types_are_unique {
+            return false;
+        }
+
+        let Some(active_target_to_source_indices): Option<Vec<_>> = active_target_types
+            .iter()
+            .map(|active_target_type| {
+                active_source_types
+                    .iter()
+                    .position(|active_source_type| active_source_type == active_target_type)
+            })
+            .collect()
+        else {
+            return false;
+        };
+
+        active_target_to_source_indices
+            .iter()
+            .zip(current_target_types)
+            .all(|(source_index, current_target_type)| {
+                current_source_types
+                    .get(*source_index)
+                    .is_some_and(|current_source_type| *current_source_type == current_target_type)
+            })
     }
 
     fn type_alias_specialization_or_default(
