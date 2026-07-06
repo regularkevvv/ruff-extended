@@ -952,7 +952,12 @@ impl<'db> ProtocolInstanceType<'db> {
         match self.inner {
             Protocol::FromClass(class) => class.instance_member(db, name),
             Protocol::Materialized(materialized) => {
-                materialized.interface(db).instance_member(db, name)
+                let interface = materialized.interface(db);
+                if interface.includes_member(db, name) {
+                    interface.instance_member(db, name)
+                } else {
+                    materialized.origin(db).instance_member(db, name)
+                }
             }
             Protocol::Synthesized(synthesized) => {
                 synthesized.interface(db).instance_member(db, name)

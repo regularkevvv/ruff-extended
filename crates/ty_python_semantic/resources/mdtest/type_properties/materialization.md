@@ -941,6 +941,15 @@ def class_reads(top: Top[ClassVarAny], bottom: Bottom[ClassVarAny]) -> None:
     reveal_type(type(top).value)  # revealed: object
     reveal_type(type(bottom).value)  # revealed: Never
 
+class OriginOnlyInit(Protocol):
+    value: Any
+
+    def __init__(self, value: int) -> None: ...
+
+def origin_only_init(plain: OriginOnlyInit, top: Top[OriginOnlyInit]) -> None:
+    reveal_type(plain.__init__)  # revealed: bound method OriginOnlyInit.__init__(value: int) -> None
+    reveal_type(top.__init__)  # revealed: bound method OriginOnlyInit.__init__(value: int) -> None
+
 class GenericMutable[T](Protocol):
     value: T
 

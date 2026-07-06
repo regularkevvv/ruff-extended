@@ -2731,7 +2731,15 @@ impl<'db> Type<'db> {
             Type::Intersection(inter) => inter.map_with_boundness_and_qualifiers(db, |elem| {
                 elem.class_member_with_policy(db, name.clone(), policy)
             }),
-            // TODO: Once `to_meta_type` for the synthesized protocol is fully implemented, this handling should be removed.
+            Type::ProtocolInstance(ProtocolInstanceType {
+                inner: Protocol::Materialized(materialized),
+                ..
+            }) if !materialized.interface(db).includes_member(db, &name) => {
+                Type::instance(db, *materialized.origin(db))
+                    .class_member_with_policy(db, name, policy)
+            }
+            // TODO: Once `to_meta_type` for synthesized protocols is fully implemented, this
+            // handling should be removed.
             Type::ProtocolInstance(protocol)
                 if matches!(
                     protocol.inner,
@@ -3862,10 +3870,8 @@ impl<'db> Type<'db> {
                 // Note that we could do this for *all* protocols, but it's only *necessary* for synthesized
                 // ones, and the standard logic is *probably* more performant for class-based protocols?
                 Type::ProtocolInstance(protocol)
-                    if matches!(
-                        protocol.inner,
-                        Protocol::Materialized(_) | Protocol::Synthesized(_)
-                    ) && policy.mro_no_object_fallback()
+                    if matches!(protocol.inner, Protocol::Synthesized(_))
+                        && policy.mro_no_object_fallback()
                         && !protocol.interface(db).includes_member(db, name_str) =>
                 {
                     Place::Undefined.into()
