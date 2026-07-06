@@ -787,16 +787,23 @@ struct RecursiveAliasArgument<'db> {
 
 #[derive(Clone, Debug, Eq)]
 enum RecursiveAliasSchemaType<'db> {
-    SourceAlias,
-    TargetAlias,
+    SourceAlias(Box<[Self]>),
+    TargetAlias(Box<[Self]>),
     Concrete(Type<'db>),
     Union(Box<[Self]>),
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RecursiveAliasSchemaKind {
+    Source,
+    Target,
 }
 
 impl PartialEq for RecursiveAliasSchemaType<'_> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::SourceAlias, Self::SourceAlias) | (Self::TargetAlias, Self::TargetAlias) => true,
+            (Self::SourceAlias(left), Self::SourceAlias(right))
+            | (Self::TargetAlias(left), Self::TargetAlias(right)) => left == right,
             (Self::Concrete(left), Self::Concrete(right)) => left == right,
             (Self::Union(left), Self::Union(right)) => {
                 left.len() == right.len()
@@ -820,10 +827,20 @@ impl<'db> RecursiveAliasSchemaType<'db> {
     ) -> Self {
         match ty {
             Type::TypeAlias(alias) if alias.definition(db) == active_source.definition(db) => {
-                Self::SourceAlias
+                Self::SourceAlias(Self::alias_arguments(
+                    db,
+                    alias,
+                    active_source,
+                    active_target,
+                ))
             }
             Type::TypeAlias(alias) if alias.definition(db) == active_target.definition(db) => {
-                Self::TargetAlias
+                Self::TargetAlias(Self::alias_arguments(
+                    db,
+                    alias,
+                    active_source,
+                    active_target,
+                ))
             }
             Type::Union(union) => Self::union(
                 union
@@ -833,6 +850,25 @@ impl<'db> RecursiveAliasSchemaType<'db> {
             ),
             _ => Self::Concrete(ty),
         }
+    }
+
+    fn alias_arguments(
+        db: &'db dyn Db,
+        alias: TypeAliasType<'db>,
+        active_source: TypeAliasType<'db>,
+        active_target: TypeAliasType<'db>,
+    ) -> Box<[Self]> {
+        let Some(specialization) =
+            TypeRelationChecker::type_alias_specialization_or_default(db, alias)
+        else {
+            return Box::new([]);
+        };
+
+        specialization
+            .types(db)
+            .iter()
+            .map(|ty| Self::from_type(db, *ty, active_source, active_target))
+            .collect()
     }
 
     fn union(elements: impl IntoIterator<Item = Self>) -> Self {
@@ -863,6 +899,315 @@ impl<'db> RecursiveAliasSchemaType<'db> {
         match element {
             Self::Union(nested) => elements.extend(nested),
             element => elements.push(element),
+        }
+    }
+
+    fn equivalent_to(
+        &self,
+        other: &Self,
+        active_source_arguments: &[Self],
+        active_target_arguments: &[Self],
+    ) -> bool {
+        match (self, other) {
+            (Self::SourceAlias(left), Self::SourceAlias(right)) => {
+                Self::alias_arguments_match_same_active_schema(
+                    left,
+                    right,
+                    RecursiveAliasSchemaKind::Source,
+                    active_source_arguments,
+                    active_target_arguments,
+                ) || Self::slices_are_equivalent(
+                    left,
+                    right,
+                    active_source_arguments,
+                    active_target_arguments,
+                )
+            }
+            (Self::TargetAlias(left), Self::TargetAlias(right)) => {
+                Self::alias_arguments_match_same_active_schema(
+                    left,
+                    right,
+                    RecursiveAliasSchemaKind::Target,
+                    active_source_arguments,
+                    active_target_arguments,
+                ) || Self::slices_are_equivalent(
+                    left,
+                    right,
+                    active_source_arguments,
+                    active_target_arguments,
+                )
+            }
+            (Self::Concrete(left), Self::Concrete(right)) => left == right,
+            (Self::Union(left), Self::Union(right)) => {
+                left.len() == right.len()
+                    && left.iter().all(|left_element| {
+                        right.iter().any(|right_element| {
+                            left_element.equivalent_to(
+                                right_element,
+                                active_source_arguments,
+                                active_target_arguments,
+                            )
+                        })
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    fn corresponds_to(
+        &self,
+        other: &Self,
+        active_source_arguments: &[Self],
+        active_target_arguments: &[Self],
+    ) -> bool {
+        self.equivalent_to(other, active_source_arguments, active_target_arguments)
+            || self.grows_from(other, active_source_arguments, active_target_arguments)
+            || other.grows_from(self, active_source_arguments, active_target_arguments)
+    }
+
+    fn slices_are_equivalent(
+        left: &[Self],
+        right: &[Self],
+        active_source_arguments: &[Self],
+        active_target_arguments: &[Self],
+    ) -> bool {
+        left.len() == right.len()
+            && left.iter().zip(right).all(|(left, right)| {
+                left.equivalent_to(right, active_source_arguments, active_target_arguments)
+            })
+    }
+
+    fn source_alias_arguments_match_active_schema(
+        arguments: &[Self],
+        active_source_arguments: &[Self],
+        active_target_arguments: &[Self],
+    ) -> bool {
+        Self::alias_arguments_match_any_active_schema(
+            arguments,
+            RecursiveAliasSchemaKind::Source,
+            active_source_arguments,
+            active_target_arguments,
+        )
+    }
+
+    fn target_alias_arguments_match_active_schema(
+        arguments: &[Self],
+        active_source_arguments: &[Self],
+        active_target_arguments: &[Self],
+    ) -> bool {
+        Self::alias_arguments_match_any_active_schema(
+            arguments,
+            RecursiveAliasSchemaKind::Target,
+            active_source_arguments,
+            active_target_arguments,
+        )
+    }
+
+    fn alias_arguments_match_same_active_schema(
+        left: &[Self],
+        right: &[Self],
+        kind: RecursiveAliasSchemaKind,
+        active_source_arguments: &[Self],
+        active_target_arguments: &[Self],
+    ) -> bool {
+        Self::any_alias_argument_schema(
+            kind,
+            active_source_arguments,
+            active_target_arguments,
+            &|schema_arguments| {
+                Self::alias_arguments_grow_from_schema(
+                    left,
+                    schema_arguments,
+                    active_source_arguments,
+                    active_target_arguments,
+                ) && Self::alias_arguments_grow_from_schema(
+                    right,
+                    schema_arguments,
+                    active_source_arguments,
+                    active_target_arguments,
+                )
+            },
+        )
+    }
+
+    fn alias_arguments_match_any_active_schema(
+        arguments: &[Self],
+        kind: RecursiveAliasSchemaKind,
+        active_source_arguments: &[Self],
+        active_target_arguments: &[Self],
+    ) -> bool {
+        Self::any_alias_argument_schema(
+            kind,
+            active_source_arguments,
+            active_target_arguments,
+            &|schema_arguments| {
+                Self::alias_arguments_grow_from_schema(
+                    arguments,
+                    schema_arguments,
+                    active_source_arguments,
+                    active_target_arguments,
+                )
+            },
+        )
+    }
+
+    fn any_alias_argument_schema(
+        kind: RecursiveAliasSchemaKind,
+        active_source_arguments: &[Self],
+        active_target_arguments: &[Self],
+        predicate: &impl Fn(&[Self]) -> bool,
+    ) -> bool {
+        let active_arguments = match kind {
+            RecursiveAliasSchemaKind::Source => active_source_arguments,
+            RecursiveAliasSchemaKind::Target => active_target_arguments,
+        };
+
+        predicate(active_arguments)
+            || active_source_arguments
+                .iter()
+                .any(|argument| argument.any_nested_alias_argument_schema(kind, predicate))
+            || active_target_arguments
+                .iter()
+                .any(|argument| argument.any_nested_alias_argument_schema(kind, predicate))
+    }
+
+    fn any_nested_alias_argument_schema(
+        &self,
+        kind: RecursiveAliasSchemaKind,
+        predicate: &impl Fn(&[Self]) -> bool,
+    ) -> bool {
+        match self {
+            Self::SourceAlias(arguments) if kind == RecursiveAliasSchemaKind::Source => {
+                predicate(arguments)
+                    || arguments
+                        .iter()
+                        .any(|argument| argument.any_nested_alias_argument_schema(kind, predicate))
+            }
+            Self::TargetAlias(arguments) if kind == RecursiveAliasSchemaKind::Target => {
+                predicate(arguments)
+                    || arguments
+                        .iter()
+                        .any(|argument| argument.any_nested_alias_argument_schema(kind, predicate))
+            }
+            Self::SourceAlias(arguments)
+            | Self::TargetAlias(arguments)
+            | Self::Union(arguments) => arguments
+                .iter()
+                .any(|argument| argument.any_nested_alias_argument_schema(kind, predicate)),
+            Self::Concrete(_) => false,
+        }
+    }
+
+    fn alias_arguments_grow_from_schema(
+        arguments: &[Self],
+        schema_arguments: &[Self],
+        active_source_arguments: &[Self],
+        active_target_arguments: &[Self],
+    ) -> bool {
+        arguments.len() == schema_arguments.len()
+            && arguments
+                .iter()
+                .zip(schema_arguments)
+                .all(|(argument, active_argument)| {
+                    argument.grows_from(
+                        active_argument,
+                        active_source_arguments,
+                        active_target_arguments,
+                    )
+                })
+    }
+
+    fn grows_from(
+        &self,
+        active_argument: &Self,
+        active_source_arguments: &[Self],
+        active_target_arguments: &[Self],
+    ) -> bool {
+        if self.equivalent_to(
+            active_argument,
+            active_source_arguments,
+            active_target_arguments,
+        ) {
+            return true;
+        }
+
+        let Self::Union(elements) = self else {
+            return false;
+        };
+
+        if let Self::Union(active_elements) = active_argument {
+            return Self::union_elements_grow_from(
+                elements,
+                active_elements,
+                active_source_arguments,
+                active_target_arguments,
+            );
+        }
+
+        Self::union_elements_grow_from(
+            elements,
+            std::slice::from_ref(active_argument),
+            active_source_arguments,
+            active_target_arguments,
+        )
+    }
+
+    fn union_elements_grow_from(
+        elements: &[Self],
+        active_elements: &[Self],
+        active_source_arguments: &[Self],
+        active_target_arguments: &[Self],
+    ) -> bool {
+        if !active_elements.iter().all(|active_element| {
+            elements.iter().any(|element| {
+                element.equivalent_to(
+                    active_element,
+                    active_source_arguments,
+                    active_target_arguments,
+                )
+            })
+        }) {
+            return false;
+        }
+
+        for element in elements {
+            if active_elements.iter().any(|active_element| {
+                element.equivalent_to(
+                    active_element,
+                    active_source_arguments,
+                    active_target_arguments,
+                )
+            }) {
+                continue;
+            }
+            if !element.is_recursive_alias_schema_instance(
+                active_source_arguments,
+                active_target_arguments,
+            ) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    fn is_recursive_alias_schema_instance(
+        &self,
+        active_source_arguments: &[Self],
+        active_target_arguments: &[Self],
+    ) -> bool {
+        match self {
+            Self::SourceAlias(arguments) => Self::source_alias_arguments_match_active_schema(
+                arguments,
+                active_source_arguments,
+                active_target_arguments,
+            ),
+            Self::TargetAlias(arguments) => Self::target_alias_arguments_match_active_schema(
+                arguments,
+                active_source_arguments,
+                active_target_arguments,
+            ),
+            Self::Concrete(_) | Self::Union(_) => false,
         }
     }
 }
@@ -1163,6 +1508,20 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             return false;
         }
 
+        if RecursiveAliasSchemaType::alias_arguments_grow_from_schema(
+            &current_source_types,
+            &active_source_types,
+            &active_source_types,
+            &active_target_types,
+        ) && RecursiveAliasSchemaType::alias_arguments_grow_from_schema(
+            &current_target_types,
+            &active_target_types,
+            &active_source_types,
+            &active_target_types,
+        ) {
+            return true;
+        }
+
         let active_source_types_are_unique = active_source_types
             .iter()
             .enumerate()
@@ -1176,7 +1535,15 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             .map(|active_target_type| {
                 active_source_types
                     .iter()
-                    .position(|active_source_type| active_source_type == active_target_type)
+                    .positions(|active_source_type| {
+                        active_source_type.corresponds_to(
+                            active_target_type,
+                            &active_source_types,
+                            &active_target_types,
+                        )
+                    })
+                    .exactly_one()
+                    .ok()
             })
             .collect()
         else {
@@ -1185,11 +1552,17 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
 
         active_target_to_source_indices
             .iter()
-            .zip(current_target_types)
+            .zip(&current_target_types)
             .all(|(source_index, current_target_type)| {
                 current_source_types
                     .get(*source_index)
-                    .is_some_and(|current_source_type| *current_source_type == current_target_type)
+                    .is_some_and(|current_source_type| {
+                        current_source_type.corresponds_to(
+                            current_target_type,
+                            &active_source_types,
+                            &active_target_types,
+                        )
+                    })
             })
     }
 

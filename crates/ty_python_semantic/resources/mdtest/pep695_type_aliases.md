@@ -749,6 +749,11 @@ type SwapGrowB[T, U] = U | tuple[SwapGrowA[U | SwapGrowB[T, U], T]]
 
 static_assert(is_subtype_of(SwapGrowA[int, str], SwapGrowB[str, int]))
 
+type DuplicateGrowA[T, U] = T | tuple[DuplicateGrowA[T | DuplicateGrowA[T, U], U | DuplicateGrowA[T, U]]]
+type DuplicateGrowB[T, U] = T | tuple[DuplicateGrowB[T | DuplicateGrowB[T, U], U | DuplicateGrowB[T, U]]]
+
+static_assert(is_subtype_of(DuplicateGrowA[int, int], DuplicateGrowB[int, int]))
+
 type DifferentGrowA[T] = T | tuple[DifferentGrowA[list[T]]]
 type DifferentGrowB[T] = T | tuple[DifferentGrowB[set[T]]]
 
@@ -758,6 +763,16 @@ type NeverGrowA[T] = T | tuple[NeverGrowA[Never | NeverGrowA[T]]]
 type NeverGrowB[T] = T | tuple[NeverGrowB[Never]]
 
 static_assert(not is_subtype_of(NeverGrowA[int], NeverGrowB[int]))
+
+type OneSidedGrowA[T] = T | tuple[OneSidedGrowA[T | OneSidedGrowA[str]]]
+type OneSidedGrowB[T] = T | tuple[OneSidedGrowB[T]]
+
+static_assert(not is_subtype_of(OneSidedGrowA[int], OneSidedGrowB[int]))
+
+type BadA[T] = T | tuple[BadA[BadA[str]]]
+type BadB[T] = T | tuple[BadB[BadA[int]]]
+
+static_assert(not is_subtype_of(BadA[int], BadB[int]))
 ```
 
 ### Subtyping of materializations of cyclic aliases
