@@ -743,6 +743,11 @@ type SwapB[T, U] = tuple[SwapA[U, T], U, T]
 static_assert(is_subtype_of(SwapA[int, str], SwapB[str, int]))
 static_assert(is_subtype_of(SwapB[int, str], SwapA[str, int]))
 static_assert(not is_subtype_of(SwapA[int, str], SwapB[int, str]))
+
+type SwapGrowA[T, U] = T | tuple[SwapGrowB[U | SwapGrowA[T, U], T]]
+type SwapGrowB[T, U] = U | tuple[SwapGrowA[U | SwapGrowB[T, U], T]]
+
+static_assert(is_subtype_of(SwapGrowA[int, str], SwapGrowB[str, int]))
 ```
 
 ### Subtyping of materializations of cyclic aliases
