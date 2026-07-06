@@ -2142,9 +2142,7 @@ x = f({"y": 1}, "a")
 reveal_type(x)  # revealed: str
 ```
 
-The selected overload's context is re-applied after overload resolution. This commits the contextual
-expression type and any diagnostics produced by the selected context, while diagnostics from
-rejected overload contexts remain speculative.
+Only the types and diagnostics produced by inference against matching overloads are preserved:
 
 ```py
 from collections.abc import Callable
@@ -2192,8 +2190,6 @@ select_payload({"name": "bad count", "count": "not an int"}, 1)
 # error: [no-matching-overload]
 select_payload({"name": "extra key", "count": 1, "extra": None}, 1)
 
-# The rejected `Payload` context produces all three diagnostics above, but none may leak from its
-# replayable cache entry after the plain-dictionary overload is selected.
 select_payload({"extra": None}, "plain dictionary")
 
 @overload
@@ -2215,12 +2211,10 @@ selected_generic_payload = select_generic_payload(
 )
 reveal_type(selected_generic_payload)  # revealed: Literal[1]
 
-# The final diagnostic pass uses both the selected overload and its fixpoint specialization.
 # error: [missing-typed-dict-key] "Missing required key 'count' in TypedDict `Payload` constructor"
 # error: [no-matching-overload]
 select_generic_payload(1, {"name": "generic"}, 1)
 
-# A rejected specialized TypedDict context remains quiet.
 select_generic_payload(1, {"extra": None}, "plain dictionary")
 ```
 

@@ -515,26 +515,13 @@ python-version = "3.13"
 A function's arguments are also inferred using the type context:
 
 ```py
-from typing import Callable, Sequence, TypedDict
+from typing import Callable, TypedDict
 
 class TD(TypedDict):
     x: int
 
 def first[T](x: list[T]) -> T:
     return x[0]
-
-def singleton[T](x: T) -> list[T]:
-    return [x]
-
-def as_sequence[T](x: T, y: list[T], z: list[T]) -> Sequence[T]:
-    return [x]
-
-def _(x: int, z: list[int]):
-    narrow: Sequence[int] = as_sequence(x, singleton(x), z)
-
-    # TODO: A covariant return context should not reject a narrower valid specialization. We
-    # currently use the return context while inferring nested calls and do not retry without it.
-    wide: Sequence[int | str] = as_sequence(x, singleton(x), z)  # error: [invalid-argument-type]
 
 type ObjectCallback = Callable[[object], None]
 type IntCallback = Callable[[int], None]
@@ -569,7 +556,7 @@ x5: ObjectCallback | IntCallback = make_callback(lambda value: consume(value.bit
 But not in a way that leads to assignability errors:
 
 ```py
-from typing import TypedDict, Any
+from typing import TypedDict, Sequence, Any
 
 class TD2(TypedDict):
     x: str
@@ -598,6 +585,16 @@ def _(dt: dict[str, Any], key: str):
 
     x8: TD2 | None = dt.get(key, {"x": 0})
     reveal_type(x8)  # revealed: TD2 | None
+
+def as_sequence[T](x: T, y: list[T], z: list[T]) -> Sequence[T]:
+    return [x]
+
+def _(x: int, z: list[int]):
+    narrow: Sequence[int] = as_sequence(x, [x], z)
+
+    # TODO: A covariant return context should not reject a narrower valid specialization. We
+    # currently use the return context while inferring nested calls and do not retry without it.
+    wide: Sequence[int | str] = as_sequence(x, [x], z)  # error: [invalid-argument-type]
 ```
 
 Partially specialized type context is not ignored:

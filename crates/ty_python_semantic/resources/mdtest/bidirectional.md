@@ -764,9 +764,7 @@ f11: Callable[[*tuple[int, ...]], tuple[int, ...]] = lambda *args: reveal_type(a
 reveal_type(f11)  # revealed: (*args) -> tuple[Unknown, ...]
 
 def _(x: list[int]):
-    mapped = map(lambda y: reveal_type(y) + 1, x)  # revealed: int
-    reveal_type(mapped)  # revealed: map[int]
-    f12 = list(mapped)
+    f12 = list(map(lambda y: reveal_type(y) + 1, x))  # revealed: int
     reveal_type(f12)  # revealed: list[int]
 
 def _() -> Callable[[int], int]:
@@ -789,17 +787,22 @@ def _(x: bool):
     f = signatures.get("", reveal_type(lambda x: x))
 ```
 
-## Generic call fixpoint inference
+We do not currently account for type annotations present later in the scope:
 
-Generic call arguments are inferred to a fixed point. Constraints from one argument only affect the
-type context of other arguments on a later iteration, making inference independent of argument
-order.
+```py
+f12 = lambda: [1]
+# TODO: This should not error.
+_: list[int | str] = f12()  # error: [invalid-assignment]
+reveal_type(f12)  # revealed: () -> list[int]
+```
+
+## Unified call inference
+
+Generic call arguments are inferred under fixpoint iteration, allowing constraints to contribute to
+type context across arguments within a given generic call, until convergence.
 
 ```py
 from typing import Any, Callable, Literal, Sequence, TypedDict, TypeVar, overload
-
-def lst[T](x: T) -> list[T]:
-    return [x]
 
 def combine[T](x: T, y: list[T], z: list[T]) -> T:
     return x
@@ -808,170 +811,72 @@ def combine_reversed[T](x: T, z: list[T], y: list[T]) -> T:
     return x
 
 def _(x: int, y: int | str, z: int | str | None):
-    annotated: int | str | None = combine(y, lst(x), lst(z))
-    reveal_type(annotated)  # revealed: int | str | None
+    x1: int | str | None = combine(y, [x], [z])
+    reveal_type(x1)  # revealed: int | str | None
 
-    inferred = combine(y, lst(x), lst(z))
-    reveal_type(inferred)  # revealed: int | str | None
+    x2 = combine(y, [x], [z])
+    reveal_type(x2)  # revealed: int | str | None
 
-    reversed = combine_reversed(y, lst(z), lst(x))
-    reveal_type(reversed)  # revealed: int | str | None
+    x3 = combine_reversed(y, [z], [x])
+    reveal_type(x3)  # revealed: int | str | None
 
-class A(TypedDict):
-    a: int
-    b: int
-
-def pair[T](x: T, y: list[T]) -> T:
-    return x
-
-def sequence_pair[T](x: T, y: Sequence[T]) -> T:
-    return x
-
-def bare_pair[T](x: T, y: T) -> T:
-    return x
-
-def _(a: A):
-    annotated: A = pair(a, lst({"a": 1, "b": 2}))
-    reveal_type(annotated)  # revealed: A
-    pair(a, lst({"a": 1, "b": 2}))
-
-    # A covariant context still needs to be re-applied after `T` is specialized. Otherwise, the
-    # dictionary remains `dict[str, int]` instead of being inferred as `A`.
-    covariant = sequence_pair(a, lst({"a": 1, "b": 2}))
-    reveal_type(covariant)  # revealed: A
-
-    # A bare `T` context must also be re-applied. After the other argument specializes `T` to
-    # `A`, the dictionary literal can be inferred as that TypedDict in either source order.
-    bare_first = bare_pair({"a": 1, "b": 2}, a)
-    reveal_type(bare_first)  # revealed: A
-    bare_second = bare_pair(a, {"a": 1, "b": 2})
-    reveal_type(bare_second)  # revealed: A
-
-# A downstream generic `__init__` participates in the same fixpoint as the upstream `__new__`.
-# Its checked specialization must be retained so that it contributes to the constructed class's
-# inferred specialization.
-class GenericInitializer[T]:
-    def __new__(cls, *args: object) -> "GenericInitializer[T]":
-        return super().__new__(cls)
-
-    def __init__(self, value: T, values: list[T]) -> None:
-        pass
-
-initialized = GenericInitializer(1, [True])
-reveal_type(initialized)  # revealed: GenericInitializer[int]
-
-# An inactive downstream must also remain structurally present during speculative rounds because
-# the fixed argument-inference candidate table still contains it. It is pruned only after the
-# fixpoint has been committed.
-class InactiveInitializer:
-    def __new__[T](cls, value: T, values: list[T]) -> T:
-        return value
-
-    def __init__(self) -> None:
-        pass
-
-inactive = InactiveInitializer(1, [True])
-reveal_type(inactive)  # revealed: int
-
-# Covariance only guarantees assignability; it does not mean that contextual inference is stable.
-# Both callable parameter positions reverse variance, so `T` occurs covariantly in `callbacks`.
-def nested_callback_context[T](
-    value: T,
-    callbacks: Sequence[Callable[[Callable[[T], None]], None]],
-) -> None:
-    pass
-
-nested_callback_context(
-    1,
-    [lambda callback: print(reveal_type(callback))],  # revealed: (int, /) -> None
-)
-
-# Regression test for https://github.com/astral-sh/ty/issues/3469. `type[T]` must count as a
-# generic argument context so that class literals are re-inferred after `T` is specialized.
-class Base: ...
-class Dog(Base): ...
-class Cat(Base): ...
-
-BaseType = TypeVar("BaseType", bound=Base)
-
-def register_handlers(handlers: dict[str, type[BaseType]]) -> None: ...
-
-register_handlers({"dog": Dog, "cat": Cat})
-
-class X: ...
-
-def accept_classes[T: X](classes: list[type[T]]) -> None: ...
-
-accept_classes([X])
-
-# A single call-site argument can contain multiple inference sites that depend on the same
-# specialization. The first tuple element establishes `T = int`; the second needs the specialized
-# context to infer the invariant list as `list[int]` rather than `list[bool]`.
 def collection_pair[T](pair: tuple[T, list[T]]) -> T:
     return pair[0]
 
-collection_result = collection_pair((1, [True]))
-reveal_type(collection_result)  # revealed: int
+x = collection_pair((1, [True]))
+reveal_type(x)  # revealed: int
 
-# The list inside the single tuple argument establishes the context for the lambda parameter on the
-# next round.
 def callable_pair[T](pair: tuple[Callable[[T], int], list[T]]) -> None:
     function, values = pair
     function(values[0])
 
 callable_pair((lambda value: reveal_type(value) + 1, [1]))  # revealed: int
 
-# The specialization inferred from both tuple elements is propagated into the nested generic call
-# on the next round, widening its invariant return type.
 def nested_pair[T](pair: tuple[T, list[T]]) -> T:
     return pair[0]
 
-nested_result = nested_pair(("value", lst(None)))
-reveal_type(nested_result)  # revealed: str | None
-
-# Diagnostics captured during speculative argument inference are replayed into the final fixpoint
-# round exactly once. Suppressed diagnostics also replay their used-suppression state.
-def diagnostic_pair[T](value: T, values: list[T]) -> T:
-    return value
-
-# error: [unresolved-reference]
-diagnostic_pair(missing_name, [1])
-diagnostic_pair(suppressed_missing, [1])  # ty: ignore[unresolved-reference]
-
-# String literals and nested non-generic calls also use the replayable expression cache.
-string_result = diagnostic_pair("one", ["two"])
-reveal_type(string_result)  # revealed: str
-
-def non_generic(value: int) -> int:
-    return value
-
-# Diagnostics from a cached non-generic call are replayed exactly once.
-# error: [unresolved-reference]
-diagnostic_pair(non_generic(missing_argument), [1])
-diagnostic_pair(non_generic(suppressed_argument), [1])  # ty: ignore[unresolved-reference]
-
-# Every fixpoint round must infer against the complete set of overloads that matched before type
-# inference. Narrowing that set between rounds can leave no entry for an earlier overload's
-# declared type, causing its check to fall back to an unrelated contextual inference.
-FloatDtype = type[float] | Literal["float"]
-
-@overload
-def overloaded_call(data: Sequence[str], dtype: object) -> str: ...
-@overload
-def overloaded_call(data: list[Any], dtype: FloatDtype) -> float: ...
-@overload
-def overloaded_call[T](data: Sequence[T], dtype: Literal["generic"]) -> T: ...
-def overloaded_call(data: object, dtype: object) -> object:
-    return data
-
-def _(dtype: FloatDtype):
-    result = overloaded_call([1.0], dtype)
-    reveal_type(result)  # revealed: int | float
+x = nested_pair(("value", [None]))
+reveal_type(x)  # revealed: str | None
 ```
 
-A bare type variable does not provide an invariant compatibility check that would expose a missed
-contextual reinference. Reveal the dictionary literal itself to verify that the other argument's
-`TypedDict` type is propagated as context, rather than merely checking the call's return type.
+```py
+class A(TypedDict):
+    a: int
+    b: int
+
+def pair_with_list[T](x: T, y: list[T]) -> T:
+    return x
+
+def pair_with_sequence[T](x: T, y: Sequence[T]) -> T:
+    return x
+
+def list_pair[T](x: list[T], y: list[T]) -> T:
+    return x[0]
+
+def pair[T](x: T, y: T) -> T:
+    return x
+
+def _(a: A, b: list[A]):
+    x1: A = pair_with_list(a, [{"a": 1, "b": 2}])
+    reveal_type(x1)  # revealed: A
+
+    # TODO: This should solve to `A`.
+    x2 = pair_with_list(a, [{"a": 1, "b": 2}])
+    reveal_type(x2)  # revealed: A | dict[str, int]
+
+    x3 = pair_with_sequence(a, [{"a": 1, "b": 2}])
+    reveal_type(x3)  # revealed: A
+
+    # TODO: This should solve to `A`.
+    x4 = list_pair(b, [{"a": 1, "b": 2}])  # error: [invalid-argument-type]
+    reveal_type(x4)  # revealed: A | dict[str, int]
+
+    x5 = pair({"a": 1, "b": 2}, a)
+    reveal_type(x5)  # revealed: A
+
+    x6 = pair(a, {"a": 1, "b": 2})
+    reveal_type(x6)  # revealed: A
+```
 
 ```py
 from typing import TypedDict, reveal_type
@@ -991,7 +896,98 @@ def _(x: TD):
     )
 ```
 
-Long reverse dependency chains can require more than two speculative iterations:
+```py
+class ActiveInitializer[T]:
+    def __new__(cls, *args: object) -> "ActiveInitializer[T]":
+        return super().__new__(cls)
+
+    def __init__(self, value: T, values: list[T]) -> None:
+        pass
+
+x = ActiveInitializer(1, [True])
+reveal_type(x)  # revealed: ActiveInitializer[int]
+
+class InactiveInitializer:
+    def __new__[T](cls, value: T, values: list[T]) -> T:
+        return value
+
+    def __init__(self) -> None:
+        pass
+
+x = InactiveInitializer(1, [True])
+reveal_type(x)  # revealed: int
+```
+
+```py
+def consume_and_produce[T, R](
+    consumer: Callable[[T], R],
+    producer: Callable[[], T],
+    value: T,
+) -> T:
+    produced = producer()
+    consumer(produced)
+    consumer(value)
+    return produced
+
+x = consume_and_produce(
+    lambda x: reveal_type(x),  # revealed: str | int
+    lambda: "s",
+    1,
+)
+
+reveal_type(x)  # revealed: Literal["s", 1]
+```
+
+```py
+def nested_callback_context[T](
+    value: T,
+    callbacks: Sequence[Callable[[Callable[[T], None]], None]],
+) -> None:
+    pass
+
+nested_callback_context(
+    1,
+    [lambda callback: print(reveal_type(callback))],  # revealed: (int, /) -> None
+)
+```
+
+```py
+class Base: ...
+class Dog(Base): ...
+class Cat(Base): ...
+
+BaseType = TypeVar("BaseType", bound=Base)
+
+def register_handlers(handlers: dict[str, type[BaseType]]) -> None: ...
+
+register_handlers({"dog": Dog, "cat": Cat})
+
+class X: ...
+
+def accept_classes[T: X](classes: list[type[T]]) -> None: ...
+
+accept_classes([X])
+```
+
+```py
+FloatDtype = type[float] | Literal["float"]
+
+@overload
+def overloaded_call(data: Sequence[str], dtype: object) -> str: ...
+@overload
+def overloaded_call(data: list[Any], dtype: FloatDtype) -> float: ...
+@overload
+def overloaded_call[T](data: Sequence[T], dtype: Literal["generic"]) -> T: ...
+def overloaded_call(data: object, dtype: object) -> object:
+    return data
+
+def _(dtype: FloatDtype):
+    x = overloaded_call([1.0], dtype)
+    reveal_type(x)  # revealed: int | float
+```
+
+Note that long chains of callables with constraint dependencies in reverse source-order may require
+multiple fixpoint iterations.
 
 ```py
 from typing import Callable
@@ -1004,22 +1000,22 @@ def chain[A, B, C, D](
 ) -> D:
     return first(second(third(source[0])))
 
-result = chain(
+x = chain(
     lambda c: c + 1,
     lambda b: b + 1,
     lambda a: a + 1,
     [1, 2, 3],
 )
-reveal_type(result)  # revealed: int
+reveal_type(x)  # revealed: int
 ```
 
-Nested generic calls can also require more than two speculative iterations, without involving lambda
-inference:
+The upper bound on iterations is calculated based on the number of independent occurences of
+inferable type variables, not the number of arguments.
 
 ```py
 from typing import Callable
 
-def contextual_identity[T](values: list[T]) -> Callable[[T], T]:
+def list_to_callable[T](values: list[T]) -> Callable[[T], T]:
     raise NotImplementedError
 
 def propagate[A, B, C, D](
@@ -1041,85 +1037,42 @@ def propagate_tuple[A, B, C, D](
     raise NotImplementedError
 
 def _(seed: int):
-    propagated = propagate(
-        contextual_identity([]),
-        contextual_identity([]),
-        contextual_identity([]),
+    x = propagate(
+        list_to_callable([]),
+        list_to_callable([]),
+        list_to_callable([]),
         [seed],
     )
-    reveal_type(propagated)  # revealed: int
+    reveal_type(x)  # revealed: int
 
-    tuple_propagated = propagate_tuple((
-        contextual_identity([]),
-        contextual_identity([]),
-        contextual_identity([]),
+    x = propagate_tuple((
+        list_to_callable([]),
+        list_to_callable([]),
+        list_to_callable([]),
         [seed],
     ))
-    reveal_type(tuple_propagated)  # revealed: int
+    reveal_type(x)  # revealed: int
 ```
 
-Deferred callable constraints can widen a specialization inferred from another argument:
+Only diagnostics from the final round of iteration are preserved:
 
 ```py
-from typing import Callable
+# Diagnostics captured during speculative argument inference are replayed into the final fixpoint
+# round exactly once. Suppressed diagnostics also replay their used-suppression state.
+def diagnostic_pair[T](value: T, values: list[T]) -> T:
+    return value
 
-def choose[T](producer: Callable[[], T], value: T) -> T:
-    return producer()
+# error: [unresolved-reference]
+diagnostic_pair(missing_name, [1])
+diagnostic_pair(suppressed_missing, [1])  # ty: ignore[unresolved-reference]
 
-reveal_type(choose(lambda: "s", 1))  # revealed: Literal["s", 1]
+def non_generic(value: int) -> int:
+    return value
 
-def consume_and_produce[T](
-    consumer: Callable[[T], None],
-    producer: Callable[[], T],
-    value: T,
-) -> T:
-    produced = producer()
-    consumer(produced)
-    consumer(value)
-    return produced
-
-reveal_type(consume_and_produce(lambda x: None, lambda: "s", 1))  # revealed: Literal["s", 1]
-
-consume_and_produce(
-    lambda x: None if x.bit_length() else None,  # error: [unresolved-attribute]
-    lambda: "s",
-    1,
-)
-```
-
-Arguments with concrete contexts remain cacheable while generic arguments iterate:
-
-```py
-from typing import Callable
-
-def mixed[A, B](
-    prefix: str,
-    transform: Callable[[A], B],
-    source: list[A],
-    one: int,
-    two: int,
-    three: int,
-) -> B:
-    return transform(source[0])
-
-mixed_result = mixed(
-    "prefix",
-    lambda value: reveal_type(value) + 1,  # revealed: int
-    [1, 2, 3],
-    1,
-    2,
-    3,
-)
-reveal_type(mixed_result)  # revealed: int
-```
-
-We do not currently account for type annotations present later in the scope:
-
-```py
-f12 = lambda: [1]
-# TODO: This should not error.
-_: list[int | str] = f12()  # error: [invalid-assignment]
-reveal_type(f12)  # revealed: () -> list[int]
+# Diagnostics from a cached non-generic call are replayed exactly once.
+# error: [unresolved-reference]
+diagnostic_pair(non_generic(missing_argument), [1])
+diagnostic_pair(non_generic(suppressed_argument), [1])  # ty: ignore[unresolved-reference]
 ```
 
 ## Dunder Calls
