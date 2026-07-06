@@ -2872,6 +2872,18 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
                 );
             }
 
+            (
+                formal @ Type::ProtocolInstance(_),
+                actual @ Type::ProtocolInstance(actual_protocol),
+            ) if actual_protocol.is_materialized() => {
+                let when = actual.when_constraint_set_assignable_to_owned(self.db, formal);
+                let when = self.constraints.load(self.db, &when);
+                if self.add_type_mappings_from_constraint_set(when).is_ok() {
+                    self.pending.intersect(self.db, self.constraints, when);
+                }
+                return Ok(());
+            }
+
             (formal, Type::ProtocolInstance(actual_protocol)) => {
                 // TODO: This will only handle protocol classes that explicit inherit
                 // from other generic protocol classes by listing it as a base class.

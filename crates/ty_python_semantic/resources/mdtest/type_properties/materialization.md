@@ -1038,6 +1038,23 @@ def property_assignment_narrowing(top: Top[TransformingProperty]) -> None:
     top.value = 1
     reveal_type(top.value)  # revealed: int
 
+class InferenceBase[T](Protocol):
+    @property
+    def item(self) -> T: ...
+
+class InheritedInferenceAny(InferenceBase[Any], Protocol):
+    marker: Any
+
+def infer_item[T](value: InferenceBase[T]) -> T:
+    raise NotImplementedError
+
+def materialized_inference(
+    direct: Top[InferenceBase[Any]],
+    inherited: Top[InheritedInferenceAny],
+) -> None:
+    reveal_type(infer_item(direct))  # revealed: object
+    reveal_type(infer_item(inherited))  # revealed: object
+
 class OriginGeneric[T](Protocol):
     value: Any
 

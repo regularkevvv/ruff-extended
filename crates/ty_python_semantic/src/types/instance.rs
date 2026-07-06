@@ -834,7 +834,7 @@ fn interface_references_protocol_origin<'db>(
 
 impl<'db> ProtocolInstanceType<'db> {
     /// Return whether this protocol has an interface produced by materialization.
-    fn is_materialized(self) -> bool {
+    pub(super) fn is_materialized(self) -> bool {
         matches!(self.inner, Protocol::Materialized(_))
     }
 
