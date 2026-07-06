@@ -433,57 +433,47 @@ def _(x: Unrelated | Covariant[int]):
     needs_instance_of_unrelated(x)
 ```
 
-When top materialization leaves a class-backed protocol unchanged, `TypeIs` narrowing keeps the
-protocol class-backed. This preserves class-side `ClassVar` lookup through `type(x)`:
+## `TypeIs` narrowing with protocol class variables
+
+`TypeIs` materializes its return type before narrowing. If a protocol class variable is `Any`, a
+class-side read after narrowing therefore has type `object`:
 
 ```py
-from typing import ClassVar, Protocol
+from typing import Any, ClassVar, Protocol
 from typing_extensions import TypeIs
 
 class HasClassVar(Protocol):
-    x: ClassVar[int]
+    x: ClassVar[Any]
 
 def is_has_class_var(x: object) -> TypeIs[HasClassVar]:
     return True
 
 def _(x: object):
     if is_has_class_var(x):
-        reveal_type(type(x).x)  # revealed: int
+        reveal_type(type(x).x)  # revealed: object
 ```
 
-When top materialization rewrites a class-backed protocol, the narrowed type retains its class
-origin for class-side lookup and nominal protocol subtyping:
+## `TypeIs` narrowing with inherited protocols
+
+Materialization must preserve protocol inheritance when none of the inherited requirements change:
 
 ```py
-from typing import Any, ClassVar, Protocol
+from typing import Any, Protocol
 from typing_extensions import TypeIs
 
-class HasGradualClassVar(Protocol):
-    x: ClassVar[Any]
+class Base(Protocol):
+    value: int
 
-def is_has_gradual_class_var(x: object) -> TypeIs[HasGradualClassVar]:
+class Derived(Base, Protocol):
+    marker: Any
+
+def is_derived(x: object) -> TypeIs[Derived]:
     return True
 
+def accepts_base(x: Base) -> None: ...
 def _(x: object):
-    if is_has_gradual_class_var(x):
-        reveal_type(type(x).x)  # revealed: object
-
-class X(Protocol):
-    x: int
-
-class YProto(X, Protocol):
-    x: None = None  # TODO: we should emit an error here due to the Liskov violation
-
-    @property
-    def value(self) -> Any: ...
-
-def is_y_proto(x: object) -> TypeIs[YProto]:
-    return True
-
-def wants_x(x: X) -> None: ...
-def _(x: object):
-    if is_y_proto(x):
-        wants_x(x)
+    if is_derived(x):
+        accepts_base(x)
 ```
 
 ## `TypeGuard` special cases

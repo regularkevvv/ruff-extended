@@ -1808,24 +1808,19 @@ asdict(Foo)
 
 ## `dataclasses.is_dataclass`
 
-`DataclassInstance` uses a `ClassVar` marker containing the gradual `Field[Any]` type. Top
-materialization maps the marker's readable and writable types according to their variance, allowing
-`is_dataclass` to determine that a known dataclass instance always satisfies the protocol:
+`is_dataclass` narrows its argument to the `DataclassInstance` protocol. A concrete dataclass
+instance always satisfies that protocol, so the negative branch is unreachable:
 
 ```py
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import dataclass, is_dataclass
 
 @dataclass
 class Event:
     x: int
 
-def serialize(event: Event) -> dict[str, object]:
-    if is_dataclass(event):
-        reveal_type(event)  # revealed: Event
-        return asdict(event)
-    else:
+def check(event: Event) -> None:
+    if not is_dataclass(event):
         reveal_type(event)  # revealed: Never
-        return dict(event)
 ```
 
 ## `dataclasses.KW_ONLY`

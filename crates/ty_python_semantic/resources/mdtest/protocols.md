@@ -3805,10 +3805,10 @@ indexed_data = {k: v[0:10] for k, v in data.items()}
 reveal_type(indexed_data)  # revealed: dict[str, IntArray]
 ```
 
-### Recursive protocol materialization through `dict()`
+### Recursive protocols during `dict()` inference
 
-Materializing a recursive protocol during generic call inference must not repeatedly wrap the
-recursive interface:
+This case already reports two type errors. Materialization during call inference must stop at the
+recursive references without changing those diagnostics:
 
 ```py
 from collections.abc import Iterator
