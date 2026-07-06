@@ -914,6 +914,15 @@ static_assert(is_equivalent_to(Top[WritablePropertyAny], TopMutableAny))
 static_assert(is_equivalent_to(Bottom[WritablePropertyAny], BottomMutableAny))
 static_assert(is_subtype_of(Bottom[MutableAny], Top[MutableAny]))
 static_assert(not is_subtype_of(Top[MutableAny], Bottom[MutableAny]))
+static_assert(is_subtype_of(MutableAny, Top[MutableAny]))
+static_assert(not is_subtype_of(Top[MutableAny], MutableAny))
+
+def union_order(
+    plain_first: MutableAny | Top[MutableAny],
+    top_first: Top[MutableAny] | MutableAny,
+) -> None:
+    reveal_type(plain_first.value)  # revealed: object
+    reveal_type(top_first.value)  # revealed: object
 
 class MutableAnySubclass(MutableAny):
     value: int
