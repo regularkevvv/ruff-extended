@@ -511,12 +511,10 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         let mut result = self.never();
 
         let source_protocol = ty.as_protocol_instance();
-        let same_origin_materialized_source = source_protocol.is_some_and(|source| {
-            source.is_materialized() && source.class_origin(db) == protocol.class_origin(db)
-        });
+        let materialized_source = source_protocol.is_some_and(ProtocolInstanceType::is_materialized);
 
         if !protocol.is_materialized()
-            && !same_origin_materialized_source
+            && !materialized_source
             && let Some(nominal_instance) = protocol.to_nominal_instance(db)
         {
             // if `ty` and `protocol` are *both* protocols, we also need to treat `ty` as if it

@@ -934,6 +934,18 @@ class StructuralMutableAny:
 static_assert(not is_subtype_of(MutableAnySubclass, Bottom[MutableAny]))
 static_assert(not is_subtype_of(StructuralMutableAny, Bottom[MutableAny]))
 
+class GenericBase[T](Protocol):
+    item: T
+
+class InheritedMutableAny(GenericBase[Any], Protocol):
+    marker: Any
+
+def requires_int_base(value: GenericBase[int]) -> None: ...
+
+def inherited_nominal_relation(top: Top[InheritedMutableAny]) -> None:
+    reveal_type(top.item)  # revealed: object
+    requires_int_base(top)  # error: [invalid-argument-type]
+
 class ClassVarAny(Protocol):
     value: ClassVar[Any]
 
