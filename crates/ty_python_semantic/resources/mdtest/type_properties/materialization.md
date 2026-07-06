@@ -904,6 +904,8 @@ class BottomMutableAny(Protocol):
 
 static_assert(is_equivalent_to(Top[MutableAny], TopMutableAny))
 static_assert(is_equivalent_to(Bottom[MutableAny], BottomMutableAny))
+static_assert(is_subtype_of(Bottom[MutableAny], Top[MutableAny]))
+static_assert(not is_subtype_of(Top[MutableAny], Bottom[MutableAny]))
 
 class ClassVarAny(Protocol):
     value: ClassVar[Any]

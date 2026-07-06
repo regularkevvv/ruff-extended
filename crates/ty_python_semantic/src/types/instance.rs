@@ -514,13 +514,19 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         // we can.
         let mut result = self.never();
 
-        if let Some(nominal_instance) = protocol.to_nominal_instance(db) {
+        let source_protocol = ty.as_protocol_instance();
+        let same_materialized_origin = source_protocol.is_some_and(|source_protocol| {
+            source_protocol.has_same_materialized_origin(db, protocol)
+        });
+
+        if !same_materialized_origin
+            && let Some(nominal_instance) = protocol.to_nominal_instance(db)
+        {
             // if `ty` and `protocol` are *both* protocols, we also need to treat `ty` as if it
             // were a nominal type, or we won't consider a protocol `P` that explicitly inherits
             // from a protocol `Q` to be a subtype of `Q` to be a subtype of `Q` if it overrides
             // `Q`'s members in a Liskov-incompatible way.
-            let type_to_test = ty
-                .as_protocol_instance()
+            let type_to_test = source_protocol
                 .and_then(|protocol| protocol.to_nominal_instance(db))
                 .map(Type::NominalInstance)
                 .unwrap_or(ty);
@@ -818,6 +824,17 @@ fn interface_references_protocol_origin<'db>(
 }
 
 impl<'db> ProtocolInstanceType<'db> {
+    /// Returns whether both protocols are materialized views of the same class origin.
+    fn has_same_materialized_origin(self, db: &'db dyn Db, other: Self) -> bool {
+        match (self.inner, other.inner) {
+            (Protocol::Synthesized(self_protocol), Protocol::Synthesized(other_protocol)) => {
+                self_protocol.origin(db).is_some()
+                    && self_protocol.origin(db) == other_protocol.origin(db)
+            }
+            _ => false,
+        }
+    }
+
     /// Return `true` if this is the standard-library `Hashable` protocol.
     pub(super) fn is_hashable(self, db: &'db dyn Db) -> bool {
         self.to_nominal_instance(db)
