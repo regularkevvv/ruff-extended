@@ -915,6 +915,15 @@ static_assert(is_equivalent_to(Bottom[WritablePropertyAny], BottomMutableAny))
 static_assert(is_subtype_of(Bottom[MutableAny], Top[MutableAny]))
 static_assert(not is_subtype_of(Top[MutableAny], Bottom[MutableAny]))
 
+class MutableAnySubclass(MutableAny):
+    value: int
+
+class StructuralMutableAny:
+    value: int
+
+static_assert(not is_subtype_of(MutableAnySubclass, Bottom[MutableAny]))
+static_assert(not is_subtype_of(StructuralMutableAny, Bottom[MutableAny]))
+
 class ClassVarAny(Protocol):
     value: ClassVar[Any]
 

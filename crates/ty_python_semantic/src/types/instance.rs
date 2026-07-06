@@ -511,11 +511,8 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         let mut result = self.never();
 
         let source_protocol = ty.as_protocol_instance();
-        let same_materialized_origin = source_protocol.is_some_and(|source_protocol| {
-            source_protocol.has_same_materialized_origin(db, protocol)
-        });
 
-        if !same_materialized_origin
+        if !protocol.is_materialized()
             && let Some(nominal_instance) = protocol.to_nominal_instance(db)
         {
             // if `ty` and `protocol` are *both* protocols, we also need to treat `ty` as if it
@@ -823,14 +820,9 @@ fn interface_references_protocol_origin<'db>(
 }
 
 impl<'db> ProtocolInstanceType<'db> {
-    /// Returns whether both protocols are materialized views of the same class origin.
-    fn has_same_materialized_origin(self, db: &'db dyn Db, other: Self) -> bool {
-        match (self.inner, other.inner) {
-            (Protocol::Materialized(self_protocol), Protocol::Materialized(other_protocol)) => {
-                self_protocol.origin(db) == other_protocol.origin(db)
-            }
-            _ => false,
-        }
+    /// Return whether this protocol has an interface produced by materialization.
+    fn is_materialized(self) -> bool {
+        matches!(self.inner, Protocol::Materialized(_))
     }
 
     /// Return `true` if this is the standard-library `Hashable` protocol.
