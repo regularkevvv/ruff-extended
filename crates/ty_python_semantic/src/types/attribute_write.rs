@@ -214,7 +214,24 @@ pub(super) fn attribute_write_requirement<'db>(
             instance_attribute_write_requirement(db, object_ty, attribute)
         }
 
-        Type::ClassLiteral(..) | Type::GenericAlias(..) | Type::SubclassOf(..) => {
+        Type::SubclassOf(subclass) => {
+            if let Some(protocol) = subclass.materialized_protocol()
+                && let Some((write_ty, mut qualifiers)) = protocol
+                    .interface(db)
+                    .class_write_requirement(db, Type::ProtocolInstance(protocol), attribute)
+            {
+                // `ClassVar` prohibits instance writes, not writes through the class object.
+                qualifiers.remove(TypeQualifiers::CLASS_VAR);
+                return AttributeWriteRequirement::ProtocolMember {
+                    write_ty,
+                    qualifiers,
+                };
+            }
+
+            class_attribute_write_requirement(db, object_ty, attribute)
+        }
+
+        Type::ClassLiteral(..) | Type::GenericAlias(..) => {
             class_attribute_write_requirement(db, object_ty, attribute)
         }
 

@@ -350,6 +350,29 @@ impl<'db> ProtocolInterface<'db> {
         })
     }
 
+    /// Returns the declared class-write requirement for a protocol member.
+    ///
+    /// `None` means that the protocol does not declare `name`; `Some((None, _))` means that the
+    /// member exists but is read-only. A writable member's type is bound to `receiver_ty` before
+    /// it is returned.
+    pub(super) fn class_write_requirement(
+        self,
+        db: &'db dyn Db,
+        receiver_ty: Type<'db>,
+        name: &str,
+    ) -> Option<(Option<Type<'db>>, TypeQualifiers)> {
+        self.member_by_name(db, name).map(|member| {
+            let capabilities = member.capabilities(db);
+            (
+                capabilities
+                    .class
+                    .write
+                    .and_then(|write| write.bind_self(db, receiver_ty)),
+                member.qualifiers(),
+            )
+        })
+    }
+
     /// Returns the `__call__` method's callable type if this protocol has a `__call__` method member.
     pub(super) fn call_method(self, db: &'db dyn Db) -> Option<CallableType<'db>> {
         self.member_by_name(db, "__call__").and_then(|member| {

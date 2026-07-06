@@ -140,6 +140,10 @@ impl<'db> SubclassOfType<'db> {
         self.subclass_of
     }
 
+    pub(super) const fn materialized_protocol(self) -> Option<ProtocolInstanceType<'db>> {
+        self.protocol
+    }
+
     pub(crate) const fn is_dynamic(self) -> bool {
         // Unpack `self` so that we're forced to update this method if any more fields are added in the future.
         let Self {

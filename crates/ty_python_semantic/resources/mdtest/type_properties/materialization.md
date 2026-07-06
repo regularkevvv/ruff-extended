@@ -933,7 +933,11 @@ class ClassVarInt:
 static_assert(is_subtype_of(ClassVarInt, Top[ClassVarAny]))
 static_assert(not is_subtype_of(ClassVarInt, Bottom[ClassVarAny]))
 
-def _(top: Top[ClassVarAny], bottom: Bottom[ClassVarAny]) -> None:
+def class_writes(top: Top[ClassVarAny], bottom: Bottom[ClassVarAny]) -> None:
+    type(top).value = 1  # error: [invalid-assignment]
+    type(bottom).value = 1
+
+def class_reads(top: Top[ClassVarAny], bottom: Bottom[ClassVarAny]) -> None:
     reveal_type(type(top).value)  # revealed: object
     reveal_type(type(bottom).value)  # revealed: Never
 ```
