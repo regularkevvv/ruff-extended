@@ -942,7 +942,6 @@ class InheritedMutableAny(GenericBase[Any], Protocol):
     marker: Any
 
 def requires_int_base(value: GenericBase[int]) -> None: ...
-
 def inherited_nominal_relation(top: Top[InheritedMutableAny]) -> None:
     reveal_type(top.item)  # revealed: object
     requires_int_base(top)  # error: [invalid-argument-type]
@@ -1031,7 +1030,6 @@ class TransformingProperty(Protocol):
 
     @property
     def value(self) -> int: ...
-
     @value.setter
     def value(self, value: int) -> None: ...
 
