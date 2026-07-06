@@ -2855,6 +2855,7 @@ of `N` or inhabitants of `type[N]`, *and* the signature of `N.x` is equivalent t
 `P.x` after the descriptor protocol has been invoked on `P.x`:
 
 ```py
+from collections.abc import Callable
 from typing import Protocol
 from typing_extensions import Self
 from ty_extensions import static_assert, is_subtype_of, is_assignable_to, is_equivalent_to, is_disjoint_from
@@ -2869,6 +2870,9 @@ class PStaticMethod(Protocol):
 
 class NNotCallable:
     x = None
+
+class NMaybeCallable:
+    x: Callable[[int], str] | None
 
 class NInstanceMethod:
     def x(self, val: int) -> str:
@@ -2917,6 +2921,7 @@ static_assert(not is_assignable_to(NNotCallable, PClassMethod))
 static_assert(not is_assignable_to(NNotCallable, PStaticMethod))
 static_assert(is_disjoint_from(NNotCallable, PClassMethod))
 static_assert(is_disjoint_from(NNotCallable, PStaticMethod))
+static_assert(not is_disjoint_from(NMaybeCallable, PStaticMethod))
 
 # `NInstanceMethod.x` has the correct type when accessed on an instance of
 # `NInstanceMethod`, but not when accessed on the class object itself
