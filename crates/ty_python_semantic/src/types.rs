@@ -1036,6 +1036,9 @@ struct GeneratorTypes<'db> {
 }
 
 impl<'db> GeneratorTypes<'db> {
+    /// Materializes inherited generator parameters according to their declared variance.
+    ///
+    /// `YieldT` and `ReturnT` are covariant, while `SendT` is contravariant.
     fn materialize(self, db: &'db dyn Db, kind: MaterializationKind) -> Self {
         let visitor = ApplyTypeMappingVisitor::default();
         Self {

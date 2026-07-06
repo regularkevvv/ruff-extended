@@ -327,6 +327,10 @@ impl<'db> ProtocolInterface<'db> {
         self.inner(db).contains_key(name)
     }
 
+    /// Returns whether two interfaces differ for any member named by `required`.
+    ///
+    /// Members outside `required` are deliberately ignored so an unrelated materialized member
+    /// does not disable a valid nominal relation.
     pub(super) fn differs_for_members_required_by(
         self,
         db: &'db dyn Db,

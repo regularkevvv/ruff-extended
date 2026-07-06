@@ -786,6 +786,19 @@ pub(super) fn walk_protocol_instance_type<'db, V: super::visitor::TypeVisitor<'d
     }
 }
 
+/// Returns whether a protocol requirement refers back to its class-backed origin.
+///
+/// Aliases are followed, but nested protocol interfaces are not expanded. A recursive protocol
+/// such as the following must retain its class-backed representation to avoid synthesizing a new
+/// materialized wrapper on every mapping:
+///
+/// ```python
+/// type Alias = P
+///
+/// class P(Protocol):
+///     @property
+///     def child(self) -> Alias: ...
+/// ```
 fn interface_references_protocol_origin<'db>(
     db: &'db dyn Db,
     interface: ProtocolInterface<'db>,
@@ -846,6 +859,10 @@ impl<'db> ProtocolInstanceType<'db> {
         }
     }
 
+    /// Returns whether materialization rewrote any member required by `target`.
+    ///
+    /// The nominal MRO shortcut remains valid when materialization changed only unrelated members;
+    /// otherwise the effective interface must participate in the relation.
     fn materialization_changes_requirements(
         self,
         db: &'db dyn Db,
@@ -876,6 +893,10 @@ impl<'db> ProtocolInstanceType<'db> {
         }
     }
 
+    /// Returns the origin of a materialized property for descriptor-aware assignment lookup.
+    ///
+    /// The effective interface carries mapped read and write types, but the origin retains
+    /// descriptor identity and deletion behavior.
     pub(super) fn materialized_origin_property(
         self,
         db: &'db dyn Db,
@@ -1178,6 +1199,8 @@ mod synthesized_protocol {
     impl get_size2::GetSize for MaterializedProtocolType<'_> {}
 
     impl<'db> MaterializedProtocolType<'db> {
+        /// Remaps the effective interface and origin metadata while preserving the first
+        /// materialization's polarity, making nested top/bottom materialization idempotent.
         pub(super) fn apply_type_mapping_impl<'a>(
             self,
             db: &'db dyn Db,
@@ -1195,6 +1218,8 @@ mod synthesized_protocol {
             )
         }
 
+        /// Collects variables from both the effective interface and the preserved origin
+        /// specialization, where variables omitted from protocol requirements can remain.
         pub(super) fn find_legacy_typevars_impl(
             self,
             db: &'db dyn Db,
