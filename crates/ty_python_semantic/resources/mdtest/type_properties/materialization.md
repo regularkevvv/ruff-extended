@@ -884,7 +884,7 @@ python-version = "3.12"
 ```
 
 ```py
-from typing import Any, ClassVar, Never, Protocol, Self
+from typing import Any, ClassVar, Never, Protocol, Self, TypeVar
 from ty_extensions import Bottom, Top, is_equivalent_to, is_subtype_of, static_assert
 
 class MutableAny(Protocol):
@@ -973,6 +973,15 @@ class SelfContainerChild(SelfContainer):
 
 reveal_type(SelfContainer().member)  # revealed: OriginGeneric[SelfContainer]
 reveal_type(SelfContainerChild().member)  # revealed: OriginGeneric[SelfContainerChild]
+
+T = TypeVar("T")
+
+class LegacyOrigin(Protocol[T]):
+    value: Any
+
+def legacy_origin(value: Top[LegacyOrigin[T]]) -> None: ...
+
+reveal_type(legacy_origin)  # revealed: def legacy_origin[T](value: LegacyOrigin[T]) -> None
 
 class GenericMutable[T](Protocol):
     value: T
