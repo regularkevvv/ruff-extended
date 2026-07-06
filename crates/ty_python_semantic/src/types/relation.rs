@@ -902,52 +902,155 @@ impl<'db> RecursiveAliasSchemaType<'db> {
         }
     }
 
-    fn equivalent_to(
+    fn alias_arguments_for(&self, kind: RecursiveAliasSchemaKind) -> Option<&[Self]> {
+        match (self, kind) {
+            (Self::SourceAlias(arguments), RecursiveAliasSchemaKind::Source)
+            | (Self::TargetAlias(arguments), RecursiveAliasSchemaKind::Target) => Some(arguments),
+            _ => None,
+        }
+    }
+
+    fn children(&self) -> Option<&[Self]> {
+        match self {
+            Self::SourceAlias(arguments)
+            | Self::TargetAlias(arguments)
+            | Self::Union(arguments) => Some(arguments),
+            Self::Concrete(_) => None,
+        }
+    }
+
+    fn contains_alias_arguments_matching(
         &self,
-        other: &Self,
-        active_source_arguments: &[Self],
-        active_target_arguments: &[Self],
+        kind: RecursiveAliasSchemaKind,
+        predicate: &impl Fn(&[Self]) -> bool,
     ) -> bool {
-        match (self, other) {
-            (Self::SourceAlias(left), Self::SourceAlias(right)) => {
-                Self::alias_arguments_match_same_active_schema(
-                    left,
-                    right,
-                    RecursiveAliasSchemaKind::Source,
-                    active_source_arguments,
-                    active_target_arguments,
-                ) || Self::slices_are_equivalent(
-                    left,
-                    right,
-                    active_source_arguments,
-                    active_target_arguments,
-                )
+        if let Some(arguments) = self.alias_arguments_for(kind)
+            && predicate(arguments)
+        {
+            return true;
+        }
+
+        self.children().is_some_and(|children| {
+            children
+                .iter()
+                .any(|child| child.contains_alias_arguments_matching(kind, predicate))
+        })
+    }
+}
+
+struct RecursiveAliasPairSchema<'db> {
+    source: Box<[RecursiveAliasSchemaType<'db>]>,
+    target: Box<[RecursiveAliasSchemaType<'db>]>,
+}
+
+impl<'db> RecursiveAliasPairSchema<'db> {
+    fn from_specializations(
+        db: &'db dyn Db,
+        source: Specialization<'db>,
+        target: Specialization<'db>,
+        active_source: TypeAliasType<'db>,
+        active_target: TypeAliasType<'db>,
+    ) -> Self {
+        Self {
+            source: Self::arguments_from_specialization(db, source, active_source, active_target),
+            target: Self::arguments_from_specialization(db, target, active_source, active_target),
+        }
+    }
+
+    fn arguments_from_specialization(
+        db: &'db dyn Db,
+        specialization: Specialization<'db>,
+        active_source: TypeAliasType<'db>,
+        active_target: TypeAliasType<'db>,
+    ) -> Box<[RecursiveAliasSchemaType<'db>]> {
+        specialization
+            .types(db)
+            .iter()
+            .map(|ty| RecursiveAliasSchemaType::from_type(db, *ty, active_source, active_target))
+            .collect()
+    }
+
+    fn has_same_lengths_as(&self, current: &Self) -> bool {
+        self.source.len() == self.target.len()
+            && self.source.len() == current.source.len()
+            && self.target.len() == current.target.len()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RecursiveAliasSchemaMatcher<'schema, 'db> {
+    active: &'schema RecursiveAliasPairSchema<'db>,
+}
+
+impl<'schema, 'db> RecursiveAliasSchemaMatcher<'schema, 'db> {
+    const fn new(active: &'schema RecursiveAliasPairSchema<'db>) -> Self {
+        Self { active }
+    }
+
+    fn matches(self, current: &RecursiveAliasPairSchema<'db>) -> bool {
+        self.active.has_same_lengths_as(current)
+            && (self.current_grows_from_active(current)
+                || self.current_matches_active_permutation(current))
+    }
+
+    fn current_grows_from_active(self, current: &RecursiveAliasPairSchema<'db>) -> bool {
+        self.arguments_grow_from_schema(&current.source, &self.active.source)
+            && self.arguments_grow_from_schema(&current.target, &self.active.target)
+    }
+
+    fn current_matches_active_permutation(self, current: &RecursiveAliasPairSchema<'db>) -> bool {
+        self.active.target.iter().zip(&current.target).all(
+            |(active_target_type, current_target_type)| {
+                let Some(source_index) = self.active_source_index_for(active_target_type) else {
+                    return false;
+                };
+                current
+                    .source
+                    .get(source_index)
+                    .is_some_and(|current_source_type| {
+                        self.corresponds_to(current_source_type, current_target_type)
+                    })
+            },
+        )
+    }
+
+    fn active_source_index_for(
+        self,
+        active_target_type: &RecursiveAliasSchemaType<'db>,
+    ) -> Option<usize> {
+        self.active
+            .source
+            .iter()
+            .positions(|active_source_type| {
+                self.corresponds_to(active_source_type, active_target_type)
+            })
+            .exactly_one()
+            .ok()
+    }
+
+    fn equivalent_to(
+        self,
+        left: &RecursiveAliasSchemaType<'db>,
+        right: &RecursiveAliasSchemaType<'db>,
+    ) -> bool {
+        use RecursiveAliasSchemaType::{Concrete, SourceAlias, TargetAlias, Union};
+
+        match (left, right) {
+            (SourceAlias(left), SourceAlias(right)) => {
+                self.arguments_match_same_schema(left, right, RecursiveAliasSchemaKind::Source)
+                    || self.slices_are_equivalent(left, right)
             }
-            (Self::TargetAlias(left), Self::TargetAlias(right)) => {
-                Self::alias_arguments_match_same_active_schema(
-                    left,
-                    right,
-                    RecursiveAliasSchemaKind::Target,
-                    active_source_arguments,
-                    active_target_arguments,
-                ) || Self::slices_are_equivalent(
-                    left,
-                    right,
-                    active_source_arguments,
-                    active_target_arguments,
-                )
+            (TargetAlias(left), TargetAlias(right)) => {
+                self.arguments_match_same_schema(left, right, RecursiveAliasSchemaKind::Target)
+                    || self.slices_are_equivalent(left, right)
             }
-            (Self::Concrete(left), Self::Concrete(right)) => left == right,
-            (Self::Union(left), Self::Union(right)) => {
+            (Concrete(left), Concrete(right)) => left == right,
+            (Union(left), Union(right)) => {
                 left.len() == right.len()
                     && left.iter().all(|left_element| {
-                        right.iter().any(|right_element| {
-                            left_element.equivalent_to(
-                                right_element,
-                                active_source_arguments,
-                                active_target_arguments,
-                            )
-                        })
+                        right
+                            .iter()
+                            .any(|right_element| self.equivalent_to(left_element, right_element))
                     })
             }
             _ => false,
@@ -955,259 +1058,129 @@ impl<'db> RecursiveAliasSchemaType<'db> {
     }
 
     fn corresponds_to(
-        &self,
-        other: &Self,
-        active_source_arguments: &[Self],
-        active_target_arguments: &[Self],
+        self,
+        left: &RecursiveAliasSchemaType<'db>,
+        right: &RecursiveAliasSchemaType<'db>,
     ) -> bool {
-        self.equivalent_to(other, active_source_arguments, active_target_arguments)
-            || self.grows_from(other, active_source_arguments, active_target_arguments)
-            || other.grows_from(self, active_source_arguments, active_target_arguments)
+        self.equivalent_to(left, right)
+            || self.grows_from(left, right)
+            || self.grows_from(right, left)
     }
 
     fn slices_are_equivalent(
-        left: &[Self],
-        right: &[Self],
-        active_source_arguments: &[Self],
-        active_target_arguments: &[Self],
+        self,
+        left: &[RecursiveAliasSchemaType<'db>],
+        right: &[RecursiveAliasSchemaType<'db>],
     ) -> bool {
         left.len() == right.len()
-            && left.iter().zip(right).all(|(left, right)| {
-                left.equivalent_to(right, active_source_arguments, active_target_arguments)
-            })
+            && left
+                .iter()
+                .zip(right)
+                .all(|(left, right)| self.equivalent_to(left, right))
     }
 
-    fn source_alias_arguments_match_active_schema(
-        arguments: &[Self],
-        active_source_arguments: &[Self],
-        active_target_arguments: &[Self],
-    ) -> bool {
-        Self::alias_arguments_match_any_active_schema(
-            arguments,
-            RecursiveAliasSchemaKind::Source,
-            active_source_arguments,
-            active_target_arguments,
-        )
-    }
-
-    fn target_alias_arguments_match_active_schema(
-        arguments: &[Self],
-        active_source_arguments: &[Self],
-        active_target_arguments: &[Self],
-    ) -> bool {
-        Self::alias_arguments_match_any_active_schema(
-            arguments,
-            RecursiveAliasSchemaKind::Target,
-            active_source_arguments,
-            active_target_arguments,
-        )
-    }
-
-    fn alias_arguments_match_same_active_schema(
-        left: &[Self],
-        right: &[Self],
+    fn arguments_match_same_schema(
+        self,
+        left: &[RecursiveAliasSchemaType<'db>],
+        right: &[RecursiveAliasSchemaType<'db>],
         kind: RecursiveAliasSchemaKind,
-        active_source_arguments: &[Self],
-        active_target_arguments: &[Self],
     ) -> bool {
-        Self::any_alias_argument_schema(
-            kind,
-            active_source_arguments,
-            active_target_arguments,
-            &|schema_arguments| {
-                Self::alias_arguments_grow_from_schema(
-                    left,
-                    schema_arguments,
-                    active_source_arguments,
-                    active_target_arguments,
-                ) && Self::alias_arguments_grow_from_schema(
-                    right,
-                    schema_arguments,
-                    active_source_arguments,
-                    active_target_arguments,
-                )
-            },
-        )
+        self.any_argument_schema(kind, |schema_arguments| {
+            self.arguments_grow_from_schema(left, schema_arguments)
+                && self.arguments_grow_from_schema(right, schema_arguments)
+        })
     }
 
-    fn alias_arguments_match_any_active_schema(
-        arguments: &[Self],
+    fn arguments_match_any_schema(
+        self,
+        arguments: &[RecursiveAliasSchemaType<'db>],
         kind: RecursiveAliasSchemaKind,
-        active_source_arguments: &[Self],
-        active_target_arguments: &[Self],
     ) -> bool {
-        Self::any_alias_argument_schema(
-            kind,
-            active_source_arguments,
-            active_target_arguments,
-            &|schema_arguments| {
-                Self::alias_arguments_grow_from_schema(
-                    arguments,
-                    schema_arguments,
-                    active_source_arguments,
-                    active_target_arguments,
-                )
-            },
-        )
+        self.any_argument_schema(kind, |schema_arguments| {
+            self.arguments_grow_from_schema(arguments, schema_arguments)
+        })
     }
 
-    fn any_alias_argument_schema(
+    fn any_argument_schema(
+        self,
         kind: RecursiveAliasSchemaKind,
-        active_source_arguments: &[Self],
-        active_target_arguments: &[Self],
-        predicate: &impl Fn(&[Self]) -> bool,
+        predicate: impl Fn(&[RecursiveAliasSchemaType<'db>]) -> bool,
     ) -> bool {
         let active_arguments = match kind {
-            RecursiveAliasSchemaKind::Source => active_source_arguments,
-            RecursiveAliasSchemaKind::Target => active_target_arguments,
+            RecursiveAliasSchemaKind::Source => &self.active.source,
+            RecursiveAliasSchemaKind::Target => &self.active.target,
         };
 
         predicate(active_arguments)
-            || active_source_arguments
+            || self
+                .active
+                .source
                 .iter()
-                .any(|argument| argument.any_nested_alias_argument_schema(kind, predicate))
-            || active_target_arguments
-                .iter()
-                .any(|argument| argument.any_nested_alias_argument_schema(kind, predicate))
+                .chain(self.active.target.iter())
+                .any(|argument| argument.contains_alias_arguments_matching(kind, &predicate))
     }
 
-    fn any_nested_alias_argument_schema(
-        &self,
-        kind: RecursiveAliasSchemaKind,
-        predicate: &impl Fn(&[Self]) -> bool,
-    ) -> bool {
-        match self {
-            Self::SourceAlias(arguments) if kind == RecursiveAliasSchemaKind::Source => {
-                predicate(arguments)
-                    || arguments
-                        .iter()
-                        .any(|argument| argument.any_nested_alias_argument_schema(kind, predicate))
-            }
-            Self::TargetAlias(arguments) if kind == RecursiveAliasSchemaKind::Target => {
-                predicate(arguments)
-                    || arguments
-                        .iter()
-                        .any(|argument| argument.any_nested_alias_argument_schema(kind, predicate))
-            }
-            Self::SourceAlias(arguments)
-            | Self::TargetAlias(arguments)
-            | Self::Union(arguments) => arguments
-                .iter()
-                .any(|argument| argument.any_nested_alias_argument_schema(kind, predicate)),
-            Self::Concrete(_) => false,
-        }
-    }
-
-    fn alias_arguments_grow_from_schema(
-        arguments: &[Self],
-        schema_arguments: &[Self],
-        active_source_arguments: &[Self],
-        active_target_arguments: &[Self],
+    fn arguments_grow_from_schema(
+        self,
+        arguments: &[RecursiveAliasSchemaType<'db>],
+        schema_arguments: &[RecursiveAliasSchemaType<'db>],
     ) -> bool {
         arguments.len() == schema_arguments.len()
             && arguments
                 .iter()
                 .zip(schema_arguments)
-                .all(|(argument, active_argument)| {
-                    argument.grows_from(
-                        active_argument,
-                        active_source_arguments,
-                        active_target_arguments,
-                    )
-                })
+                .all(|(argument, schema_argument)| self.grows_from(argument, schema_argument))
     }
 
     fn grows_from(
-        &self,
-        active_argument: &Self,
-        active_source_arguments: &[Self],
-        active_target_arguments: &[Self],
+        self,
+        argument: &RecursiveAliasSchemaType<'db>,
+        schema_argument: &RecursiveAliasSchemaType<'db>,
     ) -> bool {
-        if self.equivalent_to(
-            active_argument,
-            active_source_arguments,
-            active_target_arguments,
-        ) {
+        if self.equivalent_to(argument, schema_argument) {
             return true;
         }
 
-        let Self::Union(elements) = self else {
+        let RecursiveAliasSchemaType::Union(elements) = argument else {
             return false;
         };
 
-        if let Self::Union(active_elements) = active_argument {
-            return Self::union_elements_grow_from(
-                elements,
-                active_elements,
-                active_source_arguments,
-                active_target_arguments,
-            );
+        match schema_argument {
+            RecursiveAliasSchemaType::Union(schema_elements) => {
+                self.union_elements_grow_from(elements, schema_elements)
+            }
+            schema_argument => {
+                self.union_elements_grow_from(elements, std::slice::from_ref(schema_argument))
+            }
         }
-
-        Self::union_elements_grow_from(
-            elements,
-            std::slice::from_ref(active_argument),
-            active_source_arguments,
-            active_target_arguments,
-        )
     }
 
     fn union_elements_grow_from(
-        elements: &[Self],
-        active_elements: &[Self],
-        active_source_arguments: &[Self],
-        active_target_arguments: &[Self],
+        self,
+        elements: &[RecursiveAliasSchemaType<'db>],
+        schema_elements: &[RecursiveAliasSchemaType<'db>],
     ) -> bool {
-        if !active_elements.iter().all(|active_element| {
-            elements.iter().any(|element| {
-                element.equivalent_to(
-                    active_element,
-                    active_source_arguments,
-                    active_target_arguments,
-                )
-            })
-        }) {
-            return false;
-        }
-
-        for element in elements {
-            if active_elements.iter().any(|active_element| {
-                element.equivalent_to(
-                    active_element,
-                    active_source_arguments,
-                    active_target_arguments,
-                )
-            }) {
-                continue;
-            }
-            if !element.is_recursive_alias_schema_instance(
-                active_source_arguments,
-                active_target_arguments,
-            ) {
-                return false;
-            }
-        }
-
-        true
+        schema_elements.iter().all(|schema_element| {
+            elements
+                .iter()
+                .any(|element| self.equivalent_to(element, schema_element))
+        }) && elements.iter().all(|element| {
+            schema_elements
+                .iter()
+                .any(|schema_element| self.equivalent_to(element, schema_element))
+                || self.is_recursive_alias_schema_instance(element)
+        })
     }
 
-    fn is_recursive_alias_schema_instance(
-        &self,
-        active_source_arguments: &[Self],
-        active_target_arguments: &[Self],
-    ) -> bool {
-        match self {
-            Self::SourceAlias(arguments) => Self::source_alias_arguments_match_active_schema(
-                arguments,
-                active_source_arguments,
-                active_target_arguments,
-            ),
-            Self::TargetAlias(arguments) => Self::target_alias_arguments_match_active_schema(
-                arguments,
-                active_source_arguments,
-                active_target_arguments,
-            ),
-            Self::Concrete(_) | Self::Union(_) => false,
+    fn is_recursive_alias_schema_instance(self, argument: &RecursiveAliasSchemaType<'db>) -> bool {
+        match argument {
+            RecursiveAliasSchemaType::SourceAlias(arguments) => {
+                self.arguments_match_any_schema(arguments, RecursiveAliasSchemaKind::Source)
+            }
+            RecursiveAliasSchemaType::TargetAlias(arguments) => {
+                self.arguments_match_any_schema(arguments, RecursiveAliasSchemaKind::Target)
+            }
+            RecursiveAliasSchemaType::Concrete(_) | RecursiveAliasSchemaType::Union(_) => false,
         }
     }
 }
@@ -1451,23 +1424,17 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             return false;
         }
 
-        let Some(active_source_specialization) =
-            Self::type_alias_specialization_or_default(db, active_source)
-        else {
-            return false;
-        };
-        let Some(active_target_specialization) =
-            Self::type_alias_specialization_or_default(db, active_target)
-        else {
-            return false;
-        };
-        let Some(current_source_specialization) =
-            Self::type_alias_specialization_or_default(db, current_source)
-        else {
-            return false;
-        };
-        let Some(current_target_specialization) =
-            Self::type_alias_specialization_or_default(db, current_target)
+        let (
+            Some(active_source_specialization),
+            Some(active_target_specialization),
+            Some(current_source_specialization),
+            Some(current_target_specialization),
+        ) = (
+            Self::type_alias_specialization_or_default(db, active_source),
+            Self::type_alias_specialization_or_default(db, active_target),
+            Self::type_alias_specialization_or_default(db, current_source),
+            Self::type_alias_specialization_or_default(db, current_target),
+        )
         else {
             return false;
         };
@@ -1480,90 +1447,22 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             return false;
         }
 
-        let active_source_types: Vec<_> = active_source_specialization
-            .types(db)
-            .iter()
-            .map(|ty| RecursiveAliasSchemaType::from_type(db, *ty, active_source, active_target))
-            .collect();
-        let active_target_types: Vec<_> = active_target_specialization
-            .types(db)
-            .iter()
-            .map(|ty| RecursiveAliasSchemaType::from_type(db, *ty, active_source, active_target))
-            .collect();
-        let current_source_types: Vec<_> = current_source_specialization
-            .types(db)
-            .iter()
-            .map(|ty| RecursiveAliasSchemaType::from_type(db, *ty, active_source, active_target))
-            .collect();
-        let current_target_types: Vec<_> = current_target_specialization
-            .types(db)
-            .iter()
-            .map(|ty| RecursiveAliasSchemaType::from_type(db, *ty, active_source, active_target))
-            .collect();
+        let active_schema = RecursiveAliasPairSchema::from_specializations(
+            db,
+            active_source_specialization,
+            active_target_specialization,
+            active_source,
+            active_target,
+        );
+        let current_schema = RecursiveAliasPairSchema::from_specializations(
+            db,
+            current_source_specialization,
+            current_target_specialization,
+            active_source,
+            active_target,
+        );
 
-        if active_source_types.len() != active_target_types.len()
-            || active_source_types.len() != current_source_types.len()
-            || active_target_types.len() != current_target_types.len()
-        {
-            return false;
-        }
-
-        if RecursiveAliasSchemaType::alias_arguments_grow_from_schema(
-            &current_source_types,
-            &active_source_types,
-            &active_source_types,
-            &active_target_types,
-        ) && RecursiveAliasSchemaType::alias_arguments_grow_from_schema(
-            &current_target_types,
-            &active_target_types,
-            &active_source_types,
-            &active_target_types,
-        ) {
-            return true;
-        }
-
-        let active_source_types_are_unique = active_source_types
-            .iter()
-            .enumerate()
-            .all(|(index, source_type)| !active_source_types[..index].contains(source_type));
-        if !active_source_types_are_unique {
-            return false;
-        }
-
-        let Some(active_target_to_source_indices): Option<Vec<_>> = active_target_types
-            .iter()
-            .map(|active_target_type| {
-                active_source_types
-                    .iter()
-                    .positions(|active_source_type| {
-                        active_source_type.corresponds_to(
-                            active_target_type,
-                            &active_source_types,
-                            &active_target_types,
-                        )
-                    })
-                    .exactly_one()
-                    .ok()
-            })
-            .collect()
-        else {
-            return false;
-        };
-
-        active_target_to_source_indices
-            .iter()
-            .zip(&current_target_types)
-            .all(|(source_index, current_target_type)| {
-                current_source_types
-                    .get(*source_index)
-                    .is_some_and(|current_source_type| {
-                        current_source_type.corresponds_to(
-                            current_target_type,
-                            &active_source_types,
-                            &active_target_types,
-                        )
-                    })
-            })
+        RecursiveAliasSchemaMatcher::new(&active_schema).matches(&current_schema)
     }
 
     fn type_alias_specialization_or_default(
