@@ -796,6 +796,7 @@ pub(super) fn walk_protocol_instance_type<'db, V: super::visitor::TypeVisitor<'d
 ///     @property
 ///     def child(self) -> Alias: ...
 /// ```
+#[salsa::tracked]
 fn interface_references_protocol_origin<'db>(
     db: &'db dyn Db,
     interface: ProtocolInterface<'db>,
