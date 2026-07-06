@@ -985,34 +985,31 @@ impl<'db> FmtDetailed<'db> for DisplayRepresentation<'db> {
                         .display_with(self.db, self.settings.clone())
                         .fmt_detailed(f),
                 },
+                Protocol::Materialized(materialized) => match *materialized.origin(self.db) {
+                    ClassType::NonGeneric(class) => class
+                        .display_with(self.db, self.settings.clone())
+                        .fmt_detailed(f),
+                    ClassType::Generic(alias) => alias
+                        .display_with(self.db, self.settings.clone())
+                        .fmt_detailed(f),
+                },
                 Protocol::Synthesized(synthetic) => {
-                    if let Some(origin) = synthetic.origin(self.db) {
-                        match *origin {
-                            ClassType::NonGeneric(class) => class
-                                .display_with(self.db, self.settings.clone())
-                                .fmt_detailed(f),
-                            ClassType::Generic(alias) => alias
-                                .display_with(self.db, self.settings.clone())
-                                .fmt_detailed(f),
+                    f.set_invalid_type_annotation();
+                    f.write_char('<')?;
+                    f.with_type(Type::SpecialForm(SpecialFormType::Protocol))
+                        .write_str("Protocol")?;
+                    f.write_str(" with members ")?;
+                    let interface = synthetic.interface(self.db);
+                    let member_list = interface.members(self.db);
+                    let num_members = member_list.len();
+                    for (i, member) in member_list.enumerate() {
+                        let is_last = i == num_members - 1;
+                        write!(f, "'{}'", member.name())?;
+                        if !is_last {
+                            f.write_str(", ")?;
                         }
-                    } else {
-                        f.set_invalid_type_annotation();
-                        f.write_char('<')?;
-                        f.with_type(Type::SpecialForm(SpecialFormType::Protocol))
-                            .write_str("Protocol")?;
-                        f.write_str(" with members ")?;
-                        let interface = synthetic.interface(self.db);
-                        let member_list = interface.members(self.db);
-                        let num_members = member_list.len();
-                        for (i, member) in member_list.enumerate() {
-                            let is_last = i == num_members - 1;
-                            write!(f, "'{}'", member.name())?;
-                            if !is_last {
-                                f.write_str(", ")?;
-                            }
-                        }
-                        f.write_char('>')
                     }
+                    f.write_char('>')
                 }
             },
             Type::PropertyInstance(property) => f

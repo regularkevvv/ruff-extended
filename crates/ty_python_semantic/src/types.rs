@@ -2732,10 +2732,14 @@ impl<'db> Type<'db> {
                 elem.class_member_with_policy(db, name.clone(), policy)
             }),
             // TODO: Once `to_meta_type` for the synthesized protocol is fully implemented, this handling should be removed.
-            Type::ProtocolInstance(ProtocolInstanceType {
-                inner: Protocol::Synthesized(_),
-                ..
-            }) => self.instance_member(db, &name),
+            Type::ProtocolInstance(protocol)
+                if matches!(
+                    protocol.inner,
+                    Protocol::Materialized(_) | Protocol::Synthesized(_)
+                ) =>
+            {
+                self.instance_member(db, &name)
+            }
 
             Type::LiteralValue(literal) if name == "__len__" => {
                 if let Some(length) = match literal.kind() {
@@ -3857,11 +3861,12 @@ impl<'db> Type<'db> {
                 //
                 // Note that we could do this for *all* protocols, but it's only *necessary* for synthesized
                 // ones, and the standard logic is *probably* more performant for class-based protocols?
-                Type::ProtocolInstance(ProtocolInstanceType {
-                    inner: Protocol::Synthesized(protocol),
-                    ..
-                }) if policy.mro_no_object_fallback()
-                    && !protocol.interface(db).includes_member(db, name_str) =>
+                Type::ProtocolInstance(protocol)
+                    if matches!(
+                        protocol.inner,
+                        Protocol::Materialized(_) | Protocol::Synthesized(_)
+                    ) && policy.mro_no_object_fallback()
+                        && !protocol.interface(db).includes_member(db, name_str) =>
                 {
                     Place::Undefined.into()
                 }
