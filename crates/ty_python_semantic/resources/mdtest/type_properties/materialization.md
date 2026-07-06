@@ -940,6 +940,18 @@ def class_writes(top: Top[ClassVarAny], bottom: Bottom[ClassVarAny]) -> None:
 def class_reads(top: Top[ClassVarAny], bottom: Bottom[ClassVarAny]) -> None:
     reveal_type(type(top).value)  # revealed: object
     reveal_type(type(bottom).value)  # revealed: Never
+
+class GenericMutable[T](Protocol):
+    value: T
+
+type MutableAlias[T] = GenericMutable[T]
+
+def alias_writes(
+    top: Top[MutableAlias[Any]],
+    bottom: Bottom[MutableAlias[Any]],
+) -> None:
+    top.value = 1  # error: [invalid-assignment]
+    bottom.value = 1
 ```
 
 Materialized protocols preserve their class-backed display while exposing their rewritten member
