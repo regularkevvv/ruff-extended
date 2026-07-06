@@ -466,7 +466,7 @@ def is_has_gradual_class_var(x: object) -> TypeIs[HasGradualClassVar]:
 
 def _(x: object):
     if is_has_gradual_class_var(x):
-        reveal_type(type(x).x)  # revealed: Any
+        reveal_type(type(x).x)  # revealed: object
 
 class X(Protocol):
     x: int

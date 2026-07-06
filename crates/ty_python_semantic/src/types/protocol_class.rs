@@ -387,6 +387,25 @@ impl<'db> ProtocolInterface<'db> {
             .unwrap_or_else(|| Type::object().member(db, name))
     }
 
+    /// Looks up a member through the protocol's class-access capabilities.
+    pub(super) fn class_member(
+        self,
+        db: &'db dyn Db,
+        name: &str,
+    ) -> Option<PlaceAndQualifiers<'db>> {
+        self.member_by_name(db, name).and_then(|member| {
+            let read = member.capabilities(db).class.read?;
+            Some(PlaceAndQualifiers {
+                place: read
+                    .resolve(db)
+                    .map(|read| Place::bound(read.ty()))
+                    .unwrap_or(Place::Undefined)
+                    .with_provenance(Provenance::from_definition(member.definition())),
+                qualifiers: member.qualifiers(),
+            })
+        })
+    }
+
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
