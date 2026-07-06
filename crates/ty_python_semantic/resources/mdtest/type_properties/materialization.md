@@ -873,6 +873,64 @@ def capybara(top: Top[Invariant[Any]], bottom: Bottom[Invariant[Any]]) -> None:
     reveal_type(bottom.attr)  # revealed: Never
 ```
 
+## Protocols
+
+Protocol materialization maps readable member types covariantly and writable member types
+contravariantly. A mutable attribute therefore materializes to an asymmetric read/write property:
+
+```toml
+[environment]
+python-version = "3.12"
+```
+
+```py
+from typing import Any, ClassVar, Never, Protocol
+from ty_extensions import Bottom, Top, is_equivalent_to, is_subtype_of, static_assert
+
+class MutableAny(Protocol):
+    value: Any
+
+class TopMutableAny(Protocol):
+    @property
+    def value(self) -> object: ...
+    @value.setter
+    def value(self, value: Never) -> None: ...
+
+class BottomMutableAny(Protocol):
+    @property
+    def value(self) -> Never: ...
+    @value.setter
+    def value(self, value: object) -> None: ...
+
+static_assert(is_equivalent_to(Top[MutableAny], TopMutableAny))
+static_assert(is_equivalent_to(Bottom[MutableAny], BottomMutableAny))
+
+class ClassVarAny(Protocol):
+    value: ClassVar[Any]
+
+class ClassVarInt:
+    value: ClassVar[int] = 1
+
+static_assert(is_subtype_of(ClassVarInt, Top[ClassVarAny]))
+static_assert(not is_subtype_of(ClassVarInt, Bottom[ClassVarAny]))
+```
+
+Materialized protocols preserve their class-backed display while exposing their rewritten member
+types:
+
+```py
+class ReadAny(Protocol):
+    @property
+    def value(self) -> Any: ...
+
+def _(plain: ReadAny, top: Top[ReadAny], bottom: Bottom[ReadAny]) -> None:
+    reveal_type(plain)  # revealed: ReadAny
+    reveal_type(top)  # revealed: ReadAny
+    reveal_type(bottom)  # revealed: ReadAny
+    reveal_type(top.value)  # revealed: object
+    reveal_type(bottom.value)  # revealed: Never
+```
+
 Alias specializations also preserve the materialization polarity in contravariant positions.
 
 ```py
