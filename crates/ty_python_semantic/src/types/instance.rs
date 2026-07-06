@@ -963,7 +963,12 @@ impl<'db> ProtocolInstanceType<'db> {
             Protocol::FromClass(class) => class.instance_member(db, name),
             Protocol::Materialized(materialized) => {
                 let interface = materialized.interface(db);
-                if interface.includes_member(db, name) {
+                if interface.includes_member(db, name)
+                    && !materialized
+                        .origin(db)
+                        .interface(db)
+                        .member_has_todo_type(db, name)
+                {
                     interface.instance_member(db, name)
                 } else {
                     materialized.origin(db).instance_member(db, name)

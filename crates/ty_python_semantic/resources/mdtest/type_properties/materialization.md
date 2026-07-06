@@ -886,6 +886,7 @@ python-version = "3.12"
 ```py
 from typing import Any, ClassVar, Never, Protocol, Self, TypeVar
 from ty_extensions import Bottom, Top, is_equivalent_to, is_subtype_of, static_assert
+from typing_extensions import TypeIs
 
 class MutableAny(Protocol):
     value: Any
@@ -970,6 +971,29 @@ class OriginOnlyInit(Protocol):
 def origin_only_init(plain: OriginOnlyInit, top: Top[OriginOnlyInit]) -> None:
     reveal_type(plain.__init__)  # revealed: bound method OriginOnlyInit.__init__(value: int) -> None
     reveal_type(top.__init__)  # revealed: bound method OriginOnlyInit.__init__(value: int) -> None
+
+class DescriptorMethods(Protocol):
+    @classmethod
+    def make(cls) -> int: ...
+    @staticmethod
+    def parse() -> str: ...
+
+def is_descriptor_methods(value: object) -> TypeIs[DescriptorMethods]:
+    return True
+
+def descriptor_methods(
+    plain: DescriptorMethods,
+    top: Top[DescriptorMethods],
+    bottom: Bottom[DescriptorMethods],
+    value: object,
+) -> None:
+    reveal_type(plain.make())  # revealed: int
+    reveal_type(top.make())  # revealed: int
+    reveal_type(bottom.make())  # revealed: int
+    reveal_type(top.parse())  # revealed: str
+    if is_descriptor_methods(value):
+        reveal_type(value.make())  # revealed: int
+        reveal_type(value.parse())  # revealed: str
 
 class OriginGeneric[T](Protocol):
     value: Any

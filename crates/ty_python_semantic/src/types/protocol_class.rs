@@ -327,6 +327,11 @@ impl<'db> ProtocolInterface<'db> {
         self.inner(db).contains_key(name)
     }
 
+    pub(super) fn member_has_todo_type(self, db: &'db dyn Db, name: &str) -> bool {
+        self.member_by_name(db, name)
+            .is_some_and(|member| member.has_todo_type())
+    }
+
     /// Returns the declared instance-write requirement for a protocol member.
     ///
     /// `None` means that the protocol does not declare `name`; `Some((None, _))` means that the

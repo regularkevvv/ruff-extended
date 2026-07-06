@@ -2734,7 +2734,12 @@ impl<'db> Type<'db> {
             Type::ProtocolInstance(ProtocolInstanceType {
                 inner: Protocol::Materialized(materialized),
                 ..
-            }) if !materialized.interface(db).includes_member(db, &name) => {
+            }) if !materialized.interface(db).includes_member(db, &name)
+                || materialized
+                    .origin(db)
+                    .interface(db)
+                    .member_has_todo_type(db, &name) =>
+            {
                 Type::instance(db, *materialized.origin(db))
                     .class_member_with_policy(db, name, policy)
             }
