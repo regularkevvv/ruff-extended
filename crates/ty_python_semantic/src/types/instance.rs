@@ -10,7 +10,7 @@ use ty_module_resolver::{ModuleName, file_to_module};
 use super::protocol_class::ProtocolInterface;
 use super::{
     BoundTypeVarInstance, ClassType, DivergentType, KnownClass, MaterializationKind,
-    SubclassOfType, Type, TypeVarVariance,
+    SubclassOfType, Type, TypeAliasType, TypeVarVariance,
 };
 use crate::place::PlaceAndQualifiers;
 use crate::types::constraints::{
@@ -798,6 +798,10 @@ fn interface_references_protocol_origin<'db>(
     impl<'db> TypeVisitor<'db> for ProtocolReferenceFinder<'db> {
         fn should_visit_lazy_type_attributes(&self) -> bool {
             false
+        }
+
+        fn visit_type_alias_type(&self, db: &'db dyn Db, type_alias: TypeAliasType<'db>) {
+            self.visit_type(db, type_alias.value_type(db));
         }
 
         fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {

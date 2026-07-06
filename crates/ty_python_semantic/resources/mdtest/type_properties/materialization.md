@@ -1057,6 +1057,16 @@ def alias_writes(
 ) -> None:
     top.value = 1  # error: [invalid-assignment]
     bottom.value = 1
+
+type RecursiveAlias = RecursiveProtocol
+
+class RecursiveProtocol(Protocol):
+    marker: Any
+
+    @property
+    def child(self) -> RecursiveAlias: ...
+
+static_assert(is_equivalent_to(Top[RecursiveProtocol], Top[Top[RecursiveProtocol]]))
 ```
 
 Materialized protocols preserve their class-backed display while exposing their rewritten member
