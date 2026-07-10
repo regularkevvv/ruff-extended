@@ -27,6 +27,8 @@ ruff_ranged_value = { workspace = true, features = ["get-size"] }
 ruff_text_size = { workspace = true }
 ty_combine = { workspace = true }
 ty_module_resolver = { workspace = true }
+ty_plugin_host = { workspace = true }
+ty_plugin_protocol = { workspace = true }
 ty_python_semantic = { workspace = true, features = ["serde"] }
 ty_static = { workspace = true }
 ty_python_core = { workspace = true }
@@ -79,6 +81,9 @@ zstd = ["ty_vendored/zstd"]
 junit = ["ruff_db/junit"]
 format = ["ruff_python_formatter"]
 testing = []
+# Embed the WASM plugin runtime (native only). Enables the `wasm` plugin runtime; never enabled for
+# the `wasm32` `ty_wasm` build.
+plugins-wasm = ["ty_plugin_host/plugins-wasm"]
 
 [lints]
 workspace = true

@@ -1,10 +1,17 @@
+#[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
+use std::collections::BTreeMap;
 use std::fmt::Formatter;
+#[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
+use std::panic::AssertUnwindSafe;
 use std::panic::RefUnwindSafe;
 use std::sync::Arc;
 use std::{cmp, fmt};
 
 pub use self::changes::ChangeResult;
 use crate::CollectReporter;
+#[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
+use crate::metadata::settings::PluginRuntimeSettings;
+use crate::metadata::settings::Settings;
 use crate::metadata::settings::file_settings;
 use crate::{ProgressReporter, Project, ProjectMetadata};
 use get_size2::StandardTracker;
@@ -15,11 +22,16 @@ use ruff_db::system::System;
 use ruff_db::vendored::VendoredFileSystem;
 use salsa::{Database, Event, Setter};
 use ty_module_resolver::SearchPaths;
+#[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
+use ty_plugin_host::{HostError, PluginEnvironment, PluginHost, WasmLimits, WasmRunner};
+#[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
+use ty_plugin_protocol::PluginManifest;
+use ty_plugin_protocol::{PluginRequest, PluginResponse};
 use ty_python_core::program::{
     FallibleStrategy, MisconfigurationStrategy, Program, UseDefaultStrategy,
 };
 use ty_python_semantic::lint::{LintRegistry, RuleSelection};
-use ty_python_semantic::{AnalysisSettings, Db as SemanticDb};
+use ty_python_semantic::{AnalysisSettings, Db as SemanticDb, SemanticPluginRuntimeError};
 
 mod changes;
 mod ignore;
@@ -29,6 +41,216 @@ pub trait Db: SemanticDb {
     fn project(&self) -> Project;
 
     fn dyn_clone(&self) -> Box<dyn Db>;
+}
+
+#[derive(Clone, Default)]
+struct SemanticPluginRuntimeState {
+    #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
+    wasm_host: Option<Arc<AssertUnwindSafe<PluginHost<WasmRunner>>>>,
+    #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
+    wasm_errors: Arc<BTreeMap<String, SemanticPluginRuntimeError>>,
+}
+
+impl SemanticPluginRuntimeState {
+    fn from_settings(settings: &Settings, system: &dyn System) -> Self {
+        #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
+        {
+            Self::from_settings_wasm(settings, system)
+        }
+
+        #[cfg(not(all(feature = "plugins-wasm", not(target_arch = "wasm32"))))]
+        {
+            let _ = (settings, system);
+            Self::default()
+        }
+    }
+
+    fn execute(
+        &self,
+        plugin_id: &str,
+        request: &PluginRequest,
+    ) -> Result<PluginResponse, SemanticPluginRuntimeError> {
+        #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
+        {
+            if let Some(error) = self.wasm_errors.get(plugin_id) {
+                return Err(error.clone());
+            }
+            if let Some(error) = self.wasm_errors.get("*") {
+                return Err(error.clone());
+            }
+
+            let Some(host) = &self.wasm_host else {
+                return Err(Self::unsupported_runtime_error());
+            };
+
+            return host
+                .0
+                .execute(plugin_id, request)
+                .map_err(Self::host_error_to_runtime_error);
+        }
+
+        #[cfg(not(all(feature = "plugins-wasm", not(target_arch = "wasm32"))))]
+        {
+            let _ = (plugin_id, request);
+            Err(Self::unsupported_runtime_error())
+        }
+    }
+
+    fn unsupported_runtime_error() -> SemanticPluginRuntimeError {
+        SemanticPluginRuntimeError::new(
+            "plugin runtime `wasm` is not available in this build",
+            "Rebuild `ty` with the `plugins-wasm` feature enabled or remove the plugin.",
+        )
+    }
+
+    #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
+    fn from_settings_wasm(settings: &Settings, system: &dyn System) -> Self {
+        let plugin_settings = settings.plugins();
+        if !plugin_settings.enabled() {
+            return Self::default();
+        }
+
+        let mut runner = match WasmRunner::new(WasmLimits::default()) {
+            Ok(runner) => runner,
+            Err(error) => {
+                return Self {
+                    wasm_host: None,
+                    wasm_errors: Arc::new(BTreeMap::from([(
+                        "*".to_string(),
+                        Self::runtime_error_to_semantic_error(error),
+                    )])),
+                };
+            }
+        };
+
+        let mut manifests = Vec::new();
+        let mut errors = BTreeMap::new();
+
+        for plugin in plugin_settings
+            .plugins()
+            .iter()
+            .filter(|plugin| plugin.runtime() == PluginRuntimeSettings::Wasm)
+        {
+            if !plugin.trusted() {
+                continue;
+            }
+
+            let manifest_path = plugin.manifest_path().unwrap_or(plugin.path());
+            let manifest_content = match system.read_to_string(manifest_path) {
+                Ok(content) => content,
+                Err(error) => {
+                    errors.insert(
+                        plugin.id().to_string(),
+                        SemanticPluginRuntimeError::new(
+                            format!(
+                                "failed to read manifest for plugin `{}`: {error}",
+                                plugin.id()
+                            ),
+                            "Fix the plugin manifest path or remove the plugin.",
+                        ),
+                    );
+                    continue;
+                }
+            };
+
+            let manifest = match serde_json::from_str::<PluginManifest>(&manifest_content) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    errors.insert(
+                        plugin.id().to_string(),
+                        SemanticPluginRuntimeError::new(
+                            format!(
+                                "failed to parse manifest for plugin `{}`: {error}",
+                                plugin.id()
+                            ),
+                            "Fix the plugin manifest JSON or remove the plugin.",
+                        ),
+                    );
+                    continue;
+                }
+            };
+
+            if manifest.id != plugin.id() {
+                errors.insert(
+                    plugin.id().to_string(),
+                    SemanticPluginRuntimeError::new(
+                        format!(
+                            "configured plugin id `{}` does not match manifest id `{}`",
+                            plugin.id(),
+                            manifest.id
+                        ),
+                        "Make the configured plugin id match the manifest id.",
+                    ),
+                );
+                continue;
+            }
+
+            let artifact = match system.read_to_bytes(plugin.path()) {
+                Ok(artifact) => artifact,
+                Err(error) => {
+                    errors.insert(
+                        plugin.id().to_string(),
+                        SemanticPluginRuntimeError::new(
+                            format!(
+                                "failed to read artifact for plugin `{}`: {error}",
+                                plugin.id()
+                            ),
+                            "Fix the plugin artifact path or remove the plugin.",
+                        ),
+                    );
+                    continue;
+                }
+            };
+
+            if let Err(error) = runner.add_plugin(plugin.id(), artifact) {
+                errors.insert(
+                    plugin.id().to_string(),
+                    Self::runtime_error_to_semantic_error(error),
+                );
+                continue;
+            }
+
+            manifests.push(manifest);
+        }
+
+        let wasm_host = if manifests.is_empty() {
+            None
+        } else {
+            match PluginEnvironment::from_manifests(manifests) {
+                Ok(environment) => Some(Arc::new(AssertUnwindSafe(PluginHost::new(
+                    environment,
+                    runner,
+                )))),
+                Err(error) => {
+                    errors.insert("*".to_string(), Self::host_error_to_runtime_error(error));
+                    None
+                }
+            }
+        };
+
+        Self {
+            wasm_host,
+            wasm_errors: Arc::new(errors),
+        }
+    }
+
+    #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
+    fn host_error_to_runtime_error(error: HostError) -> SemanticPluginRuntimeError {
+        match error {
+            HostError::Runtime { source, .. } => Self::runtime_error_to_semantic_error(source),
+            error => SemanticPluginRuntimeError::new(
+                error.to_string(),
+                "Fix the plugin manifest or remove the plugin.",
+            ),
+        }
+    }
+
+    #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
+    fn runtime_error_to_semantic_error(
+        error: ty_plugin_host::RuntimeError,
+    ) -> SemanticPluginRuntimeError {
+        SemanticPluginRuntimeError::new(error.to_string(), error.hint())
+    }
 }
 
 #[salsa::db]
@@ -49,6 +271,8 @@ pub struct ProjectDatabase {
     // IMPORTANT: Never return clones of `system` outside `ProjectDatabase` (only return references)
     // or the "trick" to get a mutable `Arc` in `Self::system_mut` is no longer guaranteed to work.
     system: Arc<dyn System + Send + Sync + RefUnwindSafe>,
+
+    semantic_plugin_runtime: SemanticPluginRuntimeState,
 
     // IMPORTANT: This field must be the last because we use `trigger_cancellation` (drops all other storage references)
     // to drop all other references to the database, which gives us exclusive access to other `Arc`s stored on this db.
@@ -115,6 +339,7 @@ impl ProjectDatabase {
             }),
             files: Files::default(),
             system: Arc::new(system),
+            semantic_plugin_runtime: SemanticPluginRuntimeState::default(),
         };
 
         // TODO: Use the `program_settings` to compute the key for the database's persistent
@@ -142,6 +367,8 @@ impl ProjectDatabase {
                 .to_settings(&db, project_metadata.root(), strategy),
             |error| anyhow::anyhow!("{}", error.pretty(&db)),
         )?;
+        db.semantic_plugin_runtime =
+            SemanticPluginRuntimeState::from_settings(&settings, db.system());
 
         db.project = Some(Project::from_metadata(
             &db,
@@ -553,6 +780,14 @@ impl SemanticDb for ProjectDatabase {
         self.project().verbose(self)
     }
 
+    fn execute_semantic_plugin(
+        &self,
+        plugin_id: &str,
+        request: &PluginRequest,
+    ) -> Result<PluginResponse, SemanticPluginRuntimeError> {
+        self.semantic_plugin_runtime.execute(plugin_id, request)
+    }
+
     fn dyn_clone(&self) -> Box<dyn SemanticDb> {
         Box::new(self.clone())
     }
@@ -626,10 +861,15 @@ pub(crate) mod testing {
     use ruff_db::vendored::VendoredFileSystem;
     use ruff_python_ast::PythonVersion;
     use ty_module_resolver::SearchPathSettings;
+    use ty_plugin_protocol::{PluginRequest, PluginResponse};
     use ty_python_core::platform::PythonPlatform;
-    use ty_python_core::program::{FallibleStrategy, Program, ProgramSettings};
+    use ty_python_core::program::{
+        FallibleStrategy, Program, ProgramSettings, SemanticPluginEnvironment,
+    };
     use ty_python_semantic::lint::{LintRegistry, RuleSelection};
-    use ty_python_semantic::{AnalysisSettings, PythonVersionWithSource};
+    use ty_python_semantic::{
+        AnalysisSettings, PythonVersionWithSource, SemanticPluginRuntimeError,
+    };
 
     use crate::db::Db;
     use crate::{Project, ProjectMetadata};
@@ -679,6 +919,10 @@ pub(crate) mod testing {
             self.init_program_with_python_version(PythonVersion::latest_ty())
         }
 
+        #[expect(
+            clippy::unnecessary_wraps,
+            reason = "kept fallible to mirror `init_program` and let callers use `?`"
+        )]
         pub fn init_program_with_python_version(
             &mut self,
             python_version: PythonVersion,
@@ -700,6 +944,7 @@ pub(crate) mod testing {
                     },
                     python_platform: PythonPlatform::default(),
                     search_paths,
+                    semantic_plugins: SemanticPluginEnvironment::default(),
                 },
             );
 
@@ -782,6 +1027,14 @@ pub(crate) mod testing {
             false
         }
 
+        fn execute_semantic_plugin(
+            &self,
+            _plugin_id: &str,
+            _request: &PluginRequest,
+        ) -> Result<PluginResponse, SemanticPluginRuntimeError> {
+            Ok(PluginResponse::NoChange)
+        }
+
         fn dyn_clone(&self) -> Box<dyn ty_python_semantic::Db> {
             Box::new(self.clone())
         }
@@ -808,6 +1061,10 @@ mod tests {
     use ruff_db::files::FileRootKind;
     use ruff_db::system::{SystemPathBuf, TestSystem};
     use ty_module_resolver::list_modules;
+    #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
+    use ty_plugin_protocol::{
+        CallRequest, PluginRequest, PluginResponse, SemanticContext, TypeExpr,
+    };
 
     use crate::{ProjectDatabase, ProjectMetadata};
 
@@ -888,5 +1145,277 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
+    mod semantic_plugin_runtime_state_tests {
+        use super::*;
+
+        const PROJECT_ROOT: &str = "/project";
+        const CONFIG_PATH: &str = "/project/ty.toml";
+        const WASM_ARTIFACT_PATH: &str = "/project/.ty/plugins/toy-field.wasm";
+        const WASM_MANIFEST_PATH: &str = "/project/.ty/plugins/toy-field.plugin.json";
+        const WASM_FIELD_PLUGIN: &str = r#"
+            (module
+              (memory (export "memory") 1)
+              (data (i32.const 0) "{\"kind\":\"call-return-patch\",\"return-type\":{\"expression\":\"str\",\"mode\":\"annotation\"}}")
+              (func (export "ty_plugin_alloc") (param i32) (result i32) i32.const 1024)
+              (func (export "ty_plugin_handle") (param i32 i32) (result i64) i64.const 83))
+        "#;
+        const CRASHING_FIELD_PLUGIN: &str = r#"
+            (module
+              (memory (export "memory") 1)
+              (func (export "ty_plugin_alloc") (param i32) (result i32) i32.const 1024)
+              (func (export "ty_plugin_handle") (param i32 i32) (result i64) unreachable))
+        "#;
+
+        #[test]
+        fn executes_configured_wasm_plugin() -> anyhow::Result<()> {
+            let db = wasm_project_database(
+                Some(WASM_FIELD_PLUGIN),
+                Some(&wasm_manifest_json("toy-field")),
+            )?;
+
+            let response = ty_python_semantic::Db::execute_semantic_plugin(
+                &db,
+                "toy-field",
+                &call_return_request(),
+            )
+            .expect("configured wasm plugin should execute");
+
+            let PluginResponse::CallReturnPatch(patch) = response else {
+                panic!("expected call-return patch");
+            };
+            assert_eq!(patch.return_type, TypeExpr::annotation("str"));
+
+            Ok(())
+        }
+
+        #[test]
+        fn reports_missing_manifest_as_runtime_error() -> anyhow::Result<()> {
+            let db = wasm_project_database(Some(WASM_FIELD_PLUGIN), None)?;
+
+            let error = ty_python_semantic::Db::execute_semantic_plugin(
+                &db,
+                "toy-field",
+                &call_return_request(),
+            )
+            .unwrap_err();
+
+            assert!(error.message().contains("failed to read manifest"));
+            assert_eq!(
+                error.hint(),
+                "Fix the plugin manifest path or remove the plugin."
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn reports_invalid_manifest_as_runtime_error() -> anyhow::Result<()> {
+            let db = wasm_project_database(Some(WASM_FIELD_PLUGIN), Some("{"))?;
+
+            let error = ty_python_semantic::Db::execute_semantic_plugin(
+                &db,
+                "toy-field",
+                &call_return_request(),
+            )
+            .unwrap_err();
+
+            assert!(error.message().contains("failed to parse manifest"));
+            assert_eq!(
+                error.hint(),
+                "Fix the plugin manifest JSON or remove the plugin."
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn reports_manifest_id_mismatch_as_runtime_error() -> anyhow::Result<()> {
+            let db =
+                wasm_project_database(Some(WASM_FIELD_PLUGIN), Some(&wasm_manifest_json("other")))?;
+
+            let error = ty_python_semantic::Db::execute_semantic_plugin(
+                &db,
+                "toy-field",
+                &call_return_request(),
+            )
+            .unwrap_err();
+
+            assert!(error.message().contains("does not match manifest id"));
+            assert_eq!(
+                error.hint(),
+                "Make the configured plugin id match the manifest id."
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn reports_invalid_artifact_as_runtime_error() -> anyhow::Result<()> {
+            let db = wasm_project_database(
+                Some("not a wasm module"),
+                Some(&wasm_manifest_json("toy-field")),
+            )?;
+
+            let error = ty_python_semantic::Db::execute_semantic_plugin(
+                &db,
+                "toy-field",
+                &call_return_request(),
+            )
+            .unwrap_err();
+
+            assert!(error.message().contains("failed to compile plugin module"));
+            assert_eq!(
+                error.hint(),
+                "The plugin crashed while handling a request. Report this to the plugin author; update or disable the plugin to continue."
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn reports_missing_artifact_as_runtime_error() -> anyhow::Result<()> {
+            let db = wasm_project_database(None, Some(&wasm_manifest_json("toy-field")))?;
+
+            let error = ty_python_semantic::Db::execute_semantic_plugin(
+                &db,
+                "toy-field",
+                &call_return_request(),
+            )
+            .unwrap_err();
+
+            assert!(error.message().contains("failed to read artifact"));
+            assert_eq!(
+                error.hint(),
+                "Fix the plugin artifact path or remove the plugin."
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn reports_crashing_plugin_as_runtime_error() -> anyhow::Result<()> {
+            let db = wasm_project_database(
+                Some(CRASHING_FIELD_PLUGIN),
+                Some(&wasm_manifest_json("toy-field")),
+            )?;
+
+            let error = ty_python_semantic::Db::execute_semantic_plugin(
+                &db,
+                "toy-field",
+                &call_return_request(),
+            )
+            .unwrap_err();
+
+            assert!(error.message().contains("plugin trapped"));
+            assert_eq!(
+                error.hint(),
+                "The plugin crashed while handling a request. Report this to the plugin author; update or disable the plugin to continue."
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn reports_unknown_plugin_as_runtime_error() -> anyhow::Result<()> {
+            let db = wasm_project_database(
+                Some(WASM_FIELD_PLUGIN),
+                Some(&wasm_manifest_json("toy-field")),
+            )?;
+
+            let error = ty_python_semantic::Db::execute_semantic_plugin(
+                &db,
+                "missing-plugin",
+                &call_return_request(),
+            )
+            .unwrap_err();
+
+            assert!(error.message().contains("unknown plugin id"));
+            assert_eq!(
+                error.hint(),
+                "Fix the plugin manifest or remove the plugin."
+            );
+
+            Ok(())
+        }
+
+        fn wasm_project_database(
+            artifact: Option<&str>,
+            manifest: Option<&str>,
+        ) -> anyhow::Result<ProjectDatabase> {
+            let system = TestSystem::default();
+            let mut files = vec![(
+                SystemPathBuf::from(CONFIG_PATH),
+                r#"
+                [plugins]
+                enabled = true
+
+                [[plugins.plugin]]
+                id = "toy-field"
+                path = ".ty/plugins/toy-field.wasm"
+                runtime = "wasm"
+                manifest-path = ".ty/plugins/toy-field.plugin.json"
+                trusted = true
+                "#
+                .to_string(),
+            )];
+
+            if let Some(artifact) = artifact {
+                files.push((
+                    SystemPathBuf::from(WASM_ARTIFACT_PATH),
+                    artifact.to_string(),
+                ));
+            }
+            if let Some(manifest) = manifest {
+                files.push((
+                    SystemPathBuf::from(WASM_MANIFEST_PATH),
+                    manifest.to_string(),
+                ));
+            }
+
+            system.memory_file_system().write_files_all(files)?;
+
+            let metadata = ProjectMetadata::discover(&SystemPathBuf::from(PROJECT_ROOT), &system)?;
+            ProjectDatabase::fallible(metadata, system)
+        }
+
+        fn call_return_request() -> PluginRequest {
+            PluginRequest::AdjustCallReturn(CallRequest {
+                context: SemanticContext {
+                    module: "test".to_string(),
+                    file_path: "/project/test.py".to_string(),
+                    python_version: "3.13".to_string(),
+                    platform: "all".to_string(),
+                    speculative: false,
+                },
+                callee: TypeExpr::expression("toy.Field"),
+                receiver: None,
+                arguments: Vec::new(),
+                existing_signature: None,
+                default_return_type: None,
+                project_index: None,
+            })
+        }
+
+        fn wasm_manifest_json(id: &str) -> String {
+            format!(
+                r#"{{
+                    "id": "{id}",
+                    "name": "Toy field WASM plugin",
+                    "version": "0.1.0",
+                    "protocol-version": {{ "major": 0, "minor": 1 }},
+                    "ty-compatibility": {{ "requirement": ">=0.0.0" }},
+                    "runtime": {{ "kind": "wasm", "artifact": ".ty/plugins/toy-field.wasm" }},
+                    "capabilities": {{ "call-return": true }},
+                    "claims": {{
+                        "functions": [
+                            {{ "qualified-name": "toy.Field" }}
+                        ]
+                    }}
+                }}"#
+            )
+        }
     }
 }

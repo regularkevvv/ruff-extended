@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use ruff_db::files::File;
+use ruff_db::system::SystemPathBuf;
 use ty_combine::Combine;
 use ty_python_semantic::AnalysisSettings;
 use ty_python_semantic::lint::RuleSelection;
 
-use crate::metadata::options::{InnerOverrideOptions, OutputFormat};
+use crate::metadata::options::{InnerOverrideOptions, OutputFormat, PluginConfig};
 use crate::{Db, glob::IncludeExcludeFilter};
 
 /// The resolved [`super::Options`] for the project.
@@ -27,6 +28,7 @@ pub struct Settings {
     pub(super) terminal: TerminalSettings,
     pub(super) src: SrcSettings,
     pub(super) analysis: AnalysisSettings,
+    pub(super) plugins: PluginSettings,
 
     /// Settings for configuration overrides that apply to specific file patterns.
     ///
@@ -60,6 +62,10 @@ impl Settings {
     pub fn analysis(&self) -> &AnalysisSettings {
         &self.analysis
     }
+
+    pub fn plugins(&self) -> &PluginSettings {
+        &self.plugins
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, get_size2::GetSize)]
@@ -87,6 +93,176 @@ impl SrcSettings {
         Self {
             respect_ignore_files: true,
             files: IncludeExcludeFilter::default(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, get_size2::GetSize)]
+pub struct PluginSettings {
+    enabled: bool,
+    plugins: Vec<PluginEntrySettings>,
+    environment_fingerprint: PluginEnvironmentFingerprint,
+    reload_paths: Vec<SystemPathBuf>,
+    active_stub_overlay_paths: Vec<SystemPathBuf>,
+}
+
+impl PluginSettings {
+    pub const fn new(
+        enabled: bool,
+        plugins: Vec<PluginEntrySettings>,
+        environment_fingerprint: PluginEnvironmentFingerprint,
+        reload_paths: Vec<SystemPathBuf>,
+        active_stub_overlay_paths: Vec<SystemPathBuf>,
+    ) -> Self {
+        Self {
+            enabled,
+            plugins,
+            environment_fingerprint,
+            reload_paths,
+            active_stub_overlay_paths,
+        }
+    }
+
+    pub const fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn plugins(&self) -> &[PluginEntrySettings] {
+        &self.plugins
+    }
+
+    pub const fn environment_fingerprint(&self) -> PluginEnvironmentFingerprint {
+        self.environment_fingerprint
+    }
+
+    pub fn reload_paths(&self) -> &[SystemPathBuf] {
+        &self.reload_paths
+    }
+
+    pub fn active_stub_overlay_paths(&self) -> &[SystemPathBuf] {
+        &self.active_stub_overlay_paths
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, get_size2::GetSize)]
+pub struct PluginEnvironmentFingerprint(u64);
+
+impl PluginEnvironmentFingerprint {
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, get_size2::GetSize)]
+pub struct PluginEntrySettings {
+    id: String,
+    runtime: PluginRuntimeSettings,
+    path: SystemPathBuf,
+    manifest_path: Option<SystemPathBuf>,
+    config: PluginConfig,
+    stub_overlay_path: Option<SystemPathBuf>,
+    trusted: bool,
+}
+
+impl PluginEntrySettings {
+    pub const fn new(
+        id: String,
+        runtime: PluginRuntimeSettings,
+        path: SystemPathBuf,
+        manifest_path: Option<SystemPathBuf>,
+        config: PluginConfig,
+        stub_overlay_path: Option<SystemPathBuf>,
+        trusted: bool,
+    ) -> Self {
+        Self {
+            id,
+            runtime,
+            path,
+            manifest_path,
+            config,
+            stub_overlay_path,
+            trusted,
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub const fn runtime(&self) -> PluginRuntimeSettings {
+        self.runtime
+    }
+
+    pub fn path(&self) -> &SystemPathBuf {
+        &self.path
+    }
+
+    pub fn manifest_path(&self) -> Option<&SystemPathBuf> {
+        self.manifest_path.as_ref()
+    }
+
+    pub const fn config(&self) -> &PluginConfig {
+        &self.config
+    }
+
+    pub fn stub_overlay_path(&self) -> Option<&SystemPathBuf> {
+        self.stub_overlay_path.as_ref()
+    }
+
+    pub const fn trusted(&self) -> bool {
+        self.trusted
+    }
+}
+
+/// Whether this build of `ty` embeds the WASM plugin runtime.
+///
+/// The runtime (wasmtime) is compiled in only for native targets under the `plugins-wasm` feature.
+/// The `wasm32` `ty_wasm` build never embeds it, so there a `wasm` plugin runtime is reported
+/// unsupported and produces a settings diagnostic.
+pub const WASM_RUNTIME_SUPPORTED: bool =
+    cfg!(all(feature = "plugins-wasm", not(target_arch = "wasm32")));
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, get_size2::GetSize)]
+pub enum PluginRuntimeSettings {
+    Wasm,
+    Subprocess,
+    Mock,
+}
+
+impl PluginRuntimeSettings {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Wasm => "wasm",
+            Self::Subprocess => "subprocess",
+            Self::Mock => "mock",
+        }
+    }
+
+    /// Whether this build can execute the runtime. `mock` is always available; `wasm` depends on
+    /// [`WASM_RUNTIME_SUPPORTED`]; `subprocess` is not implemented yet.
+    pub const fn is_supported(self) -> bool {
+        match self {
+            Self::Mock => true,
+            Self::Wasm => WASM_RUNTIME_SUPPORTED,
+            Self::Subprocess => false,
+        }
+    }
+
+    /// Whether the host must be explicitly trusted before executing this runtime's local artifacts.
+    pub const fn requires_trust(self) -> bool {
+        matches!(self, Self::Wasm | Self::Subprocess)
+    }
+
+    /// Whether this runtime participates in semantic hooks for this build.
+    pub const fn participates_in_semantic_hooks(self) -> bool {
+        match self {
+            Self::Mock => true,
+            Self::Wasm => WASM_RUNTIME_SUPPORTED,
+            Self::Subprocess => false,
         }
     }
 }

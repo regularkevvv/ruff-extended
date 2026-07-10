@@ -41,7 +41,15 @@ impl ProjectDatabase {
         let project_root = project.root(self).to_path_buf();
         let config_file_override =
             project_options_overrides.and_then(|options| options.config_file_override.clone());
-        let extra_configuration_paths = project.metadata(self).extra_configuration_paths().to_vec();
+        let mut configuration_paths = project.metadata(self).extra_configuration_paths().to_vec();
+        configuration_paths.extend(
+            project
+                .settings(self)
+                .plugins()
+                .reload_paths()
+                .iter()
+                .cloned(),
+        );
         let program = Program::get(self);
         let custom_stdlib_versions_path = program
             .custom_stdlib_search_path(self)
@@ -77,7 +85,7 @@ impl ProjectDatabase {
                     path,
                     &project_root,
                     config_file_override.as_ref(),
-                    &extra_configuration_paths,
+                    &configuration_paths,
                 ) {
                     File::sync_path(self, path);
                     reload_project = true;
@@ -215,7 +223,7 @@ impl ProjectDatabase {
                             path,
                             &project_root,
                             config_file_override.as_ref(),
-                            &extra_configuration_paths,
+                            &configuration_paths,
                         ) {
                             tracing::debug!(
                                 "Reload project because a configuration file may have been deleted."
@@ -299,7 +307,14 @@ impl ProjectDatabase {
                         metadata.root(),
                         &FallibleStrategy,
                     ) {
-                        Ok((settings, diagnostics)) => (Some(settings), diagnostics),
+                        Ok((settings, diagnostics)) => {
+                            self.semantic_plugin_runtime =
+                                super::SemanticPluginRuntimeState::from_settings(
+                                    &settings,
+                                    self.system(),
+                                );
+                            (Some(settings), diagnostics)
+                        }
                         Err(error) => {
                             tracing::warn!(
                                 "Keeping old project configuration because loading the new settings failed with: {error}"
@@ -360,7 +375,14 @@ impl ProjectDatabase {
                         project.metadata(self).root(),
                         &FallibleStrategy,
                     ) {
-                        Ok((_, diagnostics)) => diagnostics,
+                        Ok((settings, diagnostics)) => {
+                            self.semantic_plugin_runtime =
+                                super::SemanticPluginRuntimeState::from_settings(
+                                    &settings,
+                                    self.system(),
+                                );
+                            diagnostics
+                        }
                         Err(error) => vec![error.into_diagnostic()],
                     };
                     project.update_settings_diagnostics(
@@ -406,9 +428,9 @@ fn is_project_configuration_path(
     path: &SystemPath,
     project_root: &SystemPath,
     config_file_override: Option<&SystemPathBuf>,
-    extra_configuration_paths: &[SystemPathBuf],
+    configuration_paths: &[SystemPathBuf],
 ) -> bool {
-    if extra_configuration_paths
+    if configuration_paths
         .iter()
         .any(|config_path| config_path.as_path() == path)
     {
@@ -428,9 +450,9 @@ fn directory_may_contain_project_configuration(
     directory: &SystemPath,
     project_root: &SystemPath,
     config_file_override: Option<&SystemPathBuf>,
-    extra_configuration_paths: &[SystemPathBuf],
+    configuration_paths: &[SystemPathBuf],
 ) -> bool {
-    if extra_configuration_paths
+    if configuration_paths
         .iter()
         .any(|config_path| config_path.starts_with(directory))
     {

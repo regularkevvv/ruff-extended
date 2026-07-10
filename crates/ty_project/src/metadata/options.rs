@@ -1,12 +1,16 @@
 use crate::Db;
 use crate::glob::{ExcludeFilter, IncludeExcludeFilter, IncludeFilter, PortableGlobKind};
 use crate::metadata::python_version::SupportedPythonVersion;
-use crate::metadata::settings::{OverrideSettings, SrcSettings};
+use crate::metadata::settings::{
+    OverrideSettings, PluginEntrySettings, PluginEnvironmentFingerprint, PluginRuntimeSettings,
+    PluginSettings, SrcSettings,
+};
 
 use super::settings::{Override, Settings, TerminalSettings};
 use crate::metadata::value::{RelativeGlobPattern, RelativePathBuf};
 use anyhow::Context;
 use ordermap::OrderMap;
+use ruff_cache::{CacheKey, CacheKeyHasher};
 use ruff_db::RustDoc;
 use ruff_db::diagnostic::{
     Annotation, Diagnostic, DiagnosticFormat, DiagnosticId, DisplayDiagnosticConfig, Severity,
@@ -24,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::fmt::{self, Debug, Display};
-use std::hash::BuildHasherDefault;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::ops::Deref;
 use std::sync::Arc;
 use strum::IntoEnumIterator;
@@ -33,8 +37,13 @@ use ty_combine::Combine;
 use ty_module_resolver::{
     ModuleGlobSet, ModuleGlobSetBuilder, SearchPathSettings, SearchPathSettingsError, SearchPaths,
 };
+use ty_plugin_host::{HostError, PluginEnvironment};
+use ty_plugin_protocol::{AttributeScope, ClassClaimKind, MethodClaimKind, PluginManifest};
 use ty_python_core::platform::PythonPlatform;
-use ty_python_core::program::{MisconfigurationStrategy, ProgramSettings};
+use ty_python_core::program::{
+    MisconfigurationStrategy, ProgramSettings, SemanticPlugin, SemanticPluginEnvironment,
+    SemanticPluginMemberClaim, SemanticPluginMethodClaim, SemanticPluginRuntime,
+};
 use ty_python_semantic::lint::{Level, LintSource, RuleSelection};
 use ty_python_semantic::{
     AnalysisSettings, PythonEnvironment, PythonVersionFileSource, PythonVersionSource,
@@ -99,6 +108,10 @@ pub struct Options {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[option_group]
     pub analysis: Option<AnalysisOptions>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[option_group]
+    pub plugins: Option<PluginsOptions>,
 
     /// Override configurations for specific file patterns.
     ///
@@ -277,11 +290,19 @@ impl Options {
             python_version = python_version.version
         );
 
+        let semantic_plugins = self
+            .plugins
+            .as_ref()
+            .map_or_else(SemanticPluginEnvironment::default, |plugins| {
+                plugins.semantic_environment_for_program_settings(project_root, system)
+            });
+
         Ok((
             ProgramSettings {
                 python_version,
                 python_platform,
                 search_paths,
+                semantic_plugins,
             },
             diagnostics,
         ))
@@ -400,9 +421,15 @@ impl Options {
             }
         }
 
+        let plugin_stub_overlay_paths = self
+            .plugins
+            .or_default()
+            .active_stub_overlay_paths_for_program_settings(project_root, system);
+
         let settings = SearchPathSettings {
             extra_paths,
             src_roots,
+            plugin_stub_overlay_paths,
             custom_typeshed: environment
                 .typeshed
                 .as_ref()
@@ -490,6 +517,11 @@ impl Options {
             };
         let analysis = strategy.fallback(analysis_result, |_| AnalysisSettings::default())?;
 
+        let plugins =
+            self.plugins
+                .or_default()
+                .to_settings(db, project_root, db.system(), &mut diagnostics);
+
         let overrides = self
             .to_overrides_settings(db, project_root, &mut diagnostics)
             .map_err(|err| ToSettingsError {
@@ -504,6 +536,7 @@ impl Options {
             terminal,
             src,
             analysis,
+            plugins,
             overrides,
         };
 
@@ -1618,6 +1651,1170 @@ fn build_module_glob_set(
     })
 }
 
+/// Configures external semantic plugins.
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Eq,
+    PartialEq,
+    Combine,
+    Serialize,
+    Deserialize,
+    OptionsMetadata,
+    get_size2::GetSize,
+)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct PluginsOptions {
+    /// Whether semantic plugins are enabled for this project.
+    ///
+    /// Plugins are disabled by default. Enabling this option only allows plugins
+    /// that are explicitly listed in `plugins.plugin`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[option(
+        default = "false",
+        value_type = "bool",
+        example = r#"
+            [tool.ty.plugins]
+            enabled = true
+        "#
+    )]
+    pub enabled: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[option_group]
+    pub plugin: Option<PluginEntriesOptions>,
+}
+
+impl PluginsOptions {
+    fn program_settings_manifests(
+        &self,
+        project_root: &SystemPath,
+        system: &dyn System,
+    ) -> Vec<ProgramSettingsPluginManifest> {
+        if !self.enabled.unwrap_or(false) {
+            return Vec::new();
+        }
+
+        let mut loaded_manifests = Vec::new();
+
+        for entry in self.plugin.as_deref().unwrap_or_default() {
+            let settings = entry.to_settings(project_root, system);
+
+            if !system.is_file(settings.path())
+                || settings.runtime().requires_trust() && !settings.trusted()
+                || !settings.runtime().is_supported()
+            {
+                continue;
+            }
+
+            if let Some(stub_overlay_path) = settings.stub_overlay_path()
+                && !system.is_directory(stub_overlay_path)
+            {
+                continue;
+            }
+
+            let Some(loaded_manifest) =
+                load_plugin_manifest_for_program_settings(system, &settings)
+            else {
+                continue;
+            };
+
+            if loaded_manifest.stub_overlay_path.is_some()
+                && !loaded_manifest.manifest.capabilities.stub_overlays
+            {
+                continue;
+            }
+
+            loaded_manifests.push(loaded_manifest);
+        }
+
+        loaded_manifests
+    }
+
+    fn active_stub_overlay_paths_for_program_settings(
+        &self,
+        project_root: &SystemPath,
+        system: &dyn System,
+    ) -> Vec<SystemPathBuf> {
+        let loaded_manifests = self.program_settings_manifests(project_root, system);
+
+        let manifests = loaded_manifests
+            .iter()
+            .map(|loaded| loaded.manifest.clone())
+            .collect::<Vec<_>>();
+        let Ok(environment) = PluginEnvironment::from_manifests(manifests) else {
+            return Vec::new();
+        };
+
+        let mut active_stub_overlay_paths = Vec::new();
+        for plugin in environment.plugins() {
+            if !plugin.manifest().capabilities.stub_overlays {
+                continue;
+            }
+
+            if let Some(loaded) = loaded_manifests
+                .iter()
+                .find(|loaded| loaded.manifest.id == plugin.id())
+                && let Some(stub_overlay_path) = loaded.stub_overlay_path.as_ref()
+            {
+                push_unique_path(&mut active_stub_overlay_paths, stub_overlay_path);
+            }
+        }
+
+        active_stub_overlay_paths
+    }
+
+    fn semantic_environment_for_program_settings(
+        &self,
+        project_root: &SystemPath,
+        system: &dyn System,
+    ) -> SemanticPluginEnvironment {
+        let loaded_manifests = self.program_settings_manifests(project_root, system);
+        if loaded_manifests.is_empty() {
+            return SemanticPluginEnvironment::default();
+        }
+
+        let manifests = loaded_manifests
+            .iter()
+            .map(|loaded| loaded.manifest.clone())
+            .collect::<Vec<_>>();
+        let Ok(environment) = PluginEnvironment::from_manifests(manifests) else {
+            return SemanticPluginEnvironment::default();
+        };
+
+        let mut hasher = CacheKeyHasher::new();
+        true.cache_key(&mut hasher);
+        let mut semantic_plugins = Vec::new();
+
+        for plugin in environment.plugins() {
+            let Some(loaded) = loaded_manifests
+                .iter()
+                .find(|loaded| loaded.manifest.id == plugin.id())
+            else {
+                continue;
+            };
+
+            if !loaded.runtime.participates_in_semantic_hooks() {
+                continue;
+            }
+
+            loaded.configured_id.cache_key(&mut hasher);
+            loaded.manifest_path.cache_key(&mut hasher);
+            loaded.manifest_content_hash.cache_key(&mut hasher);
+            loaded.artifact_path.cache_key(&mut hasher);
+            loaded.artifact_content_hash.cache_key(&mut hasher);
+            loaded.config_hash.cache_key(&mut hasher);
+            loaded.strict_settings.cache_key(&mut hasher);
+
+            let manifest = plugin.manifest();
+            let class_transform_claims = if manifest.capabilities.class_transform {
+                manifest
+                    .claims
+                    .classes
+                    .iter()
+                    .map(|claim| match &claim.kind {
+                        ClassClaimKind::Exact { qualified_name }
+                        | ClassClaimKind::SubclassOf {
+                            base_qualified_name: qualified_name,
+                        } => qualified_name.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+
+            let class_member_claims = if manifest.capabilities.class_member {
+                manifest
+                    .claims
+                    .attributes
+                    .iter()
+                    .filter_map(|claim| {
+                        let (owner_qualified_name, attribute_name, scope) =
+                            claim.exact_attribute()?;
+                        (scope == AttributeScope::Class).then(|| {
+                            SemanticPluginMemberClaim::new(
+                                owner_qualified_name.to_string(),
+                                attribute_name.to_string(),
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+
+            let instance_member_claims = if manifest.capabilities.instance_member {
+                manifest
+                    .claims
+                    .attributes
+                    .iter()
+                    .filter_map(|claim| {
+                        let (owner_qualified_name, attribute_name, scope) =
+                            claim.exact_attribute()?;
+                        (scope == AttributeScope::Instance).then(|| {
+                            SemanticPluginMemberClaim::new(
+                                owner_qualified_name.to_string(),
+                                attribute_name.to_string(),
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+
+            let project_index_participates = manifest.capabilities.project_index
+                || manifest.capabilities.cross_symbol_contributions
+                || manifest.capabilities.settings_data
+                || manifest.capabilities.virtual_types;
+            let settings_module_claims = if manifest.capabilities.settings_data {
+                manifest
+                    .claims
+                    .settings
+                    .iter()
+                    .map(|claim| claim.module.clone())
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+
+            // A constructor call is claimed by declaring the class's qualified name as a
+            // `functions` claim; regular functions and exact `Class.method` method claims are
+            // flattened into the same qualified-name list the semantic layer matches call sites
+            // against. Subclass-pattern method claims stay structured so the semantic layer can
+            // match them against bound receiver hierarchy at the call site.
+            let call_signature_claims = if manifest.capabilities.call_signature {
+                call_claim_names(manifest)
+            } else {
+                Vec::new()
+            };
+            let call_signature_method_on_subclass_claims = if manifest.capabilities.call_signature {
+                call_method_on_subclass_claims(manifest)
+            } else {
+                Vec::new()
+            };
+
+            let call_return_claims = if manifest.capabilities.call_return {
+                call_claim_names(manifest)
+            } else {
+                Vec::new()
+            };
+            let call_return_method_on_subclass_claims = if manifest.capabilities.call_return {
+                call_method_on_subclass_claims(manifest)
+            } else {
+                Vec::new()
+            };
+
+            if class_transform_claims.is_empty()
+                && class_member_claims.is_empty()
+                && instance_member_claims.is_empty()
+                && call_signature_claims.is_empty()
+                && call_return_claims.is_empty()
+                && call_signature_method_on_subclass_claims.is_empty()
+                && call_return_method_on_subclass_claims.is_empty()
+                && !project_index_participates
+            {
+                continue;
+            }
+
+            semantic_plugins.push(
+                SemanticPlugin::new(
+                    plugin.id().to_string(),
+                    match loaded.runtime {
+                        PluginRuntimeSettings::Mock => SemanticPluginRuntime::Mock,
+                        PluginRuntimeSettings::Wasm => SemanticPluginRuntime::Wasm,
+                        PluginRuntimeSettings::Subprocess => continue,
+                    },
+                    class_transform_claims,
+                    class_member_claims,
+                    instance_member_claims,
+                    call_signature_claims,
+                    call_return_claims,
+                )
+                .with_call_method_on_subclass_claims(
+                    call_signature_method_on_subclass_claims,
+                    call_return_method_on_subclass_claims,
+                )
+                .with_settings_module_claims(settings_module_claims)
+                .with_strict_settings(loaded.strict_settings)
+                .with_project_index_enabled(project_index_participates),
+            );
+        }
+
+        SemanticPluginEnvironment::new(hasher.finish(), semantic_plugins)
+    }
+
+    pub(super) fn to_settings(
+        &self,
+        db: &dyn Db,
+        project_root: &SystemPath,
+        system: &dyn System,
+        diagnostics: &mut Vec<OptionDiagnostic>,
+    ) -> PluginSettings {
+        let enabled = self.enabled.unwrap_or(false);
+        let mut plugins = Vec::new();
+        let mut reload_paths = Vec::new();
+        let mut loaded_manifests = Vec::new();
+
+        for entry in self.plugin.as_deref().unwrap_or_default() {
+            let settings = entry.to_settings(project_root, system);
+            push_unique_path(&mut reload_paths, settings.path());
+            if let Some(manifest_path) = settings.manifest_path() {
+                push_unique_path(&mut reload_paths, manifest_path);
+            }
+            if let Some(stub_overlay_path) = settings.stub_overlay_path() {
+                push_unique_path(&mut reload_paths, stub_overlay_path);
+            }
+
+            if !enabled {
+                diagnostics.push(
+                    plugin_diagnostic_at_value(
+                        db,
+                        &entry.id,
+                        format!(
+                            "Plugin `{}` is configured but plugins are disabled",
+                            settings.id()
+                        ),
+                        Severity::Warning,
+                    )
+                    .sub(SubDiagnostic::new(
+                        SubDiagnosticSeverity::Info,
+                        "Set `plugins.enabled = true` to enable configured plugins.",
+                    )),
+                );
+                plugins.push(settings);
+                continue;
+            }
+
+            if !system.is_file(settings.path()) {
+                diagnostics.push(plugin_diagnostic_at_relative_path(
+                    db,
+                    &entry.path,
+                    format!(
+                        "Plugin `{}` points to an artifact path that does not exist or is not a file",
+                        settings.id()
+                    ),
+                    Severity::Error,
+                    format!("`{}` does not exist or is not a file", settings.path()),
+                ));
+                plugins.push(settings);
+                continue;
+            }
+
+            if settings.runtime().requires_trust() && !settings.trusted() {
+                diagnostics.push(
+                    plugin_diagnostic_at_value(
+                        db,
+                        &entry.id,
+                        format!(
+                            "Plugin `{}` is not trusted to execute local code",
+                            settings.id()
+                        ),
+                        Severity::Error,
+                    )
+                    .sub(SubDiagnostic::new(
+                        SubDiagnosticSeverity::Info,
+                        "Set `trusted = true` for this plugin only if you trust the artifact.",
+                    )),
+                );
+                plugins.push(settings);
+                continue;
+            }
+
+            if !settings.runtime().is_supported() {
+                let message = format!(
+                    "Plugin `{}` uses unsupported runtime `{}`",
+                    settings.id(),
+                    settings.runtime().as_str()
+                );
+                let diagnostic = if let Some(runtime) = entry.runtime.as_ref() {
+                    plugin_diagnostic_at_value(db, runtime, message, Severity::Error)
+                } else {
+                    plugin_diagnostic_at_value(db, &entry.id, message, Severity::Error)
+                };
+                diagnostics.push(diagnostic);
+                plugins.push(settings);
+                continue;
+            }
+
+            if let Some(stub_overlay_path) = settings.stub_overlay_path()
+                && !system.is_directory(stub_overlay_path)
+            {
+                if let Some(stub_overlay_option) = entry.stub_overlay_path.as_ref() {
+                    diagnostics.push(plugin_diagnostic_at_relative_path(
+                        db,
+                        stub_overlay_option,
+                        format!(
+                            "Plugin `{}` points to a stub overlay path that does not exist or is not a directory",
+                            settings.id()
+                        ),
+                        Severity::Error,
+                        format!("`{stub_overlay_path}` does not exist or is not a directory"),
+                    ));
+                }
+                plugins.push(settings);
+                continue;
+            }
+
+            if let Some(loaded_manifest) =
+                load_plugin_manifest(db, system, entry, &settings, diagnostics)
+            {
+                if settings.stub_overlay_path().is_some()
+                    && !loaded_manifest.manifest.capabilities.stub_overlays
+                {
+                    if let Some(stub_overlay_option) = entry.stub_overlay_path.as_ref() {
+                        diagnostics.push(plugin_diagnostic_at_relative_path(
+                            db,
+                            stub_overlay_option,
+                            format!(
+                                "Plugin `{}` configures a stub overlay path but the manifest does not declare the stub-overlays capability",
+                                settings.id()
+                            ),
+                            Severity::Error,
+                            "manifest must set `capabilities.stub-overlays = true`",
+                        ));
+                    }
+                    plugins.push(settings);
+                    continue;
+                }
+
+                loaded_manifests.push(loaded_manifest);
+            }
+
+            plugins.push(settings);
+        }
+
+        let (environment_fingerprint, active_stub_overlay_paths) =
+            build_plugin_environment(db, &loaded_manifests, diagnostics);
+
+        PluginSettings::new(
+            enabled,
+            plugins,
+            environment_fingerprint,
+            reload_paths,
+            active_stub_overlay_paths,
+        )
+    }
+}
+
+/// Plugin entries configured under `plugins.plugin`.
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Eq,
+    PartialEq,
+    Combine,
+    Serialize,
+    Deserialize,
+    RustDoc,
+    get_size2::GetSize,
+)]
+#[serde(transparent)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct PluginEntriesOptions(Vec<RangedValue<PluginEntryOptions>>);
+
+impl OptionsMetadata for PluginEntriesOptions {
+    fn documentation() -> Option<&'static str> {
+        Some(<Self as RustDoc>::rust_doc())
+    }
+
+    fn record(visit: &mut dyn Visit) {
+        OptionSet::of::<PluginEntryOptions>().record(visit);
+    }
+}
+
+impl Deref for PluginEntriesOptions {
+    type Target = [RangedValue<PluginEntryOptions>];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Eq,
+    PartialEq,
+    Combine,
+    Serialize,
+    Deserialize,
+    OptionsMetadata,
+    get_size2::GetSize,
+)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct PluginEntryOptions {
+    /// Stable plugin identifier.
+    #[option(
+        default = r#""""#,
+        value_type = "str",
+        example = r#"
+            [[tool.ty.plugins.plugin]]
+            id = "pydantic"
+        "#
+    )]
+    pub id: RangedValue<String>,
+
+    /// Path to the plugin artifact.
+    #[option(
+        default = r#""""#,
+        value_type = "str",
+        example = r#"
+            [[tool.ty.plugins.plugin]]
+            path = ".ty/plugins/pydantic.wasm"
+        "#
+    )]
+    pub path: RelativePathBuf,
+
+    /// Runtime used to execute the plugin artifact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[option(
+        default = r#""wasm""#,
+        value_type = "wasm | subprocess | mock",
+        example = r#"
+            [[tool.ty.plugins.plugin]]
+            runtime = "wasm"
+        "#
+    )]
+    pub runtime: Option<RangedValue<PluginRuntimeOption>>,
+
+    /// Optional path to a separate manifest file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[option(
+        default = r#"null"#,
+        value_type = "str",
+        example = r#"
+            [[tool.ty.plugins.plugin]]
+            manifest-path = ".ty/plugins/pydantic.plugin.json"
+        "#
+    )]
+    pub manifest_path: Option<RelativePathBuf>,
+
+    /// Plugin-specific configuration passed through the stable protocol.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[option(
+        default = r#"{}"#,
+        value_type = "dict[str, Any]",
+        example = r#"
+            [[tool.ty.plugins.plugin]]
+            config = { init-typed = true }
+        "#
+    )]
+    pub config: Option<PluginConfig>,
+
+    /// Optional path to a plugin-provided stub overlay root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[option(
+        default = r#"null"#,
+        value_type = "str",
+        example = r#"
+            [[tool.ty.plugins.plugin]]
+            stub-overlay-path = ".ty/plugins/pydantic-stubs"
+        "#
+    )]
+    pub stub_overlay_path: Option<RelativePathBuf>,
+
+    /// Whether this plugin artifact is trusted to execute locally.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[option(
+        default = "false",
+        value_type = "bool",
+        example = r#"
+            [[tool.ty.plugins.plugin]]
+            trusted = true
+        "#
+    )]
+    pub trusted: Option<bool>,
+}
+
+impl PluginEntryOptions {
+    fn to_settings(&self, project_root: &SystemPath, system: &dyn System) -> PluginEntrySettings {
+        PluginEntrySettings::new(
+            self.id.to_string(),
+            self.runtime.as_deref().copied().unwrap_or_default().into(),
+            self.path.absolute(project_root, system),
+            self.manifest_path
+                .as_ref()
+                .map(|path| path.absolute(project_root, system)),
+            self.config.clone().unwrap_or_default(),
+            self.stub_overlay_path
+                .as_ref()
+                .map(|path| path.absolute(project_root, system)),
+            self.trusted.unwrap_or(false),
+        )
+    }
+}
+
+#[derive(
+    Debug, Default, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, get_size2::GetSize,
+)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub enum PluginRuntimeOption {
+    #[default]
+    Wasm,
+    Subprocess,
+    Mock,
+}
+
+impl Combine for PluginRuntimeOption {
+    #[inline(always)]
+    fn combine_with(&mut self, _other: Self) {}
+
+    #[inline]
+    fn combine(self, _other: Self) -> Self {
+        self
+    }
+}
+
+impl From<PluginRuntimeOption> for PluginRuntimeSettings {
+    fn from(value: PluginRuntimeOption) -> Self {
+        match value {
+            PluginRuntimeOption::Wasm => Self::Wasm,
+            PluginRuntimeOption::Subprocess => Self::Subprocess,
+            PluginRuntimeOption::Mock => Self::Mock,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, get_size2::GetSize)]
+#[serde(transparent)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct PluginConfig(#[get_size(ignore)] serde_json::Value);
+
+impl PluginConfig {
+    pub const fn as_value(&self) -> &serde_json::Value {
+        &self.0
+    }
+}
+
+impl Combine for PluginConfig {
+    #[inline(always)]
+    fn combine_with(&mut self, _other: Self) {}
+
+    #[inline]
+    fn combine(self, _other: Self) -> Self {
+        self
+    }
+}
+
+#[derive(Debug)]
+struct ProgramSettingsPluginManifest {
+    configured_id: String,
+    runtime: PluginRuntimeSettings,
+    manifest: PluginManifest,
+    manifest_path: SystemPathBuf,
+    manifest_content_hash: u64,
+    artifact_path: SystemPathBuf,
+    artifact_content_hash: u64,
+    config_hash: u64,
+    strict_settings: bool,
+    stub_overlay_path: Option<SystemPathBuf>,
+}
+
+/// Flatten a manifest's claimed callees into qualified names the semantic layer can match call
+/// sites against: bare function/constructor names plus `Class.method` for method claims.
+fn call_claim_names(manifest: &PluginManifest) -> Vec<String> {
+    manifest
+        .claims
+        .functions
+        .iter()
+        .map(|claim| claim.qualified_name.clone())
+        .chain(manifest.claims.methods.iter().filter_map(|method| {
+            let MethodClaimKind::Exact {
+                class_qualified_name,
+                method_name,
+            } = &method.kind
+            else {
+                return None;
+            };
+            Some(format!("{class_qualified_name}.{method_name}"))
+        }))
+        .collect()
+}
+
+fn call_method_on_subclass_claims(manifest: &PluginManifest) -> Vec<SemanticPluginMethodClaim> {
+    manifest
+        .claims
+        .methods
+        .iter()
+        .filter_map(|method| {
+            let MethodClaimKind::OnSubclassOf {
+                base_qualified_name,
+                method_name,
+            } = &method.kind
+            else {
+                return None;
+            };
+            Some(SemanticPluginMethodClaim::on_subclass_of(
+                base_qualified_name.clone(),
+                method_name.clone(),
+            ))
+        })
+        .collect()
+}
+
+#[derive(Debug)]
+struct LoadedPluginManifest {
+    configured_id: String,
+    manifest: PluginManifest,
+    manifest_path: SystemPathBuf,
+    manifest_content_hash: u64,
+    artifact_path: SystemPathBuf,
+    artifact_content_hash: u64,
+    config_hash: u64,
+    stub_overlay_path: Option<SystemPathBuf>,
+}
+
+fn load_plugin_manifest_for_program_settings(
+    system: &dyn System,
+    settings: &PluginEntrySettings,
+) -> Option<ProgramSettingsPluginManifest> {
+    let manifest_path = settings
+        .manifest_path()
+        .cloned()
+        .unwrap_or_else(|| settings.path().clone());
+
+    if !system.is_file(&manifest_path) {
+        return None;
+    }
+
+    let manifest_content = system.read_to_string(&manifest_path).ok()?;
+    let manifest = serde_json::from_str::<PluginManifest>(&manifest_content).ok()?;
+
+    if manifest.id != settings.id() {
+        return None;
+    }
+
+    let artifact_content_hash = if manifest_path.as_path() == settings.path().as_path() {
+        content_hash(manifest_content.as_bytes())
+    } else {
+        content_hash(&system.read_to_bytes(settings.path()).ok()?)
+    };
+
+    Some(ProgramSettingsPluginManifest {
+        configured_id: settings.id().to_string(),
+        runtime: settings.runtime(),
+        manifest,
+        manifest_path,
+        manifest_content_hash: content_hash(manifest_content.as_bytes()),
+        artifact_path: settings.path().clone(),
+        artifact_content_hash,
+        config_hash: json_hash(settings.config().as_value()),
+        strict_settings: plugin_strict_settings(settings.config().as_value()),
+        stub_overlay_path: settings.stub_overlay_path().cloned(),
+    })
+}
+
+fn load_plugin_manifest(
+    db: &dyn Db,
+    system: &dyn System,
+    entry: &RangedValue<PluginEntryOptions>,
+    settings: &PluginEntrySettings,
+    diagnostics: &mut Vec<OptionDiagnostic>,
+) -> Option<LoadedPluginManifest> {
+    let manifest_path = settings
+        .manifest_path()
+        .cloned()
+        .unwrap_or_else(|| settings.path().clone());
+    let manifest_source = entry.manifest_path.as_ref().unwrap_or(&entry.path);
+
+    if !system.is_file(&manifest_path) {
+        diagnostics.push(plugin_diagnostic_at_relative_path(
+            db,
+            manifest_source,
+            format!(
+                "Plugin `{}` points to a manifest path that does not exist or is not a file",
+                settings.id()
+            ),
+            Severity::Error,
+            format!("`{manifest_path}` does not exist or is not a file"),
+        ));
+        return None;
+    }
+
+    let manifest_content = match system.read_to_string(&manifest_path) {
+        Ok(content) => content,
+        Err(error) => {
+            diagnostics.push(plugin_diagnostic_at_relative_path(
+                db,
+                manifest_source,
+                format!("Failed to read manifest for plugin `{}`", settings.id()),
+                Severity::Error,
+                error,
+            ));
+            return None;
+        }
+    };
+
+    let manifest = match serde_json::from_str::<PluginManifest>(&manifest_content) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            diagnostics.push(plugin_diagnostic_at_relative_path(
+                db,
+                manifest_source,
+                format!("Failed to parse manifest for plugin `{}`", settings.id()),
+                Severity::Error,
+                error,
+            ));
+            return None;
+        }
+    };
+
+    if manifest.id != settings.id() {
+        diagnostics.push(plugin_diagnostic_at_value(
+            db,
+            &entry.id,
+            format!(
+                "Configured plugin id `{}` does not match manifest id `{}`",
+                settings.id(),
+                manifest.id
+            ),
+            Severity::Error,
+        ));
+        return None;
+    }
+
+    let artifact_content_hash = if manifest_path.as_path() == settings.path().as_path() {
+        content_hash(manifest_content.as_bytes())
+    } else {
+        match system.read_to_bytes(settings.path()) {
+            Ok(content) => content_hash(&content),
+            Err(error) => {
+                diagnostics.push(plugin_diagnostic_at_relative_path(
+                    db,
+                    &entry.path,
+                    format!("Failed to read artifact for plugin `{}`", settings.id()),
+                    Severity::Error,
+                    error,
+                ));
+                return None;
+            }
+        }
+    };
+
+    Some(LoadedPluginManifest {
+        configured_id: settings.id().to_string(),
+        manifest,
+        manifest_path,
+        manifest_content_hash: content_hash(manifest_content.as_bytes()),
+        artifact_path: settings.path().clone(),
+        artifact_content_hash,
+        config_hash: json_hash(settings.config().as_value()),
+        stub_overlay_path: settings.stub_overlay_path().cloned(),
+    })
+}
+
+fn build_plugin_environment(
+    db: &dyn Db,
+    loaded_manifests: &[LoadedPluginManifest],
+    diagnostics: &mut Vec<OptionDiagnostic>,
+) -> (PluginEnvironmentFingerprint, Vec<SystemPathBuf>) {
+    if loaded_manifests.is_empty() {
+        return (PluginEnvironmentFingerprint::default(), Vec::new());
+    }
+
+    let manifests = loaded_manifests
+        .iter()
+        .map(|loaded| loaded.manifest.clone())
+        .collect::<Vec<_>>();
+
+    let environment = match PluginEnvironment::from_manifests(manifests) {
+        Ok(environment) => environment,
+        Err(error) => {
+            diagnostics.push(plugin_host_error_diagnostic(db, loaded_manifests, error));
+            return (PluginEnvironmentFingerprint::default(), Vec::new());
+        }
+    };
+
+    let mut hasher = CacheKeyHasher::new();
+    true.cache_key(&mut hasher);
+    let mut active_stub_overlay_paths = Vec::new();
+
+    for plugin in environment.plugins() {
+        if let Some(loaded) = loaded_manifests
+            .iter()
+            .find(|loaded| loaded.manifest.id == plugin.id())
+        {
+            loaded.configured_id.cache_key(&mut hasher);
+            loaded.manifest_path.cache_key(&mut hasher);
+            loaded.manifest_content_hash.cache_key(&mut hasher);
+            loaded.artifact_path.cache_key(&mut hasher);
+            loaded.artifact_content_hash.cache_key(&mut hasher);
+            loaded.config_hash.cache_key(&mut hasher);
+            if plugin.manifest().capabilities.stub_overlays
+                && let Some(stub_overlay_path) = loaded.stub_overlay_path.as_ref()
+            {
+                push_unique_path(&mut active_stub_overlay_paths, stub_overlay_path);
+            }
+        }
+    }
+
+    (
+        PluginEnvironmentFingerprint::new(hasher.finish()),
+        active_stub_overlay_paths,
+    )
+}
+
+fn plugin_host_error_diagnostic(
+    db: &dyn Db,
+    loaded_manifests: &[LoadedPluginManifest],
+    error: HostError,
+) -> OptionDiagnostic {
+    match error {
+        HostError::DuplicatePluginId(plugin_id) => plugin_diagnostic_at_loaded_manifest(
+            db,
+            loaded_manifests,
+            &plugin_id,
+            format!("Plugin id `{plugin_id}` is declared by multiple plugin manifests"),
+            Severity::Error,
+        ),
+        HostError::UnsupportedProtocolVersion {
+            plugin_id,
+            major,
+            minor,
+            supported_major,
+            supported_minor,
+        } => plugin_diagnostic_at_loaded_manifest(
+            db,
+            loaded_manifests,
+            &plugin_id,
+            format!(
+                "Plugin `{plugin_id}` uses unsupported protocol version {major}.{minor}; ty supports {supported_major}.{supported_minor}"
+            ),
+            Severity::Error,
+        ),
+        HostError::StubOverlayCapabilityMissing { plugin_id } => {
+            plugin_diagnostic_at_loaded_manifest(
+                db,
+                loaded_manifests,
+                &plugin_id,
+                format!(
+                    "Plugin `{plugin_id}` declares stub overlays without the stub-overlays capability"
+                ),
+                Severity::Error,
+            )
+        }
+        HostError::ClassTransformCapabilityMissing { plugin_id } => {
+            plugin_diagnostic_at_loaded_manifest(
+                db,
+                loaded_manifests,
+                &plugin_id,
+                format!(
+                    "Plugin `{plugin_id}` declares class-transform claims without the class-transform capability"
+                ),
+                Severity::Error,
+            )
+        }
+        HostError::ClassMemberCapabilityMissing { plugin_id } => {
+            plugin_diagnostic_at_loaded_manifest(
+                db,
+                loaded_manifests,
+                &plugin_id,
+                format!(
+                    "Plugin `{plugin_id}` declares class-member claims without the class-member capability"
+                ),
+                Severity::Error,
+            )
+        }
+        HostError::InstanceMemberCapabilityMissing { plugin_id } => {
+            plugin_diagnostic_at_loaded_manifest(
+                db,
+                loaded_manifests,
+                &plugin_id,
+                format!(
+                    "Plugin `{plugin_id}` declares instance-member claims without the instance-member capability"
+                ),
+                Severity::Error,
+            )
+        }
+        HostError::CallCapabilityMissing { plugin_id } => plugin_diagnostic_at_loaded_manifest(
+            db,
+            loaded_manifests,
+            &plugin_id,
+            format!("Plugin `{plugin_id}` declares call claims without a call hook capability"),
+            Severity::Error,
+        ),
+        HostError::SettingsDataCapabilityMissing { plugin_id } => {
+            plugin_diagnostic_at_loaded_manifest(
+                db,
+                loaded_manifests,
+                &plugin_id,
+                format!(
+                    "Plugin `{plugin_id}` declares settings summaries without the settings-data capability"
+                ),
+                Severity::Error,
+            )
+        }
+        HostError::CrossSymbolContributionsCapabilityMissing { plugin_id } => {
+            plugin_diagnostic_at_loaded_manifest(
+                db,
+                loaded_manifests,
+                &plugin_id,
+                format!(
+                    "Plugin `{plugin_id}` declares contribution-target claims without the cross-symbol-contributions capability"
+                ),
+                Severity::Error,
+            )
+        }
+        HostError::ProjectIndexCapabilityMissing { plugin_id } => {
+            plugin_diagnostic_at_loaded_manifest(
+                db,
+                loaded_manifests,
+                &plugin_id,
+                format!(
+                    "Plugin `{plugin_id}` declares cross-symbol contributions without the project-index capability"
+                ),
+                Severity::Error,
+            )
+        }
+        HostError::UnknownPlugin(plugin_id) => plugin_diagnostic_at_loaded_manifest(
+            db,
+            loaded_manifests,
+            &plugin_id,
+            format!("Unknown plugin id `{plugin_id}`"),
+            Severity::Error,
+        ),
+        HostError::Runtime { plugin_id, source } => plugin_diagnostic_at_loaded_manifest(
+            db,
+            loaded_manifests,
+            &plugin_id,
+            format!("Plugin `{plugin_id}` runtime failed: {source}"),
+            Severity::Error,
+        ),
+    }
+}
+
+fn plugin_diagnostic_at_loaded_manifest(
+    db: &dyn Db,
+    loaded_manifests: &[LoadedPluginManifest],
+    plugin_id: &str,
+    message: String,
+    severity: Severity,
+) -> OptionDiagnostic {
+    if let Some(loaded) = loaded_manifests
+        .iter()
+        .find(|loaded| loaded.manifest.id == plugin_id)
+    {
+        plugin_diagnostic_at_system_path(
+            db,
+            &loaded.manifest_path,
+            message,
+            severity,
+            "plugin manifest",
+        )
+    } else {
+        OptionDiagnostic::new(DiagnosticId::PluginConfiguration, message, severity)
+    }
+}
+
+fn plugin_diagnostic_at_value<T>(
+    db: &dyn Db,
+    value: &RangedValue<T>,
+    message: String,
+    severity: Severity,
+) -> OptionDiagnostic {
+    let diagnostic = OptionDiagnostic::new(DiagnosticId::PluginConfiguration, message, severity);
+    match value.source() {
+        ValueSource::File(file_path) => diagnostic.with_annotation(config_annotation(
+            db,
+            file_path,
+            value.range(),
+            "plugin configuration",
+        )),
+        ValueSource::Cli => diagnostic.sub(SubDiagnostic::new(
+            SubDiagnosticSeverity::Info,
+            "The plugin option was specified on the CLI.",
+        )),
+        ValueSource::Editor => diagnostic.sub(SubDiagnostic::new(
+            SubDiagnosticSeverity::Info,
+            "The plugin option was specified in the editor settings.",
+        )),
+    }
+}
+
+fn plugin_diagnostic_at_relative_path(
+    db: &dyn Db,
+    value: &RelativePathBuf,
+    message: String,
+    severity: Severity,
+    detail: impl Display,
+) -> OptionDiagnostic {
+    let diagnostic = OptionDiagnostic::new(DiagnosticId::PluginConfiguration, message, severity);
+    match value.source() {
+        ValueSource::File(file_path) => {
+            diagnostic.with_annotation(config_annotation(db, file_path, value.range(), detail))
+        }
+        ValueSource::Cli => diagnostic.sub(SubDiagnostic::new(
+            SubDiagnosticSeverity::Info,
+            format!("The plugin path was specified on the CLI: {detail}"),
+        )),
+        ValueSource::Editor => diagnostic.sub(SubDiagnostic::new(
+            SubDiagnosticSeverity::Info,
+            format!("The plugin path was specified in the editor settings: {detail}"),
+        )),
+    }
+}
+
+fn plugin_diagnostic_at_system_path(
+    db: &dyn Db,
+    path: &SystemPath,
+    message: String,
+    severity: Severity,
+    label: impl Display,
+) -> OptionDiagnostic {
+    OptionDiagnostic::new(DiagnosticId::PluginConfiguration, message, severity).with_annotation(
+        system_path_to_file(db, path)
+            .ok()
+            .map(|file| Annotation::primary(Span::from(file)).message(label.to_string())),
+    )
+}
+
+fn config_annotation(
+    db: &dyn Db,
+    file_path: &SystemPath,
+    range: Option<ruff_text_size::TextRange>,
+    message: impl Display,
+) -> Option<Annotation> {
+    system_path_to_file(db, file_path).ok().map(|file| {
+        Annotation::primary(Span::from(file).with_optional_range(range))
+            .message(message.to_string())
+    })
+}
+
+fn push_unique_path(paths: &mut Vec<SystemPathBuf>, path: &SystemPath) {
+    if paths.iter().all(|existing| existing.as_path() != path) {
+        paths.push(path.to_path_buf());
+    }
+}
+
+fn content_hash(content: &[u8]) -> u64 {
+    let mut hasher = CacheKeyHasher::new();
+    content.cache_key(&mut hasher);
+    hasher.finish()
+}
+
+fn json_hash(value: &serde_json::Value) -> u64 {
+    let mut hasher = CacheKeyHasher::new();
+    match serde_json::to_string(value) {
+        Ok(json) => json.cache_key(&mut hasher),
+        Err(error) => error.to_string().cache_key(&mut hasher),
+    }
+    hasher.finish()
+}
+
+fn plugin_strict_settings(config: &serde_json::Value) -> bool {
+    config
+        .get("strict-settings")
+        .or_else(|| config.get("strict_settings"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// Configuration override that applies to specific files based on glob patterns.
 ///
 /// An override allows you to apply different rule configurations to specific
@@ -2237,5 +3434,635 @@ where
             Some(value) => Cow::Borrowed(value),
             None => Cow::Owned(T::default()),
         }
+    }
+}
+
+#[cfg(test)]
+mod plugin_tests {
+    use std::sync::Arc;
+
+    use ruff_db::diagnostic::{Diagnostic, DiagnosticId, Severity};
+    use ruff_db::system::{SystemPathBuf, TestSystem};
+    use ruff_ranged_value::ValueSource;
+    use serde_json::json;
+    use ty_python_core::program::{
+        FallibleStrategy, Program, SemanticPluginMethodClaim, SemanticPluginRuntime,
+    };
+
+    use crate::{Db as _, ProjectDatabase, ProjectMetadata};
+
+    use super::{Options, PluginRuntimeSettings};
+    use crate::metadata::settings::WASM_RUNTIME_SUPPORTED;
+
+    const PROJECT_ROOT: &str = "/project";
+    const CONFIG_PATH: &str = "/project/ty.toml";
+    const ARTIFACT_PATH: &str = "/project/.ty/plugins/pydantic.mock";
+    const MANIFEST_PATH: &str = "/project/.ty/plugins/pydantic.plugin.json";
+    #[cfg(feature = "plugins-wasm")]
+    const WASM_ARTIFACT_PATH: &str = "/project/.ty/plugins/toy-field.wasm";
+    #[cfg(feature = "plugins-wasm")]
+    const WASM_MANIFEST_PATH: &str = "/project/.ty/plugins/toy-field.plugin.json";
+    #[cfg(feature = "plugins-wasm")]
+    const MINIMAL_WASM_PLUGIN: &str = r#"
+        (module
+          (memory (export "memory") 1)
+          (func (export "ty_plugin_alloc") (param i32) (result i32) i32.const 1024)
+          (func (export "ty_plugin_handle") (param i32 i32) (result i64) i64.const 0))
+    "#;
+
+    #[test]
+    fn parses_resolves_and_fingerprints_plugin_options() {
+        let db = project_database(
+            r#"
+            [plugins]
+            enabled = true
+
+            [[plugins.plugin]]
+            id = "pydantic"
+            path = ".ty/plugins/pydantic.mock"
+            runtime = "mock"
+            manifest-path = ".ty/plugins/pydantic.plugin.json"
+            stub-overlay-path = ".ty/plugins/pydantic-stubs"
+            trusted = true
+            config = { init-typed = true }
+            "#,
+            [
+                (ARTIFACT_PATH, "plugin artifact"),
+                (MANIFEST_PATH, &manifest_json("pydantic", 0)),
+                ("/project/.ty/plugins/pydantic-stubs/__init__.py", ""),
+            ],
+        );
+
+        assert_plugin_diagnostics(&db, []);
+
+        let plugins = db.project().settings(&db).plugins();
+        assert!(plugins.enabled());
+        assert_ne!(plugins.environment_fingerprint().get(), 0);
+        assert_eq!(
+            plugins.reload_paths(),
+            &[
+                SystemPathBuf::from(ARTIFACT_PATH),
+                SystemPathBuf::from(MANIFEST_PATH),
+                SystemPathBuf::from("/project/.ty/plugins/pydantic-stubs"),
+            ]
+        );
+        assert_eq!(
+            plugins.active_stub_overlay_paths(),
+            &[SystemPathBuf::from("/project/.ty/plugins/pydantic-stubs")]
+        );
+
+        let [plugin] = plugins.plugins() else {
+            panic!("expected one plugin entry");
+        };
+
+        assert_eq!(plugin.id(), "pydantic");
+        assert_eq!(plugin.runtime(), PluginRuntimeSettings::Mock);
+        assert_eq!(plugin.path(), &SystemPathBuf::from(ARTIFACT_PATH));
+        assert_eq!(
+            plugin.manifest_path(),
+            Some(&SystemPathBuf::from(MANIFEST_PATH))
+        );
+        assert_eq!(
+            plugin.stub_overlay_path(),
+            Some(&SystemPathBuf::from("/project/.ty/plugins/pydantic-stubs"))
+        );
+        assert!(plugin.trusted());
+        assert_eq!(plugin.config().as_value()["init-typed"], json!(true));
+    }
+
+    #[test]
+    fn subclass_class_transform_claim_participates_in_semantic_environment() {
+        let db = project_database(
+            r#"
+            [plugins]
+            enabled = true
+
+            [[plugins.plugin]]
+            id = "minidjango"
+            path = ".ty/plugins/minidjango.mock"
+            runtime = "mock"
+            manifest-path = ".ty/plugins/minidjango.plugin.json"
+            "#,
+            [
+                ("/project/.ty/plugins/minidjango.mock", "plugin artifact"),
+                (
+                    "/project/.ty/plugins/minidjango.plugin.json",
+                    &subclass_transform_manifest_json(),
+                ),
+            ],
+        );
+
+        assert_plugin_diagnostics(&db, []);
+
+        let semantic_plugins = Program::get(&db).semantic_plugins(&db);
+        let [plugin] = semantic_plugins.plugins() else {
+            panic!("expected one semantic plugin");
+        };
+
+        assert_eq!(plugin.id(), "minidjango");
+        assert_eq!(plugin.runtime(), SemanticPluginRuntime::Mock);
+        assert_eq!(plugin.class_transform_claims(), ["minidjango.Model"]);
+        assert!(plugin.project_index_enabled());
+        assert_eq!(
+            plugin.call_return_method_on_subclass_claims(),
+            [
+                SemanticPluginMethodClaim::on_subclass_of("minidjango.Manager", "filter"),
+                SemanticPluginMethodClaim::on_subclass_of("minidjango.Manager", "get"),
+            ]
+        );
+        assert!(plugin.call_signature_method_on_subclass_claims().is_empty());
+    }
+
+    #[test]
+    fn settings_data_claim_participates_in_semantic_environment() {
+        let db = project_database(
+            r#"
+            [plugins]
+            enabled = true
+
+            [[plugins.plugin]]
+            id = "settings-reader"
+            path = ".ty/plugins/settings-reader.mock"
+            runtime = "mock"
+            manifest-path = ".ty/plugins/settings-reader.plugin.json"
+            config = { strict-settings = true }
+            "#,
+            [
+                (
+                    "/project/.ty/plugins/settings-reader.mock",
+                    "plugin artifact",
+                ),
+                (
+                    "/project/.ty/plugins/settings-reader.plugin.json",
+                    &settings_data_manifest_json(),
+                ),
+            ],
+        );
+
+        assert_plugin_diagnostics(&db, []);
+
+        let semantic_plugins = Program::get(&db).semantic_plugins(&db);
+        let [plugin] = semantic_plugins.plugins() else {
+            panic!("expected one semantic plugin");
+        };
+
+        assert_eq!(plugin.id(), "settings-reader");
+        assert_eq!(plugin.runtime(), SemanticPluginRuntime::Mock);
+        assert!(plugin.project_index_enabled());
+        assert!(plugin.strict_settings());
+        assert_eq!(plugin.settings_module_claims(), ["minidjango_settings"]);
+        assert!(plugin.class_transform_claims().is_empty());
+        assert!(plugin.call_return_claims().is_empty());
+    }
+
+    #[test]
+    fn reports_invalid_plugin_artifact_path() {
+        let db = project_database(
+            r#"
+            [plugins]
+            enabled = true
+
+            [[plugins.plugin]]
+            id = "pydantic"
+            path = ".ty/plugins/missing.mock"
+            runtime = "mock"
+            "#,
+            [],
+        );
+
+        assert_plugin_diagnostics(
+            &db,
+            [(
+                Severity::Error,
+                "Plugin `pydantic` points to an artifact path that does not exist or is not a file",
+            )],
+        );
+    }
+
+    #[test]
+    fn reports_bad_plugin_manifest() {
+        let db = project_database(
+            r#"
+            [plugins]
+            enabled = true
+
+            [[plugins.plugin]]
+            id = "pydantic"
+            path = ".ty/plugins/pydantic.mock"
+            runtime = "mock"
+            manifest-path = ".ty/plugins/pydantic.plugin.json"
+            "#,
+            [(ARTIFACT_PATH, "plugin artifact"), (MANIFEST_PATH, "{")],
+        );
+
+        assert_plugin_diagnostics(
+            &db,
+            [(
+                Severity::Error,
+                "Failed to parse manifest for plugin `pydantic`",
+            )],
+        );
+    }
+
+    #[test]
+    fn reports_stub_overlay_without_manifest_capability() {
+        let db = project_database(
+            r#"
+            [plugins]
+            enabled = true
+
+            [[plugins.plugin]]
+            id = "pydantic"
+            path = ".ty/plugins/pydantic.mock"
+            runtime = "mock"
+            manifest-path = ".ty/plugins/pydantic.plugin.json"
+            stub-overlay-path = ".ty/plugins/pydantic-stubs"
+            "#,
+            [
+                (ARTIFACT_PATH, "plugin artifact"),
+                (
+                    MANIFEST_PATH,
+                    &manifest_json_without_capabilities("pydantic", 0),
+                ),
+                ("/project/.ty/plugins/pydantic-stubs/__init__.py", ""),
+            ],
+        );
+
+        assert_plugin_diagnostics(
+            &db,
+            [(
+                Severity::Error,
+                "Plugin `pydantic` configures a stub overlay path but the manifest does not declare the stub-overlays capability",
+            )],
+        );
+        assert!(
+            db.project()
+                .settings(&db)
+                .plugins()
+                .active_stub_overlay_paths()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn reports_plugin_protocol_mismatch() {
+        let db = project_database(
+            r#"
+            [plugins]
+            enabled = true
+
+            [[plugins.plugin]]
+            id = "pydantic"
+            path = ".ty/plugins/pydantic.mock"
+            runtime = "mock"
+            manifest-path = ".ty/plugins/pydantic.plugin.json"
+            "#,
+            [
+                (ARTIFACT_PATH, "plugin artifact"),
+                (MANIFEST_PATH, &manifest_json("pydantic", 99)),
+            ],
+        );
+
+        assert_plugin_diagnostics(
+            &db,
+            [(
+                Severity::Error,
+                "Plugin `pydantic` uses unsupported protocol version 99.1; ty supports 0.1",
+            )],
+        );
+    }
+
+    // Runs on builds that do not embed the WASM runtime — which always includes the `wasm32`
+    // `ty_wasm` build, where the runtime is compiled out. There, a `wasm` plugin runtime is
+    // reported unsupported through a settings diagnostic.
+    #[cfg(not(feature = "plugins-wasm"))]
+    #[test]
+    fn reports_unsupported_plugin_runtime() {
+        let db = project_database(
+            r#"
+            [plugins]
+            enabled = true
+
+            [[plugins.plugin]]
+            id = "pydantic"
+            path = ".ty/plugins/pydantic.wasm"
+            runtime = "wasm"
+            trusted = true
+            "#,
+            [("/project/.ty/plugins/pydantic.wasm", "plugin artifact")],
+        );
+
+        assert_plugin_diagnostics(
+            &db,
+            [(
+                Severity::Error,
+                "Plugin `pydantic` uses unsupported runtime `wasm`",
+            )],
+        );
+    }
+
+    #[test]
+    fn wasm_runtime_support_follows_build() {
+        // `mock` always runs; `wasm` follows the build (embedded only on native + `plugins-wasm`);
+        // `subprocess` is not implemented.
+        assert!(PluginRuntimeSettings::Mock.is_supported());
+        assert_eq!(
+            PluginRuntimeSettings::Wasm.is_supported(),
+            WASM_RUNTIME_SUPPORTED
+        );
+        assert!(!PluginRuntimeSettings::Subprocess.is_supported());
+
+        // The `wasm32` `ty_wasm` build never embeds the runtime.
+        #[cfg(target_arch = "wasm32")]
+        assert!(!PluginRuntimeSettings::Wasm.is_supported());
+
+        assert!(PluginRuntimeSettings::Mock.participates_in_semantic_hooks());
+        assert_eq!(
+            PluginRuntimeSettings::Wasm.participates_in_semantic_hooks(),
+            WASM_RUNTIME_SUPPORTED
+        );
+        assert!(!PluginRuntimeSettings::Subprocess.participates_in_semantic_hooks());
+    }
+
+    #[cfg(feature = "plugins-wasm")]
+    #[test]
+    fn supported_wasm_plugin_participates_in_semantic_environment() {
+        let db = project_database(
+            r#"
+            [plugins]
+            enabled = true
+
+            [[plugins.plugin]]
+            id = "toy-field"
+            path = ".ty/plugins/toy-field.wasm"
+            runtime = "wasm"
+            manifest-path = ".ty/plugins/toy-field.plugin.json"
+            trusted = true
+            config = { mode = "str" }
+            "#,
+            [
+                (WASM_ARTIFACT_PATH, MINIMAL_WASM_PLUGIN),
+                (WASM_MANIFEST_PATH, &wasm_manifest_json()),
+            ],
+        );
+
+        assert_plugin_diagnostics(&db, []);
+
+        let semantic_plugins = Program::get(&db).semantic_plugins(&db);
+        let [plugin] = semantic_plugins.plugins() else {
+            panic!("expected one semantic plugin");
+        };
+
+        assert_eq!(plugin.id(), "toy-field");
+        assert_eq!(plugin.runtime(), SemanticPluginRuntime::Wasm);
+        assert_eq!(plugin.call_return_claims(), ["toy.Field"]);
+        assert_ne!(semantic_plugins.fingerprint(), 0);
+    }
+
+    #[cfg(feature = "plugins-wasm")]
+    #[test]
+    fn wasm_semantic_fingerprint_tracks_artifact_and_config() {
+        let config = |mode: &str| {
+            format!(
+                r#"
+                [plugins]
+                enabled = true
+
+                [[plugins.plugin]]
+                id = "toy-field"
+                path = ".ty/plugins/toy-field.wasm"
+                runtime = "wasm"
+                manifest-path = ".ty/plugins/toy-field.plugin.json"
+                trusted = true
+                config = {{ mode = "{mode}" }}
+                "#
+            )
+        };
+
+        let db = project_database(
+            &config("str"),
+            [
+                (WASM_ARTIFACT_PATH, MINIMAL_WASM_PLUGIN),
+                (WASM_MANIFEST_PATH, &wasm_manifest_json()),
+            ],
+        );
+        let changed_artifact = project_database(
+            &config("str"),
+            [
+                (
+                    WASM_ARTIFACT_PATH,
+                    "(module (memory (export \"memory\") 1))",
+                ),
+                (WASM_MANIFEST_PATH, &wasm_manifest_json()),
+            ],
+        );
+        let changed_config = project_database(
+            &config("int"),
+            [
+                (WASM_ARTIFACT_PATH, MINIMAL_WASM_PLUGIN),
+                (WASM_MANIFEST_PATH, &wasm_manifest_json()),
+            ],
+        );
+
+        let fingerprint = Program::get(&db).semantic_plugins(&db).fingerprint();
+        assert_ne!(
+            fingerprint,
+            Program::get(&changed_artifact)
+                .semantic_plugins(&changed_artifact)
+                .fingerprint()
+        );
+        assert_ne!(
+            fingerprint,
+            Program::get(&changed_config)
+                .semantic_plugins(&changed_config)
+                .fingerprint()
+        );
+    }
+
+    #[test]
+    fn reports_disabled_plugin() {
+        let db = project_database(
+            r#"
+            [plugins]
+            enabled = false
+
+            [[plugins.plugin]]
+            id = "pydantic"
+            path = ".ty/plugins/missing.mock"
+            runtime = "mock"
+            "#,
+            [],
+        );
+
+        assert_plugin_diagnostics(
+            &db,
+            [(
+                Severity::Warning,
+                "Plugin `pydantic` is configured but plugins are disabled",
+            )],
+        );
+    }
+
+    #[test]
+    fn reports_untrusted_plugin_runtime() {
+        let db = project_database(
+            r#"
+            [plugins]
+            enabled = true
+
+            [[plugins.plugin]]
+            id = "pydantic"
+            path = ".ty/plugins/pydantic.wasm"
+            runtime = "wasm"
+            "#,
+            [("/project/.ty/plugins/pydantic.wasm", "plugin artifact")],
+        );
+
+        assert_plugin_diagnostics(
+            &db,
+            [(
+                Severity::Error,
+                "Plugin `pydantic` is not trusted to execute local code",
+            )],
+        );
+    }
+
+    fn project_database<'a>(
+        config: &str,
+        files: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> ProjectDatabase {
+        let system = TestSystem::default();
+        let config = config.to_string();
+        let mut all_files = vec![(SystemPathBuf::from(CONFIG_PATH), config.clone())];
+        all_files.extend(
+            files
+                .into_iter()
+                .map(|(path, content)| (SystemPathBuf::from(path), content.to_string())),
+        );
+        system
+            .memory_file_system()
+            .write_files_all(all_files)
+            .expect("failed to write test files");
+
+        let options = Options::from_toml_str(
+            &config,
+            ValueSource::File(Arc::new(SystemPathBuf::from(CONFIG_PATH))),
+        )
+        .expect("valid ty config");
+        let metadata = ProjectMetadata::from_options(
+            options,
+            SystemPathBuf::from(PROJECT_ROOT),
+            None,
+            &FallibleStrategy,
+        )
+        .expect("valid project metadata");
+
+        ProjectDatabase::fallible(metadata, system).expect("valid project database")
+    }
+
+    fn plugin_diagnostics(db: &ProjectDatabase) -> Vec<Diagnostic> {
+        db.project()
+            .check_settings(db)
+            .into_iter()
+            .filter(|diagnostic| diagnostic.id() == DiagnosticId::PluginConfiguration)
+            .collect()
+    }
+
+    fn assert_plugin_diagnostics<const N: usize>(
+        db: &ProjectDatabase,
+        expected: [(Severity, &str); N],
+    ) {
+        let diagnostics = plugin_diagnostics(db);
+        let actual = diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.severity(), diagnostic.primary_message()))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    fn manifest_json(id: &str, protocol_major: u16) -> String {
+        format!(
+            r#"{{
+                "id": "{id}",
+                "name": "Pydantic plugin",
+                "version": "0.1.0",
+                "protocol-version": {{ "major": {protocol_major}, "minor": 1 }},
+                "ty-compatibility": {{ "requirement": ">=0.0.0" }},
+                "runtime": {{ "kind": "mock" }},
+                "capabilities": {{ "stub-overlays": true }}
+            }}"#
+        )
+    }
+
+    fn manifest_json_without_capabilities(id: &str, protocol_major: u16) -> String {
+        format!(
+            r#"{{
+                "id": "{id}",
+                "name": "Pydantic plugin",
+                "version": "0.1.0",
+                "protocol-version": {{ "major": {protocol_major}, "minor": 1 }},
+                "ty-compatibility": {{ "requirement": ">=0.0.0" }},
+                "runtime": {{ "kind": "mock" }}
+            }}"#
+        )
+    }
+
+    fn subclass_transform_manifest_json() -> String {
+        r#"{
+            "id": "minidjango",
+            "name": "Mini-Django plugin",
+            "version": "0.1.0",
+            "protocol-version": { "major": 0, "minor": 1 },
+            "ty-compatibility": { "requirement": ">=0.0.0" },
+            "runtime": { "kind": "mock" },
+            "capabilities": { "class-transform": true, "call-return": true, "project-index": true },
+            "claims": {
+                "classes": [
+                    { "kind": "subclass-of", "base-qualified-name": "minidjango.Model" }
+                ],
+                "methods": [
+                    { "kind": "on-subclass-of", "base-qualified-name": "minidjango.Manager", "method-name": "filter" },
+                    { "kind": "on-subclass-of", "base-qualified-name": "minidjango.Manager", "method-name": "get" }
+                ]
+            }
+        }"#
+        .to_string()
+    }
+
+    fn settings_data_manifest_json() -> String {
+        r#"{
+            "id": "settings-reader",
+            "name": "Settings reader plugin",
+            "version": "0.1.0",
+            "protocol-version": { "major": 0, "minor": 1 },
+            "ty-compatibility": { "requirement": ">=0.0.0" },
+            "runtime": { "kind": "mock" },
+            "capabilities": { "settings-data": true },
+            "claims": {
+                "settings": [
+                    { "module": "minidjango_settings" }
+                ]
+            }
+        }"#
+        .to_string()
+    }
+
+    #[cfg(feature = "plugins-wasm")]
+    fn wasm_manifest_json() -> String {
+        r#"{
+            "id": "toy-field",
+            "name": "Toy field WASM plugin",
+            "version": "0.1.0",
+            "protocol-version": { "major": 0, "minor": 1 },
+            "ty-compatibility": { "requirement": ">=0.0.0" },
+            "runtime": { "kind": "wasm", "artifact": ".ty/plugins/toy-field.wasm" },
+            "capabilities": { "call-return": true },
+            "claims": {
+                "functions": [
+                    { "qualified-name": "toy.Field" }
+                ]
+            }
+        }"#
+        .to_string()
     }
 }

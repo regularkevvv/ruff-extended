@@ -92,6 +92,10 @@ impl System for OsSystem {
         std::fs::read_to_string(path.as_std_path())
     }
 
+    fn read_to_bytes(&self, path: &SystemPath) -> Result<Vec<u8>> {
+        std::fs::read(path.as_std_path())
+    }
+
     fn read_to_notebook(&self, path: &SystemPath) -> std::result::Result<Notebook, NotebookError> {
         Notebook::from_path(path.as_std_path())
     }

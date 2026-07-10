@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use compact_str::CompactString;
 use itertools::Itertools;
+use ruff_db::diagnostic::{Annotation, DiagnosticId, Severity};
 use ruff_db::files::File;
 use ruff_db::parsed::ParsedModuleRef;
 use ruff_db::source::source_text;
@@ -19,6 +20,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use strum::IntoEnumIterator;
 use ty_module_resolver::{ModuleName, resolve_module};
+use ty_plugin_protocol as protocol;
 use ty_python_core::ast_ids::HasScopedUseId;
 use ty_python_core::statement::StatementInner;
 
@@ -360,6 +362,14 @@ pub(super) struct TypeInferenceBuilder<'db, 'ast> {
 
 /// An expression cache shared across builders during multi-inference.
 type ExpressionCache<'db> = FxHashMap<(ExpressionNodeKey, TypeContext<'db>), Type<'db>>;
+
+const fn plugin_diagnostic_severity(severity: protocol::DiagnosticSeverity) -> Severity {
+    match severity {
+        protocol::DiagnosticSeverity::Error => Severity::Error,
+        protocol::DiagnosticSeverity::Warning => Severity::Warning,
+        protocol::DiagnosticSeverity::Info => Severity::Info,
+    }
+}
 
 impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     /// How big a string do we build before bailing?
@@ -7652,6 +7662,50 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         self.infer_call_expression_impl(call_expression, callable_type, tcx)
     }
 
+    fn report_plugin_runtime_error(
+        &self,
+        call_expression: &ast::ExprCall,
+        runtime_diagnostic: &crate::types::plugin::PluginRuntimeDiagnostic,
+    ) {
+        let Some(builder) = self
+            .context
+            .report_diagnostic(DiagnosticId::PluginConfiguration, Severity::Warning)
+        else {
+            return;
+        };
+
+        let mut diagnostic = builder.into_diagnostic(format_args!(
+            "Plugin `{}` failed while handling a semantic hook",
+            runtime_diagnostic.plugin_id()
+        ));
+        diagnostic.annotate(
+            Annotation::primary(self.context.span(call_expression))
+                .message(runtime_diagnostic.message().to_string()),
+        );
+        diagnostic.info(runtime_diagnostic.hint());
+    }
+
+    fn report_plugin_diagnostics(
+        &self,
+        call_expression: &ast::ExprCall,
+        diagnostics: &[protocol::PluginDiagnostic],
+    ) {
+        for plugin_diagnostic in diagnostics {
+            let Some(builder) = self.context.report_diagnostic(
+                DiagnosticId::PluginConfiguration,
+                plugin_diagnostic_severity(plugin_diagnostic.severity),
+            ) else {
+                continue;
+            };
+
+            let mut diagnostic = builder.into_diagnostic(plugin_diagnostic.message.as_str());
+            diagnostic.annotate(
+                Annotation::primary(self.context.span(call_expression))
+                    .message(plugin_diagnostic.id.as_str()),
+            );
+        }
+    }
+
     fn infer_empty_list_or_set_constructor(
         &mut self,
         collection_class: KnownClass,
@@ -8170,8 +8224,26 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             }
         }
 
+        // A plugin may claim the callee's call signature; if so, bind and check arguments against
+        // the plugin-provided callable instead. This runs before parameter matching so normal
+        // argument inference flows through the adjusted signature.
+        let call_callable_type = match crate::types::plugin::plugin_adjusted_call_callable(
+            self.db(),
+            self.file(),
+            callable_type,
+            arguments,
+            self.context.diagnostics_suppressed(),
+        ) {
+            Ok(Some(call_callable_type)) => call_callable_type,
+            Ok(None) => callable_type,
+            Err(diagnostic) => {
+                self.report_plugin_runtime_error(call_expression, &diagnostic);
+                callable_type
+            }
+        };
+
         let mut bindings = self
-            .bindings_for_call(callable_type)
+            .bindings_for_call(call_callable_type)
             .match_parameters(self.db(), &call_arguments);
 
         report_missing_implicit_constructor_call(
@@ -8339,6 +8411,32 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 .unwrap_or(return_ty)
             }
             _ => return_ty,
+        };
+
+        // A plugin may claim the callee's return type. Never adjust `TypeIs`/`TypeGuard` returns so
+        // the narrowing below stays intact.
+        let return_ty = if matches!(return_ty, Type::TypeIs(_) | Type::TypeGuard(_)) {
+            return_ty
+        } else {
+            match crate::types::plugin::plugin_adjusted_call_return(
+                db,
+                self.file(),
+                callable_type,
+                arguments,
+                &call_arguments,
+                return_ty,
+                self.context.diagnostics_suppressed(),
+            ) {
+                Ok(Some(adjustment)) => {
+                    self.report_plugin_diagnostics(call_expression, adjustment.diagnostics());
+                    adjustment.return_ty()
+                }
+                Ok(None) => return_ty,
+                Err(diagnostic) => {
+                    self.report_plugin_runtime_error(call_expression, &diagnostic);
+                    return_ty
+                }
+            }
         };
 
         let find_narrowed_place = |argument_index: usize| match arguments.args.get(argument_index) {

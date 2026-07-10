@@ -96,6 +96,7 @@ impl ModulePath {
         match &*search_path.0 {
             SearchPathInner::Extra(search_path)
             | SearchPathInner::FirstParty(search_path)
+            | SearchPathInner::PluginStubOverlay(search_path)
             | SearchPathInner::SitePackages(search_path)
             | SearchPathInner::Editable(search_path)
             | SearchPathInner::StandardLibraryReal(search_path) => {
@@ -141,6 +142,11 @@ impl ModulePath {
                     &absolute_path,
                     &["__init__.py", "__init__.pyi"],
                 )
+            }
+            SearchPathInner::PluginStubOverlay(search_path) => {
+                let absolute_path = search_path.join(relative_path);
+
+                directory_contains_file(resolver.db, &absolute_path, &["__init__.pyi"])
             }
             SearchPathInner::StandardLibraryReal(search_path) => {
                 let absolute_path = search_path.join(relative_path);
@@ -206,6 +212,7 @@ impl ModulePath {
         match &*search_path.0 {
             SearchPathInner::Extra(search_path)
             | SearchPathInner::FirstParty(search_path)
+            | SearchPathInner::PluginStubOverlay(search_path)
             | SearchPathInner::SitePackages(search_path)
             | SearchPathInner::Editable(search_path) => Some(search_path.join(relative_path)),
             SearchPathInner::StandardLibraryReal(stdlib_root)
@@ -226,6 +233,7 @@ impl ModulePath {
         match &*search_path.0 {
             SearchPathInner::Extra(search_path)
             | SearchPathInner::FirstParty(search_path)
+            | SearchPathInner::PluginStubOverlay(search_path)
             | SearchPathInner::SitePackages(search_path)
             | SearchPathInner::Editable(search_path) => {
                 system_path_to_file_if_listed(db, &search_path.join(relative_path))
@@ -319,7 +327,9 @@ impl ModulePath {
 
     #[must_use]
     pub(crate) fn with_py_extension(&self) -> Option<Self> {
-        if self.is_standard_library() {
+        if self.is_standard_library()
+            || matches!(&*self.search_path.0, SearchPathInner::PluginStubOverlay(_))
+        {
             return None;
         }
         let ModulePath {
@@ -461,6 +471,7 @@ enum SearchPathInner {
     StandardLibraryReal(SystemPathBuf),
     SitePackages(SystemPathBuf),
     Editable(SystemPathBuf),
+    PluginStubOverlay(SystemPathBuf),
 }
 
 /// Unification of the various kinds of search paths
@@ -512,6 +523,16 @@ impl SearchPath {
     /// Create a new first-party search path, pointing to the user code we were directly invoked on
     pub(crate) fn first_party(system: &dyn System, root: SystemPathBuf) -> SearchPathResult<Self> {
         Ok(Self(Arc::new(SearchPathInner::FirstParty(
+            Self::directory_path(system, root)?,
+        ))))
+    }
+
+    /// Create a new plugin stub overlay search path.
+    pub(crate) fn plugin_stub_overlay(
+        system: &dyn System,
+        root: SystemPathBuf,
+    ) -> SearchPathResult<Self> {
+        Ok(Self(Arc::new(SearchPathInner::PluginStubOverlay(
             Self::directory_path(system, root)?,
         ))))
     }
@@ -617,6 +638,7 @@ impl SearchPath {
             SearchPathInner::SitePackages(_) | SearchPathInner::Editable(_) => true,
             SearchPathInner::Extra(_)
             | SearchPathInner::FirstParty(_)
+            | SearchPathInner::PluginStubOverlay(_)
             | SearchPathInner::StandardLibraryCustom(_)
             | SearchPathInner::StandardLibraryVendored(_)
             | SearchPathInner::StandardLibraryReal(_) => false,
@@ -624,7 +646,7 @@ impl SearchPath {
     }
 
     fn is_valid_extension(&self, extension: &str) -> bool {
-        if self.is_standard_library() {
+        if self.is_standard_library() || matches!(&*self.0, SearchPathInner::PluginStubOverlay(_)) {
             extension == "pyi"
         } else {
             matches!(extension, "pyi" | "py")
@@ -655,6 +677,7 @@ impl SearchPath {
         match &*self.0 {
             SearchPathInner::Extra(search_path)
             | SearchPathInner::FirstParty(search_path)
+            | SearchPathInner::PluginStubOverlay(search_path)
             | SearchPathInner::StandardLibraryCustom(search_path)
             | SearchPathInner::StandardLibraryReal(search_path)
             | SearchPathInner::SitePackages(search_path)
@@ -675,6 +698,7 @@ impl SearchPath {
         match &*self.0 {
             SearchPathInner::Extra(_)
             | SearchPathInner::FirstParty(_)
+            | SearchPathInner::PluginStubOverlay(_)
             | SearchPathInner::StandardLibraryCustom(_)
             | SearchPathInner::StandardLibraryReal(_)
             | SearchPathInner::SitePackages(_)
@@ -694,6 +718,7 @@ impl SearchPath {
         match *self.0 {
             SearchPathInner::Extra(ref path)
             | SearchPathInner::FirstParty(ref path)
+            | SearchPathInner::PluginStubOverlay(ref path)
             | SearchPathInner::StandardLibraryCustom(ref path)
             | SearchPathInner::StandardLibraryReal(ref path)
             | SearchPathInner::SitePackages(ref path)
@@ -723,6 +748,7 @@ impl SearchPath {
         match *self.0 {
             SearchPathInner::Extra(_) => "extra",
             SearchPathInner::FirstParty(_) => "first-party",
+            SearchPathInner::PluginStubOverlay(_) => "plugin-stub-overlay",
             SearchPathInner::StandardLibraryCustom(_) => "std-custom",
             SearchPathInner::StandardLibraryReal(_) => "std-real",
             SearchPathInner::SitePackages(_) => "site-packages",
@@ -740,6 +766,7 @@ impl SearchPath {
                 "extra search path specified on the CLI or in your config file"
             }
             SearchPathInner::FirstParty(_) => "first-party code",
+            SearchPathInner::PluginStubOverlay(_) => "plugin stub overlay",
             SearchPathInner::StandardLibraryCustom(_) => {
                 "custom stdlib stubs specified on the CLI or in your config file"
             }
@@ -804,6 +831,7 @@ impl fmt::Display for SearchPath {
         match &*self.0 {
             SearchPathInner::Extra(system_path_buf)
             | SearchPathInner::FirstParty(system_path_buf)
+            | SearchPathInner::PluginStubOverlay(system_path_buf)
             | SearchPathInner::SitePackages(system_path_buf)
             | SearchPathInner::Editable(system_path_buf)
             | SearchPathInner::StandardLibraryReal(system_path_buf)

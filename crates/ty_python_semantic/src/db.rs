@@ -2,7 +2,31 @@ use crate::AnalysisSettings;
 use crate::lint::{LintRegistry, RuleSelection};
 use ruff_db::diagnostic::Diagnostic;
 use ruff_db::files::File;
+use ty_plugin_protocol::{PluginRequest, PluginResponse};
 use ty_python_core::Db as PythonCoreDb;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticPluginRuntimeError {
+    message: String,
+    hint: String,
+}
+
+impl SemanticPluginRuntimeError {
+    pub fn new(message: impl Into<String>, hint: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            hint: hint.into(),
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn hint(&self) -> &str {
+        &self.hint
+    }
+}
 
 /// Database giving access to semantic information about a Python program.
 #[salsa::db]
@@ -19,6 +43,17 @@ pub trait Db: PythonCoreDb {
     /// Whether ty is running with logging verbosity INFO or higher (`-v` or more).
     fn verbose(&self) -> bool;
 
+    /// Execute a configured semantic plugin outside Salsa's tracked inputs.
+    ///
+    /// Implementations must keep all cache-key material in
+    /// [`Program`](ty_python_core::program::Program)'s tracked semantic plugin environment; this
+    /// method only owns the runtime handle used to execute an already-fingerprinted plugin.
+    fn execute_semantic_plugin(
+        &self,
+        plugin_id: &str,
+        request: &PluginRequest,
+    ) -> Result<PluginResponse, SemanticPluginRuntimeError>;
+
     fn dyn_clone(&self) -> Box<dyn Db>;
 }
 
@@ -26,6 +61,7 @@ pub trait Db: PythonCoreDb {
 pub(crate) mod tests {
     use super::*;
 
+    use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
     use anyhow::Context;
@@ -40,10 +76,15 @@ pub(crate) mod tests {
     use ruff_db::vendored::VendoredFileSystem;
     use ruff_python_ast::PythonVersion;
     use ty_module_resolver::{Db as ModuleResolverDb, SearchPathSettings, SearchPaths};
-    use ty_python_core::program::{FallibleStrategy, Program, ProgramSettings};
+    use ty_python_core::program::{
+        FallibleStrategy, Program, ProgramSettings, SemanticPluginEnvironment,
+    };
     use ty_site_packages::{PythonVersionSource, PythonVersionWithSource};
 
     type Events = Arc<Mutex<Vec<salsa::Event>>>;
+    type SemanticPluginExecutor = Arc<
+        dyn Fn(&PluginRequest) -> Result<PluginResponse, SemanticPluginRuntimeError> + Send + Sync,
+    >;
 
     #[salsa::db]
     #[derive(Clone)]
@@ -55,6 +96,7 @@ pub(crate) mod tests {
         events: Events,
         rule_selection: Arc<RuleSelection>,
         analysis_settings: Arc<AnalysisSettings>,
+        semantic_plugin_executors: Arc<Mutex<BTreeMap<String, SemanticPluginExecutor>>>,
     }
 
     impl TestDb {
@@ -75,6 +117,7 @@ pub(crate) mod tests {
                 files: Files::default(),
                 rule_selection: Arc::new(RuleSelection::from_registry(default_lint_registry())),
                 analysis_settings: AnalysisSettings::default().into(),
+                semantic_plugin_executors: Arc::default(),
             }
         }
 
@@ -91,6 +134,20 @@ pub(crate) mod tests {
         /// If there are any pending salsa snapshots.
         pub(crate) fn clear_salsa_events(&mut self) {
             self.take_salsa_events();
+        }
+
+        pub(crate) fn register_semantic_plugin_executor(
+            &mut self,
+            plugin_id: impl Into<String>,
+            executor: impl Fn(&PluginRequest) -> Result<PluginResponse, SemanticPluginRuntimeError>
+            + Send
+            + Sync
+            + 'static,
+        ) {
+            self.semantic_plugin_executors
+                .lock()
+                .unwrap()
+                .insert(plugin_id.into(), Arc::new(executor));
         }
     }
 
@@ -154,6 +211,24 @@ pub(crate) mod tests {
 
         fn verbose(&self) -> bool {
             false
+        }
+
+        fn execute_semantic_plugin(
+            &self,
+            plugin_id: &str,
+            request: &PluginRequest,
+        ) -> Result<PluginResponse, SemanticPluginRuntimeError> {
+            let executor = self
+                .semantic_plugin_executors
+                .lock()
+                .unwrap()
+                .get(plugin_id)
+                .cloned();
+
+            match executor {
+                Some(executor) => executor(request),
+                None => Ok(PluginResponse::NoChange),
+            }
         }
 
         fn dyn_clone(&self) -> Box<dyn crate::Db> {
@@ -228,6 +303,7 @@ pub(crate) mod tests {
                     search_paths: SearchPathSettings::new(vec![src_root])
                         .to_search_paths(db.system(), db.vendored(), &FallibleStrategy)
                         .context("Invalid search path settings")?,
+                    semantic_plugins: SemanticPluginEnvironment::default(),
                 },
             );
 

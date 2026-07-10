@@ -11,6 +11,8 @@ pub(super) use self::named_tuple::{
 };
 pub(crate) use self::static_literal::{
     ExpandedClassBaseEntry, StaticClassLiteral, expanded_class_base_entries,
+    plugin_project_index_diagnostics_for_file, plugin_project_index_json,
+    plugin_project_index_virtual_types,
 };
 pub(super) use self::typed_dict::{DynamicTypedDictAnchor, DynamicTypedDictLiteral};
 use super::dedicated::pydantic;
@@ -1974,6 +1976,79 @@ impl<'db> ClassType<'db> {
                     .instance_member(db, specialization, name)
                     .map_type(|ty| ty.apply_optional_specialization(db, specialization))
             }
+        }
+    }
+
+    pub(super) fn plugin_instance_assignment_member(
+        self,
+        db: &'db dyn Db,
+        name: &str,
+    ) -> Option<PlaceAndQualifiers<'db>> {
+        match self {
+            Self::NonGeneric(ClassLiteral::Static(class)) => {
+                class.plugin_class_transform_instance_assignment_member(db, None, name)
+            }
+            Self::Generic(generic) => generic
+                .origin(db)
+                .plugin_class_transform_instance_assignment_member(
+                    db,
+                    Some(generic.specialization(db)),
+                    name,
+                ),
+            Self::NonGeneric(
+                ClassLiteral::Dynamic(_)
+                | ClassLiteral::DynamicNamedTuple(_)
+                | ClassLiteral::DynamicTypedDict(_)
+                | ClassLiteral::DynamicEnum(_),
+            ) => None,
+        }
+    }
+
+    pub(super) fn plugin_class_transform_instance_member(
+        self,
+        db: &'db dyn Db,
+        name: &str,
+    ) -> Option<PlaceAndQualifiers<'db>> {
+        match self {
+            Self::NonGeneric(ClassLiteral::Static(class)) => {
+                class.plugin_class_transform_instance_member(db, None, name)
+            }
+            Self::Generic(generic) => generic.origin(db).plugin_class_transform_instance_member(
+                db,
+                Some(generic.specialization(db)),
+                name,
+            ),
+            Self::NonGeneric(
+                ClassLiteral::Dynamic(_)
+                | ClassLiteral::DynamicNamedTuple(_)
+                | ClassLiteral::DynamicTypedDict(_)
+                | ClassLiteral::DynamicEnum(_),
+            ) => None,
+        }
+    }
+
+    pub(super) fn plugin_contributed_instance_assignment_member(
+        self,
+        db: &'db dyn Db,
+        name: &str,
+    ) -> Option<PlaceAndQualifiers<'db>> {
+        match self {
+            Self::NonGeneric(ClassLiteral::Static(class)) => {
+                class.plugin_contributed_instance_assignment_member(db, None, name)
+            }
+            Self::Generic(generic) => generic
+                .origin(db)
+                .plugin_contributed_instance_assignment_member(
+                    db,
+                    Some(generic.specialization(db)),
+                    name,
+                ),
+            Self::NonGeneric(
+                ClassLiteral::Dynamic(_)
+                | ClassLiteral::DynamicNamedTuple(_)
+                | ClassLiteral::DynamicTypedDict(_)
+                | ClassLiteral::DynamicEnum(_),
+            ) => None,
         }
     }
 

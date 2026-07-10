@@ -199,6 +199,15 @@ impl SemanticDb for Db {
         self.settings().analysis(self)
     }
 
+    fn execute_semantic_plugin(
+        &self,
+        _plugin_id: &str,
+        _request: &ty_plugin_protocol::PluginRequest,
+    ) -> Result<ty_plugin_protocol::PluginResponse, ty_python_semantic::SemanticPluginRuntimeError>
+    {
+        Ok(ty_plugin_protocol::PluginResponse::NoChange)
+    }
+
     fn dyn_clone(&self) -> Box<dyn SemanticDb> {
         Box::new(self.clone())
     }
@@ -405,6 +414,10 @@ impl System for MdtestSystem {
 
     fn read_to_string(&self, path: &SystemPath) -> ruff_db::system::Result<String> {
         self.as_system().read_to_string(&self.normalize_path(path))
+    }
+
+    fn read_to_bytes(&self, path: &SystemPath) -> ruff_db::system::Result<Vec<u8>> {
+        self.as_system().read_to_bytes(&self.normalize_path(path))
     }
 
     fn read_to_notebook(&self, path: &SystemPath) -> Result<Notebook, NotebookError> {

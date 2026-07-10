@@ -22,6 +22,7 @@ pub(crate) struct TestCase<T> {
     // so this is a single directory instead of a `Vec` of directories,
     // like it is in `SearchPaths`.
     pub(crate) site_packages: SystemPathBuf,
+    pub(crate) plugin_stub_overlay: SystemPathBuf,
     pub(crate) python_version: PythonVersion,
 }
 
@@ -107,6 +108,7 @@ pub(crate) struct TestCaseBuilder<T> {
     python_version: PythonVersion,
     first_party_files: Vec<FileSpec>,
     site_packages_files: Vec<FileSpec>,
+    plugin_stub_overlay_files: Vec<FileSpec>,
     // Additional file roots (beyond site_packages, src and stdlib)
     // that should be registered with the `Db` abstraction.
     roots: Vec<SystemPathBuf>,
@@ -122,6 +124,12 @@ impl<T> TestCaseBuilder<T> {
     /// Specify files to be created in the `site-packages` mock directory
     pub(crate) fn with_site_packages_files(mut self, files: &[FileSpec]) -> Self {
         self.site_packages_files.extend(files.iter().copied());
+        self
+    }
+
+    /// Specify files to be created in the plugin stub overlay mock directory.
+    pub(crate) fn with_plugin_stub_overlay_files(mut self, files: &[FileSpec]) -> Self {
+        self.plugin_stub_overlay_files.extend(files.iter().copied());
         self
     }
 
@@ -162,6 +170,7 @@ impl TestCaseBuilder<UnspecifiedTypeshed> {
             python_version: PythonVersion::default(),
             first_party_files: vec![],
             site_packages_files: vec![],
+            plugin_stub_overlay_files: vec![],
             roots: vec![],
         }
     }
@@ -173,6 +182,7 @@ impl TestCaseBuilder<UnspecifiedTypeshed> {
             python_version,
             first_party_files,
             site_packages_files,
+            plugin_stub_overlay_files,
             roots,
         } = self;
         TestCaseBuilder {
@@ -180,6 +190,7 @@ impl TestCaseBuilder<UnspecifiedTypeshed> {
             python_version,
             first_party_files,
             site_packages_files,
+            plugin_stub_overlay_files,
             roots,
         }
     }
@@ -194,6 +205,7 @@ impl TestCaseBuilder<UnspecifiedTypeshed> {
             python_version,
             first_party_files,
             site_packages_files,
+            plugin_stub_overlay_files,
             roots,
         } = self;
 
@@ -202,6 +214,7 @@ impl TestCaseBuilder<UnspecifiedTypeshed> {
             python_version,
             first_party_files,
             site_packages_files,
+            plugin_stub_overlay_files,
             roots,
         }
     }
@@ -212,6 +225,7 @@ impl TestCaseBuilder<UnspecifiedTypeshed> {
             src,
             stdlib: _,
             site_packages,
+            plugin_stub_overlay,
             python_version,
         } = self.with_mocked_typeshed(MockedTypeshed::default()).build();
 
@@ -220,6 +234,7 @@ impl TestCaseBuilder<UnspecifiedTypeshed> {
             src,
             stdlib: (),
             site_packages,
+            plugin_stub_overlay,
             python_version,
         }
     }
@@ -232,19 +247,27 @@ impl TestCaseBuilder<MockedTypeshed> {
             python_version,
             first_party_files,
             site_packages_files,
+            plugin_stub_overlay_files,
             roots,
         } = self;
 
         let mut db = TestDb::new().with_python_version(python_version);
+        let has_plugin_stub_overlay = !plugin_stub_overlay_files.is_empty();
 
         let site_packages =
             Self::write_mock_directory(&mut db, "/site-packages", site_packages_files);
+        let plugin_stub_overlay =
+            Self::write_mock_directory(&mut db, "/plugin-stub-overlay", plugin_stub_overlay_files);
         let src = Self::write_mock_directory(&mut db, "/src", first_party_files);
         let typeshed = Self::build_typeshed_mock(&mut db, &typeshed_option);
         let stdlib = typeshed.join("stdlib");
 
         let search_paths = SearchPathSettings {
             src_roots: vec![src.clone()],
+            plugin_stub_overlay_paths: has_plugin_stub_overlay
+                .then(|| plugin_stub_overlay.clone())
+                .into_iter()
+                .collect(),
             custom_typeshed: Some(typeshed),
             site_packages_paths: vec![site_packages.clone()],
             ..SearchPathSettings::empty()
@@ -272,6 +295,7 @@ impl TestCaseBuilder<MockedTypeshed> {
             src,
             stdlib,
             site_packages,
+            plugin_stub_overlay,
             python_version,
         }
     }
@@ -301,17 +325,25 @@ impl TestCaseBuilder<VendoredTypeshed> {
             python_version,
             first_party_files,
             site_packages_files,
+            plugin_stub_overlay_files,
             roots,
         } = self;
 
         let mut db = TestDb::new().with_python_version(python_version);
+        let has_plugin_stub_overlay = !plugin_stub_overlay_files.is_empty();
 
         let site_packages =
             Self::write_mock_directory(&mut db, "/site-packages", site_packages_files);
+        let plugin_stub_overlay =
+            Self::write_mock_directory(&mut db, "/plugin-stub-overlay", plugin_stub_overlay_files);
         let src = Self::write_mock_directory(&mut db, "/src", first_party_files);
 
         let search_paths = SearchPathSettings {
             src_roots: vec![src.clone()],
+            plugin_stub_overlay_paths: has_plugin_stub_overlay
+                .then(|| plugin_stub_overlay.clone())
+                .into_iter()
+                .collect(),
             site_packages_paths: vec![site_packages.clone()],
             ..SearchPathSettings::empty()
         }
@@ -331,6 +363,7 @@ impl TestCaseBuilder<VendoredTypeshed> {
             src,
             stdlib: VendoredPathBuf::from("stdlib"),
             site_packages,
+            plugin_stub_overlay,
             python_version,
         }
     }

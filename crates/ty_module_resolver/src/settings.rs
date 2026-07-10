@@ -19,6 +19,12 @@ pub struct SearchPathSettings {
     /// The root of the project, used for finding first-party modules.
     pub src_roots: Vec<SystemPathBuf>,
 
+    /// Plugin-provided stub overlay roots.
+    ///
+    /// These roots contain `.pyi` files that can model third-party packages without
+    /// being treated as user `extra_paths` or as a custom stdlib.
+    pub plugin_stub_overlay_paths: Vec<SystemPathBuf>,
+
     /// Optional path to a "custom typeshed" directory on disk for us to use for standard-library types.
     /// If this is not provided, we will fallback to our vendored typeshed stubs for the stdlib,
     /// bundled as a zip file in the binary
@@ -46,6 +52,7 @@ impl SearchPathSettings {
         SearchPathSettings {
             src_roots: vec![],
             extra_paths: vec![],
+            plugin_stub_overlay_paths: vec![],
             custom_typeshed: None,
             site_packages_paths: vec![],
             real_stdlib_path: None,

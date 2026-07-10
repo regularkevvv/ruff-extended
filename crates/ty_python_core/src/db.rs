@@ -27,7 +27,7 @@ pub(crate) mod tests {
     use ty_site_packages::{PythonVersionSource, PythonVersionWithSource};
 
     use crate::platform::PythonPlatform;
-    use crate::program::{Program, ProgramSettings};
+    use crate::program::{Program, ProgramSettings, SemanticPluginEnvironment};
 
     use super::Db;
 
@@ -153,6 +153,7 @@ pub(crate) mod tests {
                     search_paths: SearchPathSettings::new(vec![src_root])
                         .to_search_paths(db.system(), db.vendored(), &FallibleStrategy)
                         .context("Invalid search path settings")?,
+                    semantic_plugins: SemanticPluginEnvironment::default(),
                 },
             );
 

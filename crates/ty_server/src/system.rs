@@ -200,6 +200,15 @@ impl System for LSPSystem {
         }
     }
 
+    fn read_to_bytes(&self, path: &SystemPath) -> Result<Vec<u8>> {
+        let document = self.system_path_to_document(path);
+
+        match document {
+            Some(Document::Text(document)) => Ok(document.contents().as_bytes().to_vec()),
+            _ => self.native_system.read_to_bytes(path),
+        }
+    }
+
     fn read_to_notebook(&self, path: &SystemPath) -> std::result::Result<Notebook, NotebookError> {
         let document = self.system_path_to_document(path);
 

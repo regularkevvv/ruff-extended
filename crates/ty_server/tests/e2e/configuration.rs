@@ -1,5 +1,6 @@
 use anyhow::Result;
 use insta::assert_json_snapshot;
+use lsp_types::{FileChangeType, FileEvent};
 use ruff_db::system::SystemPath;
 use serde_json::{Map, json};
 use ty_server::{ClientOptions, WorkspaceOptions};
@@ -100,6 +101,174 @@ unresolved-reference="warn"
     }
     "#);
     assert_json_snapshot!(diagnostics);
+
+    Ok(())
+}
+
+#[test]
+fn plugin_manifest_setting_diagnostics_update_on_watched_file_change() -> Result<()> {
+    let workspace_root = SystemPath::new("project");
+    let ty_toml = SystemPath::new("project/ty.toml");
+    let manifest = SystemPath::new("project/.ty/plugins/pydantic.plugin.json");
+
+    let mut server = TestServerBuilder::new()?
+        .with_workspace(workspace_root, None)?
+        .with_file(
+            ty_toml,
+            r#"
+            [plugins]
+            enabled = true
+
+            [[plugins.plugin]]
+            id = "pydantic"
+            path = ".ty/plugins/pydantic.mock"
+            runtime = "mock"
+            manifest-path = ".ty/plugins/pydantic.plugin.json"
+            "#,
+        )?
+        .with_file("project/.ty/plugins/pydantic.mock", "plugin artifact")?
+        .with_file(manifest, "{")?
+        .build()
+        .wait_until_workspaces_are_initialized();
+
+    let diagnostics = server.collect_publish_diagnostic_notifications(1);
+    assert_json_snapshot!(diagnostics, @r#"
+    {
+      "file://<temp_dir>/project/ty.toml": [
+        {
+          "range": {
+            "start": {
+              "line": 8,
+              "character": 28
+            },
+            "end": {
+              "line": 8,
+              "character": 62
+            }
+          },
+          "severity": 1,
+          "code": "plugin-configuration",
+          "source": "ty",
+          "message": "Failed to parse manifest for plugin `pydantic`: EOF while parsing an object at line 1 column 1"
+        }
+      ]
+    }
+    "#);
+
+    server.write_file(
+        manifest,
+        r#"{
+            "id": "pydantic",
+            "name": "Pydantic plugin",
+            "version": "0.1.0",
+            "protocol-version": { "major": 0, "minor": 1 },
+            "ty-compatibility": { "requirement": ">=0.0.0" },
+            "runtime": { "kind": "mock" }
+        }"#,
+    )?;
+
+    server.did_change_watched_files(vec![FileEvent {
+        uri: server.file_uri(manifest),
+        kind: FileChangeType::Changed,
+    }]);
+
+    let diagnostics = server.collect_publish_diagnostic_notifications(1);
+    assert_json_snapshot!(diagnostics, @r#"
+    {
+      "file://<temp_dir>/project/ty.toml": []
+    }
+    "#);
+
+    Ok(())
+}
+
+#[test]
+fn plugin_stub_overlay_diagnostics_update_on_watched_file_change() -> Result<()> {
+    let _filter = filter_result_id();
+
+    let workspace_root = SystemPath::new("project");
+    let main = SystemPath::new("project/main.py");
+    let ty_toml = SystemPath::new("project/ty.toml");
+    let overlay = SystemPath::new("project/.ty/plugins/stubs/foo/__init__.pyi");
+    let main_content = "from foo import make\nvalue: int = make()\n";
+
+    let mut server = TestServerBuilder::new()?
+        .with_workspace(workspace_root, None)?
+        .with_file(main, main_content)?
+        .with_file(
+            ty_toml,
+            r#"
+            [plugins]
+            enabled = true
+
+            [[plugins.plugin]]
+            id = "overlay"
+            path = ".ty/plugins/overlay.mock"
+            runtime = "mock"
+            manifest-path = ".ty/plugins/overlay.plugin.json"
+            stub-overlay-path = ".ty/plugins/stubs"
+            "#,
+        )?
+        .with_file("project/.ty/plugins/overlay.mock", "plugin artifact")?
+        .with_file(
+            "project/.ty/plugins/overlay.plugin.json",
+            r#"{
+                "id": "overlay",
+                "name": "Overlay plugin",
+                "version": "0.1.0",
+                "protocol-version": { "major": 0, "minor": 1 },
+                "ty-compatibility": { "requirement": ">=0.0.0" },
+                "runtime": { "kind": "mock" },
+                "capabilities": { "stub-overlays": true }
+            }"#,
+        )?
+        .with_file(overlay, "def make() -> int: ...\n")?
+        .build()
+        .wait_until_workspaces_are_initialized();
+
+    server.open_text_document(main, main_content, 1);
+    let diagnostics = server.document_diagnostic_request(main, None);
+    assert_json_snapshot!(diagnostics, @r#"
+    {
+      "items": [],
+      "kind": "full"
+    }
+    "#);
+
+    server.write_file(overlay, "def make() -> str: ...\n")?;
+    server.did_change_watched_files(vec![FileEvent {
+        uri: server.file_uri(overlay),
+        kind: FileChangeType::Changed,
+    }]);
+
+    let diagnostics = server.document_diagnostic_request(main, None);
+    assert_json_snapshot!(diagnostics, @r#"
+    {
+      "resultId": "[RESULT_ID]",
+      "items": [
+        {
+          "range": {
+            "start": {
+              "line": 1,
+              "character": 13
+            },
+            "end": {
+              "line": 1,
+              "character": 19
+            }
+          },
+          "severity": 1,
+          "code": "invalid-assignment",
+          "codeDescription": {
+            "href": "https://ty.dev/rules#invalid-assignment"
+          },
+          "source": "ty",
+          "message": "Object of type `str` is not assignable to `int`"
+        }
+      ],
+      "kind": "full"
+    }
+    "#);
 
     Ok(())
 }

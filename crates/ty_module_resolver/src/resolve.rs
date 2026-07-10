@@ -576,6 +576,13 @@ pub struct SearchPaths {
     /// ([`ModuleResolveMode::Runtime`]).
     real_stdlib_path: Option<SearchPath>,
 
+    /// Plugin-provided stub overlay roots.
+    ///
+    /// These are only exposed when stubs are allowed. They sit after stdlib/typeshed
+    /// so plugin overlays cannot shadow the standard library, and before site-packages
+    /// so they can model third-party libraries.
+    plugin_stub_overlays: Vec<SearchPath>,
+
     /// site-packages paths are not included in the above fields:
     /// if there are multiple site-packages paths, editable installations can appear
     /// *between* the site-packages paths on `sys.path` at runtime.
@@ -609,6 +616,7 @@ impl SearchPaths {
         let SearchPathSettings {
             extra_paths,
             src_roots,
+            plugin_stub_overlay_paths,
             custom_typeshed: typeshed,
             site_packages_paths,
             real_stdlib_path,
@@ -683,6 +691,21 @@ impl SearchPaths {
             None
         };
 
+        let mut plugin_stub_overlays = Vec::with_capacity(plugin_stub_overlay_paths.len());
+
+        for path in plugin_stub_overlay_paths {
+            let path = canonicalize(path, system);
+            tracing::debug!("Adding plugin stub overlay search path `{path}`");
+            let path = strategy.fallback_opt(
+                SearchPath::plugin_stub_overlay(system, path)
+                    .map_err(SearchPathSettingsError::from),
+                |err| {
+                    tracing::debug!("Skipping invalid plugin stub overlay search-path: {err}");
+                },
+            )?;
+            plugin_stub_overlays.extend(path);
+        }
+
         let mut site_packages: Vec<_> = Vec::with_capacity(site_packages_paths.len());
 
         for path in site_packages_paths {
@@ -746,10 +769,23 @@ impl SearchPaths {
             real_stdlib_path
         };
 
+        if let Some(path) = stdlib_path.as_ref().and_then(SearchPath::as_system_path) {
+            seen_paths.insert(path.to_path_buf());
+        }
+
+        plugin_stub_overlays.retain(|path| {
+            if let Some(path) = path.as_system_path() {
+                seen_paths.insert(path.to_path_buf())
+            } else {
+                true
+            }
+        });
+
         Ok(SearchPaths {
             static_paths,
             stdlib_path,
             real_stdlib_path,
+            plugin_stub_overlays,
             site_packages,
             typeshed_versions,
         })
@@ -763,6 +799,7 @@ impl SearchPaths {
             static_paths: vec![],
             stdlib_path: Some(SearchPath::vendored_stdlib()),
             real_stdlib_path: None,
+            plugin_stub_overlays: vec![],
             site_packages: vec![],
             typeshed_versions: vendored_typeshed_versions(vendored),
         }
@@ -774,6 +811,7 @@ impl SearchPaths {
         for path in self
             .static_paths
             .iter()
+            .chain(self.plugin_stub_overlays.iter())
             .chain(self.site_packages.iter())
             .chain(&self.stdlib_path)
         {
@@ -793,10 +831,12 @@ impl SearchPaths {
         mode: ModuleResolveMode,
     ) -> SearchPathIterator<'a> {
         let stdlib_path = self.stdlib(mode);
+        let plugin_stub_overlays = mode.is_typing().then(|| self.plugin_stub_overlays.iter());
         SearchPathIterator {
             db,
             static_paths: self.static_paths.iter(),
             stdlib_path,
+            plugin_stub_overlays,
             dynamic_paths: None,
             mode: ModuleResolveModeIngredient::new(db, mode),
         }
@@ -874,6 +914,7 @@ pub(crate) fn dynamic_resolution_paths<'db>(
     let SearchPaths {
         static_paths,
         stdlib_path,
+        plugin_stub_overlays,
         site_packages,
         typeshed_versions: _,
         real_stdlib_path,
@@ -890,6 +931,15 @@ pub(crate) fn dynamic_resolution_paths<'db>(
         .filter_map(|path| path.as_system_path())
         .map(Cow::Borrowed)
         .collect();
+
+    if mode.mode(db).is_typing() {
+        existing_paths.extend(
+            plugin_stub_overlays
+                .iter()
+                .filter_map(|path| path.as_system_path())
+                .map(Cow::Borrowed),
+        );
+    }
 
     // Use the `ModuleResolveMode` to determine which stdlib (if any) to mark as existing
     let stdlib = match mode.mode(db) {
@@ -1017,6 +1067,7 @@ pub struct SearchPathIterator<'db> {
     db: &'db dyn Db,
     static_paths: std::slice::Iter<'db, SearchPath>,
     stdlib_path: Option<&'db SearchPath>,
+    plugin_stub_overlays: Option<std::slice::Iter<'db, SearchPath>>,
     dynamic_paths: Option<std::slice::Iter<'db, SearchPath>>,
     mode: ModuleResolveModeIngredient<'db>,
 }
@@ -1029,6 +1080,7 @@ impl<'db> Iterator for SearchPathIterator<'db> {
             db,
             static_paths,
             stdlib_path,
+            plugin_stub_overlays,
             mode,
             dynamic_paths,
         } = self;
@@ -1036,6 +1088,7 @@ impl<'db> Iterator for SearchPathIterator<'db> {
         static_paths
             .next()
             .or_else(|| stdlib_path.take())
+            .or_else(|| plugin_stub_overlays.as_mut().and_then(Iterator::next))
             .or_else(|| {
                 dynamic_paths
                     .get_or_insert_with(|| dynamic_resolution_paths(*db, *mode).iter())
@@ -2006,6 +2059,108 @@ mod tests {
         assert_eq!(
             foo.file(&db).unwrap().path(&db),
             &site_packages.join("foo-stubs/__init__.pyi")
+        );
+    }
+
+    #[test]
+    fn first_party_precedes_plugin_stub_overlay() {
+        let TestCase { db, src, .. } = TestCaseBuilder::new()
+            .with_src_files(&[("foo.py", "")])
+            .with_plugin_stub_overlay_files(&[("foo.pyi", "")])
+            .with_site_packages_files(&[("foo.py", "")])
+            .build();
+
+        let foo = resolve_module_confident(&db, &ModuleName::new_static("foo").unwrap()).unwrap();
+        assert_eq!(foo.file(&db).unwrap().path(&db), &src.join("foo.py"));
+    }
+
+    #[test]
+    fn plugin_stub_overlay_precedes_site_packages() {
+        let TestCase {
+            db,
+            plugin_stub_overlay,
+            ..
+        } = TestCaseBuilder::new()
+            .with_plugin_stub_overlay_files(&[("foo.pyi", "")])
+            .with_site_packages_files(&[("foo.py", "")])
+            .build();
+
+        let foo = resolve_module_confident(&db, &ModuleName::new_static("foo").unwrap()).unwrap();
+        assert_eq!(
+            foo.file(&db).unwrap().path(&db),
+            &plugin_stub_overlay.join("foo.pyi")
+        );
+    }
+
+    #[test]
+    fn stdlib_precedes_plugin_stub_overlay() {
+        const TYPESHED: MockedTypeshed = MockedTypeshed {
+            stdlib_files: &[("foo.pyi", "")],
+            versions: "foo: 3.8-",
+        };
+
+        let TestCase { db, stdlib, .. } = TestCaseBuilder::new()
+            .with_mocked_typeshed(TYPESHED)
+            .with_plugin_stub_overlay_files(&[("foo.pyi", "")])
+            .with_python_version(PythonVersion::PY38)
+            .build();
+
+        let foo = resolve_module_confident(&db, &ModuleName::new_static("foo").unwrap()).unwrap();
+        assert_eq!(foo.file(&db).unwrap().path(&db), &stdlib.join("foo.pyi"));
+    }
+
+    #[test]
+    fn real_module_resolution_ignores_plugin_stub_overlay() {
+        let TestCase {
+            db,
+            src,
+            site_packages,
+            ..
+        } = TestCaseBuilder::new()
+            .with_src_files(&[("main.py", "")])
+            .with_plugin_stub_overlay_files(&[("foo.pyi", "")])
+            .with_site_packages_files(&[("foo.py", "")])
+            .build();
+        let importing_file = system_path_to_file(&db, src.join("main.py")).unwrap();
+
+        let foo = resolve_real_module(&db, importing_file, &ModuleName::new_static("foo").unwrap())
+            .unwrap();
+        assert_eq!(
+            foo.file(&db).unwrap().path(&db),
+            &site_packages.join("foo.py")
+        );
+    }
+
+    #[test]
+    fn partial_plugin_stub_overlay_falls_back_to_site_packages_submodule() {
+        let TestCase {
+            db,
+            plugin_stub_overlay,
+            site_packages,
+            ..
+        } = TestCaseBuilder::new()
+            .with_plugin_stub_overlay_files(&[
+                ("foo/__init__.pyi", ""),
+                ("foo/py.typed", "partial\n"),
+                ("foo/overlay_only.pyi", ""),
+            ])
+            .with_site_packages_files(&[("foo/__init__.py", ""), ("foo/runtime_only.py", "")])
+            .build();
+
+        let overlay_only =
+            resolve_module_confident(&db, &ModuleName::new_static("foo.overlay_only").unwrap())
+                .unwrap();
+        assert_eq!(
+            overlay_only.file(&db).unwrap().path(&db),
+            &plugin_stub_overlay.join("foo/overlay_only.pyi")
+        );
+
+        let runtime_only =
+            resolve_module_confident(&db, &ModuleName::new_static("foo.runtime_only").unwrap())
+                .unwrap();
+        assert_eq!(
+            runtime_only.file(&db).unwrap().path(&db),
+            &site_packages.join("foo/runtime_only.py")
         );
     }
 

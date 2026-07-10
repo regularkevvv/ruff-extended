@@ -1,15 +1,25 @@
 use compact_str::CompactString;
 use itertools::{Either, Itertools};
 use ruff_db::{
-    diagnostic::Span,
+    diagnostic::{Annotation, Diagnostic, DiagnosticId, Severity, Span},
     files::File,
     parsed::{ParsedModuleRef, parsed_module},
+    source::{line_index, source_text},
 };
 use ruff_python_ast as ast;
 use ruff_python_ast::{PythonVersion, name::Name};
+use ruff_source_file::{OneIndexed, PositionEncoding, SourceLocation};
 use ruff_text_size::{Ranged, TextRange};
 use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+use ty_module_resolver::all_modules;
+use ty_plugin_protocol as protocol;
 
+use crate::types::plugin::{
+    PluginVirtualTypePatch, plugin_semantic_context, plugin_type_expr_from_type,
+    plugin_type_expr_to_type_in_class_with_virtual_types,
+    plugin_type_expr_to_type_with_virtual_types, plugin_virtual_type_patches_from_protocol,
+};
 use crate::{
     Db, FxIndexMap, FxIndexSet, Program, TypeQualifiers,
     place::{
@@ -49,7 +59,7 @@ use crate::{
         known_instance::DeprecatedInstance,
         member::{Member, class_member},
         mro::{Mro, MroIterator},
-        signatures::CallableSignature,
+        signatures::{CallableSignature, ParametersKind},
         tuple::{FixedLengthTuple, Tuple},
         typed_dict::{TypedDictParams, TypedDictType, typed_dict_params_from_class_def},
         variance::VarianceInferable,
@@ -61,6 +71,7 @@ use ty_python_core::{
     attribute_scopes,
     definition::{Definition, DefinitionKind, DefinitionState, TargetKind},
     place_table,
+    program::{SemanticPlugin, SemanticPluginRuntime},
     scope::{Scope, ScopeId},
     semantic_index,
     symbol::Symbol,
@@ -108,6 +119,155 @@ pub struct StaticClassLiteral<'db> {
 
 // The Salsa heap is tracked separately.
 impl get_size2::GetSize for StaticClassLiteral<'_> {}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, salsa::Update, get_size2::GetSize)]
+struct PluginClassTransformPatch<'db> {
+    fields: Box<[PluginClassFieldPatch<'db>]>,
+    class_members: Box<[PluginMemberPatch<'db>]>,
+    instance_members: Box<[PluginMemberPatch<'db>]>,
+    constructor: Option<PluginConstructorPatch<'db>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update, get_size2::GetSize)]
+struct PluginClassFieldPatch<'db> {
+    name: Name,
+    descriptor_class_ty: Option<Type<'db>>,
+    instance_get_ty: Type<'db>,
+    instance_set_ty: Option<Type<'db>>,
+    has_default: bool,
+    constructor_parameter: Option<PluginConstructorParameter<'db>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update, get_size2::GetSize)]
+struct PluginMemberPatch<'db> {
+    name: Name,
+    ty: Type<'db>,
+    read_only: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, salsa::Update, get_size2::GetSize)]
+struct PluginProjectIndex<'db> {
+    plugin_index_json: Option<String>,
+    contributions: Box<[PluginContributionPatch<'db>]>,
+    virtual_types: Box<[PluginVirtualTypePatch<'db>]>,
+    diagnostics: Box<[PluginProjectDiagnostic]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update, get_size2::GetSize)]
+struct PluginContributionPatch<'db> {
+    target: PluginContributionTarget,
+    patch: PluginContributionMemberPatch<'db>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update, get_size2::GetSize)]
+enum PluginContributionMemberPatch<'db> {
+    Member(PluginMemberPatch<'db>),
+    Field(PluginContributionFieldPatch<'db>),
+    Constructor(PluginConstructorPatch<'db>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update, get_size2::GetSize)]
+struct PluginContributionFieldPatch<'db> {
+    name: Name,
+    descriptor_class_ty: Option<Type<'db>>,
+    instance_get_ty: Type<'db>,
+    instance_set_ty: Option<Type<'db>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update, get_size2::GetSize)]
+enum PluginContributionTarget {
+    Class(String),
+    Instance(String),
+    Constructor(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update, get_size2::GetSize)]
+struct PluginProjectDiagnostic {
+    id: String,
+    message: String,
+    severity: PluginProjectDiagnosticSeverity,
+    location: Option<PluginProjectDiagnosticLocation>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, salsa::Update, get_size2::GetSize)]
+enum PluginProjectDiagnosticSeverity {
+    Error,
+    Warning,
+    Info,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update, get_size2::GetSize)]
+struct PluginProjectDiagnosticLocation {
+    file_path: String,
+    start_line: u32,
+    start_column: u32,
+    end_line: u32,
+    end_column: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update, get_size2::GetSize)]
+struct PluginConstructorPatch<'db> {
+    parameters: Box<[PluginConstructorParameter<'db>]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update, get_size2::GetSize)]
+struct PluginConstructorParameter<'db> {
+    name: Option<Name>,
+    kind: PluginConstructorParameterKind,
+    ty: Type<'db>,
+    required: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, salsa::Update, get_size2::GetSize)]
+enum PluginConstructorParameterKind {
+    PositionalOnly,
+    PositionalOrKeyword,
+    VarArgs,
+    KeywordOnly,
+    Kwargs,
+}
+
+struct PluginClassFieldSummary<'db> {
+    name: Name,
+    annotation: Option<Type<'db>>,
+    assigned_value: Option<protocol::AssignedValueSummary>,
+    inferred_type: Option<Type<'db>>,
+    has_default: bool,
+    source: protocol::SymbolSource,
+}
+
+struct PluginClassSummary<'db> {
+    fields: Vec<PluginClassFieldSummary<'db>>,
+    decorators: Vec<protocol::CallOrSymbolSummary>,
+    metaclass: Option<Type<'db>>,
+    nested_classes: Vec<protocol::NestedClassSummary>,
+    class_constants: Vec<protocol::ConstantSummary>,
+    source: protocol::SymbolSource,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PluginMemberScope {
+    Class,
+    Instance,
+}
+
+#[salsa::interned(debug, heap_size=ruff_memory_usage::heap_size)]
+struct SemanticPluginId<'db> {
+    #[returns(ref)]
+    id: String,
+}
+
+impl PluginContributionTarget {
+    fn matches(&self, scope: PluginMemberScope, owner_qualified_name: &str) -> bool {
+        match (self, scope) {
+            (Self::Class(qualified_name), PluginMemberScope::Class)
+            | (Self::Instance(qualified_name), PluginMemberScope::Instance) => {
+                qualified_name == owner_qualified_name
+            }
+            _ => false,
+        }
+    }
+}
 
 #[salsa::tracked]
 impl<'db> StaticClassLiteral<'db> {
@@ -1155,6 +1315,541 @@ impl<'db> StaticClassLiteral<'db> {
         member
     }
 
+    #[salsa::tracked(
+        returns(ref),
+        cycle_initial=|_, _, _| PluginClassTransformPatch::default(),
+        heap_size=get_size2::GetSize::get_heap_size
+    )]
+    fn plugin_class_transform_patch(self, db: &'db dyn Db) -> PluginClassTransformPatch<'db> {
+        let semantic_plugins = Program::get(db).semantic_plugins(db);
+        if semantic_plugins.is_empty() {
+            return PluginClassTransformPatch::default();
+        }
+
+        let route_candidates = plugin_class_transform_route_candidates(db, self);
+        if route_candidates.is_empty() {
+            return PluginClassTransformPatch::default();
+        }
+
+        let mut matching_plugins = semantic_plugins
+            .plugins()
+            .iter()
+            .filter(|plugin| {
+                plugin
+                    .class_transform_claims()
+                    .iter()
+                    .any(|claim| route_candidates.iter().any(|candidate| candidate == claim))
+            })
+            .peekable();
+
+        if matching_plugins.peek().is_none() {
+            return PluginClassTransformPatch::default();
+        }
+
+        let class_summary = plugin_class_summary(db, self);
+        let mut fields = Vec::new();
+        let mut class_members = Vec::new();
+        let mut instance_members = Vec::new();
+        let mut constructor = None;
+
+        for plugin in matching_plugins {
+            tracing::trace!(
+                plugin_id = plugin.id(),
+                runtime = ?plugin.runtime(),
+                class = %ClassLiteral::Static(self).qualified_name(db),
+                "executing class-transform plugin"
+            );
+            let request = plugin_analyze_class_request(
+                db,
+                self,
+                &class_summary,
+                plugin_project_index_json(db, plugin),
+            );
+            let virtual_types = plugin_project_index_virtual_types(db, plugin);
+            let response = execute_class_transform_plugin(db, plugin, &request);
+            merge_plugin_class_response(
+                db,
+                self,
+                response,
+                virtual_types,
+                &mut fields,
+                &mut class_members,
+                &mut instance_members,
+                &mut constructor,
+            );
+        }
+
+        PluginClassTransformPatch {
+            fields: fields.into_boxed_slice(),
+            class_members: class_members.into_boxed_slice(),
+            instance_members: instance_members.into_boxed_slice(),
+            constructor,
+        }
+    }
+
+    #[salsa::tracked(
+        cycle_initial=|_, _, _, _| None,
+        heap_size=ruff_memory_usage::heap_size,
+    )]
+    fn plugin_class_member_patch(
+        self,
+        db: &'db dyn Db,
+        name: Name,
+    ) -> Option<PluginMemberPatch<'db>> {
+        self.plugin_member_patch(db, &name, PluginMemberScope::Class)
+    }
+
+    #[salsa::tracked(
+        cycle_initial=|_, _, _, _| None,
+        heap_size=ruff_memory_usage::heap_size,
+    )]
+    fn plugin_instance_member_patch(
+        self,
+        db: &'db dyn Db,
+        name: Name,
+    ) -> Option<PluginMemberPatch<'db>> {
+        self.plugin_member_patch(db, &name, PluginMemberScope::Instance)
+    }
+
+    fn plugin_member_patch(
+        self,
+        db: &'db dyn Db,
+        name: &Name,
+        scope: PluginMemberScope,
+    ) -> Option<PluginMemberPatch<'db>> {
+        let semantic_plugins = Program::get(db).semantic_plugins(db);
+        if semantic_plugins.is_empty() {
+            return None;
+        }
+
+        let owner_qualified_name = ClassLiteral::Static(self).qualified_name(db).to_string();
+        let mut matching_plugins = semantic_plugins
+            .plugins()
+            .iter()
+            .filter(|plugin| {
+                let claims = match scope {
+                    PluginMemberScope::Class => plugin.class_member_claims(),
+                    PluginMemberScope::Instance => plugin.instance_member_claims(),
+                };
+                claims.iter().any(|claim| {
+                    claim.owner_qualified_name() == owner_qualified_name
+                        && claim.member_name() == name.as_str()
+                })
+            })
+            .peekable();
+
+        matching_plugins.peek()?;
+
+        let mut resolved_member = None;
+
+        for plugin in matching_plugins {
+            tracing::trace!(
+                plugin_id = plugin.id(),
+                class = %owner_qualified_name,
+                member = name.as_str(),
+                ?scope,
+                runtime = ?plugin.runtime(),
+                "executing member plugin"
+            );
+            if resolved_member.is_none() {
+                let request = plugin_resolve_member_request(
+                    db,
+                    self,
+                    name.as_str(),
+                    scope,
+                    plugin_project_index_json(db, plugin),
+                );
+                resolved_member = plugin_member_response_to_patch(
+                    db,
+                    execute_member_plugin(db, plugin, &request),
+                    name,
+                    plugin_project_index_virtual_types(db, plugin),
+                );
+            }
+        }
+
+        resolved_member
+    }
+
+    fn own_plugin_class_transform_member(self, db: &'db dyn Db, name: &str) -> Option<Member<'db>> {
+        let patch = self.plugin_class_transform_patch(db);
+
+        patch
+            .class_members
+            .iter()
+            .find(|member| member.name.as_str() == name)
+            .map(plugin_member_to_member)
+            .or_else(|| {
+                patch
+                    .fields
+                    .iter()
+                    .find(|field| field.name.as_str() == name)
+                    .and_then(|field| field.descriptor_class_ty)
+                    .map(Member::definitely_declared)
+            })
+    }
+
+    fn own_plugin_dynamic_class_member(self, db: &'db dyn Db, name: &str) -> Option<Member<'db>> {
+        self.plugin_class_member_patch(db, Name::new(name))
+            .map(|member| plugin_member_to_member(&member))
+            .or_else(|| self.own_plugin_contributed_member(db, name, PluginMemberScope::Class))
+    }
+
+    fn own_plugin_class_transform_instance_member(
+        self,
+        db: &'db dyn Db,
+        name: &str,
+    ) -> Option<Member<'db>> {
+        let patch = self.plugin_class_transform_patch(db);
+
+        if let Some(member) = patch
+            .instance_members
+            .iter()
+            .find(|member| member.name.as_str() == name)
+        {
+            return Some(plugin_member_to_member(member));
+        }
+
+        patch
+            .fields
+            .iter()
+            .find(|field| field.name.as_str() == name)
+            .map(|field| Member::definitely_declared(field.instance_get_ty))
+    }
+
+    pub(super) fn plugin_class_transform_instance_member(
+        self,
+        db: &'db dyn Db,
+        specialization: Option<Specialization<'db>>,
+        name: &str,
+    ) -> Option<PlaceAndQualifiers<'db>> {
+        if self.is_typed_dict(db) {
+            return None;
+        }
+
+        for superclass in self.iter_mro(db, specialization) {
+            let ClassBase::Class(class) = superclass else {
+                continue;
+            };
+
+            let member = match class {
+                ClassType::NonGeneric(ClassLiteral::Static(class)) => {
+                    class
+                        .own_plugin_class_transform_instance_member(db, name)?
+                        .inner
+                }
+                ClassType::Generic(generic) => generic
+                    .origin(db)
+                    .own_plugin_class_transform_instance_member(db, name)?
+                    .inner
+                    .map_type(|ty| {
+                        ty.apply_optional_specialization(db, Some(generic.specialization(db)))
+                    }),
+                ClassType::NonGeneric(
+                    ClassLiteral::Dynamic(_)
+                    | ClassLiteral::DynamicNamedTuple(_)
+                    | ClassLiteral::DynamicTypedDict(_)
+                    | ClassLiteral::DynamicEnum(_),
+                ) => continue,
+            };
+
+            return Some(member);
+        }
+
+        None
+    }
+
+    pub(super) fn own_plugin_class_transform_instance_assignment_member(
+        self,
+        db: &'db dyn Db,
+        name: &str,
+    ) -> Option<Member<'db>> {
+        self.plugin_class_transform_patch(db)
+            .fields
+            .iter()
+            .find(|field| field.name.as_str() == name)
+            .and_then(|field| field.instance_set_ty)
+            .map(Member::definitely_declared)
+    }
+
+    fn own_plugin_contributed_instance_assignment_member(
+        self,
+        db: &'db dyn Db,
+        name: &str,
+    ) -> Option<Member<'db>> {
+        let semantic_plugins = Program::get(db).semantic_plugins(db);
+        if semantic_plugins.is_empty() {
+            return None;
+        }
+
+        let owner_qualified_name = ClassLiteral::Static(self).qualified_name(db).to_string();
+        semantic_plugins
+            .plugins()
+            .iter()
+            .filter(|plugin| plugin.project_index_enabled())
+            .find_map(|plugin| {
+                plugin_project_index(db, SemanticPluginId::new(db, plugin.id().to_string()))
+                    .contributions
+                    .iter()
+                    .find_map(|contribution| {
+                        if !contribution
+                            .target
+                            .matches(PluginMemberScope::Instance, &owner_qualified_name)
+                        {
+                            return None;
+                        }
+                        let PluginContributionMemberPatch::Field(field) = &contribution.patch
+                        else {
+                            return None;
+                        };
+                        if field.name.as_str() != name {
+                            return None;
+                        }
+                        field.instance_set_ty.map(Member::definitely_declared)
+                    })
+            })
+    }
+
+    pub(super) fn plugin_class_transform_instance_assignment_member(
+        self,
+        db: &'db dyn Db,
+        specialization: Option<Specialization<'db>>,
+        name: &str,
+    ) -> Option<PlaceAndQualifiers<'db>> {
+        if self.is_typed_dict(db) {
+            return None;
+        }
+
+        for superclass in self.iter_mro(db, specialization) {
+            let ClassBase::Class(class) = superclass else {
+                continue;
+            };
+
+            let member = match class {
+                ClassType::NonGeneric(ClassLiteral::Static(class)) => {
+                    class
+                        .own_plugin_class_transform_instance_assignment_member(db, name)?
+                        .inner
+                }
+                ClassType::Generic(generic) => generic
+                    .origin(db)
+                    .own_plugin_class_transform_instance_assignment_member(db, name)?
+                    .inner
+                    .map_type(|ty| {
+                        ty.apply_optional_specialization(db, Some(generic.specialization(db)))
+                    }),
+                ClassType::NonGeneric(
+                    ClassLiteral::Dynamic(_)
+                    | ClassLiteral::DynamicNamedTuple(_)
+                    | ClassLiteral::DynamicTypedDict(_)
+                    | ClassLiteral::DynamicEnum(_),
+                ) => continue,
+            };
+
+            return Some(member);
+        }
+
+        None
+    }
+
+    pub(super) fn plugin_contributed_instance_assignment_member(
+        self,
+        db: &'db dyn Db,
+        specialization: Option<Specialization<'db>>,
+        name: &str,
+    ) -> Option<PlaceAndQualifiers<'db>> {
+        if self.is_typed_dict(db) {
+            return None;
+        }
+
+        for superclass in self.iter_mro(db, specialization) {
+            let ClassBase::Class(class) = superclass else {
+                continue;
+            };
+
+            let member = match class {
+                ClassType::NonGeneric(ClassLiteral::Static(class)) => {
+                    class
+                        .own_plugin_contributed_instance_assignment_member(db, name)?
+                        .inner
+                }
+                ClassType::Generic(generic) => generic
+                    .origin(db)
+                    .own_plugin_contributed_instance_assignment_member(db, name)?
+                    .inner
+                    .map_type(|ty| {
+                        ty.apply_optional_specialization(db, Some(generic.specialization(db)))
+                    }),
+                ClassType::NonGeneric(
+                    ClassLiteral::Dynamic(_)
+                    | ClassLiteral::DynamicNamedTuple(_)
+                    | ClassLiteral::DynamicTypedDict(_)
+                    | ClassLiteral::DynamicEnum(_),
+                ) => continue,
+            };
+
+            return Some(member);
+        }
+
+        None
+    }
+
+    fn own_plugin_dynamic_instance_member(
+        self,
+        db: &'db dyn Db,
+        name: &str,
+    ) -> Option<Member<'db>> {
+        self.plugin_instance_member_patch(db, Name::new(name))
+            .map(|member| plugin_member_to_member(&member))
+    }
+
+    fn own_plugin_instance_member_after_miss(
+        self,
+        db: &'db dyn Db,
+        name: &str,
+    ) -> Option<Member<'db>> {
+        self.own_plugin_class_transform_instance_member(db, name)
+            .or_else(|| self.own_plugin_dynamic_instance_member(db, name))
+            .or_else(|| self.own_plugin_contributed_member(db, name, PluginMemberScope::Instance))
+    }
+
+    fn own_plugin_contributed_member(
+        self,
+        db: &'db dyn Db,
+        name: &str,
+        scope: PluginMemberScope,
+    ) -> Option<Member<'db>> {
+        let semantic_plugins = Program::get(db).semantic_plugins(db);
+        if semantic_plugins.is_empty() {
+            return None;
+        }
+
+        let owner_qualified_name = ClassLiteral::Static(self).qualified_name(db).to_string();
+        semantic_plugins
+            .plugins()
+            .iter()
+            .filter(|plugin| plugin.project_index_enabled())
+            .find_map(|plugin| {
+                plugin_project_index(db, SemanticPluginId::new(db, plugin.id().to_string()))
+                    .contributions
+                    .iter()
+                    .find(|contribution| {
+                        contribution.target.matches(scope, &owner_qualified_name)
+                            && contribution
+                                .patch
+                                .member_name()
+                                .is_some_and(|member_name| member_name.as_str() == name)
+                    })
+                    .and_then(|contribution| {
+                        plugin_contribution_to_member(&contribution.patch, scope)
+                    })
+            })
+    }
+
+    fn plugin_contributed_constructor_patch(
+        self,
+        db: &'db dyn Db,
+    ) -> Option<PluginConstructorPatch<'db>> {
+        let semantic_plugins = Program::get(db).semantic_plugins(db);
+        if semantic_plugins.is_empty() {
+            return None;
+        }
+
+        let owner_qualified_name = ClassLiteral::Static(self).qualified_name(db).to_string();
+        semantic_plugins
+            .plugins()
+            .iter()
+            .filter(|plugin| plugin.project_index_enabled())
+            .find_map(|plugin| {
+                plugin_project_index(db, SemanticPluginId::new(db, plugin.id().to_string()))
+                    .contributions
+                    .iter()
+                    .find_map(|contribution| {
+                        let PluginContributionTarget::Constructor(qualified_name) =
+                            &contribution.target
+                        else {
+                            return None;
+                        };
+                        if qualified_name != &owner_qualified_name {
+                            return None;
+                        }
+                        let PluginContributionMemberPatch::Constructor(constructor) =
+                            &contribution.patch
+                        else {
+                            return None;
+                        };
+                        Some(constructor.clone())
+                    })
+            })
+    }
+
+    fn is_own_plugin_instance_field(self, db: &'db dyn Db, name: &str) -> bool {
+        self.plugin_class_transform_patch(db)
+            .fields
+            .iter()
+            .any(|field| field.name.as_str() == name)
+    }
+
+    fn own_plugin_synthesized_member(
+        self,
+        db: &'db dyn Db,
+        specialization: Option<Specialization<'db>>,
+        inherited_generic_context: Option<GenericContext<'db>>,
+        name: &str,
+    ) -> Option<Type<'db>> {
+        if name != "__init__" {
+            return None;
+        }
+
+        let patch = self.plugin_class_transform_patch(db);
+        let contributed_constructor = self.plugin_contributed_constructor_patch(db);
+        if patch.constructor.is_none()
+            && contributed_constructor.is_none()
+            && patch
+                .fields
+                .iter()
+                .all(|field| field.constructor_parameter.is_none())
+        {
+            return None;
+        }
+
+        let instance_ty =
+            Type::instance(db, self.apply_optional_specialization(db, specialization));
+        let mut parameters = vec![
+            Parameter::positional_or_keyword(Name::new_static("self"))
+                .with_annotated_type(instance_ty),
+        ];
+
+        if let Some(constructor) = patch
+            .constructor
+            .as_ref()
+            .or(contributed_constructor.as_ref())
+        {
+            parameters.extend(
+                constructor
+                    .parameters
+                    .iter()
+                    .filter(|parameter| !is_plugin_self_parameter(parameter))
+                    .filter_map(plugin_signature_parameter),
+            );
+        } else {
+            parameters.extend(
+                patch
+                    .fields
+                    .iter()
+                    .filter_map(plugin_field_constructor_parameter),
+            );
+        }
+
+        let signature = Signature::new_generic(
+            inherited_generic_context.or_else(|| self.inherited_generic_context(db)),
+            Parameters::new(parameters, ParametersKind::Standard),
+            Type::none(db),
+        );
+
+        Some(Type::function_like_callable(db, signature))
+    }
+
     /// Returns the inferred type of the class member named `name`. Only bound members
     /// or those marked as `ClassVars` are considered.
     ///
@@ -1209,6 +1904,10 @@ impl<'db> StaticClassLiteral<'db> {
             }
         }
 
+        if let Some(plugin_member) = self.own_plugin_class_transform_member(db, name) {
+            return plugin_member;
+        }
+
         let body_scope = self.body_scope(db);
         let member = class_member(db, body_scope, name).map_type(|ty| {
             // The `__new__` and `__init__` members of a non-specialized generic class are handled
@@ -1242,7 +1941,14 @@ impl<'db> StaticClassLiteral<'db> {
                 return Member::definitely_declared(synthesized_member);
             }
             // The symbol was not found in the class scope. It might still be implicitly defined in `@classmethod`s.
-            return Self::implicit_attribute(db, body_scope, name, MethodDecorator::ClassMethod);
+            let implicit =
+                Self::implicit_attribute(db, body_scope, name, MethodDecorator::ClassMethod);
+            return if implicit.is_undefined() {
+                self.own_plugin_dynamic_class_member(db, name)
+                    .unwrap_or(implicit)
+            } else {
+                implicit
+            };
         }
 
         // For dataclass-like classes, `KW_ONLY` sentinel fields are not real
@@ -1345,6 +2051,12 @@ impl<'db> StaticClassLiteral<'db> {
                 self.own_frozen_dataclass_subclass_setattr(db, specialization)
         {
             return Some(synthesized_setattr);
+        }
+
+        if let Some(plugin_member) =
+            self.own_plugin_synthesized_member(db, specialization, inherited_generic_context, name)
+        {
+            return Some(plugin_member);
         }
 
         let field_policy = CodeGeneratorKind::from_class(db, self.into())?;
@@ -2776,6 +3488,11 @@ impl<'db> StaticClassLiteral<'db> {
                             Member {
                                 inner: declared.with_qualifiers(qualifiers),
                             }
+                        } else if self.is_own_plugin_instance_field(db, name) {
+                            self.own_plugin_class_transform_instance_member(db, name)
+                                .unwrap_or(Member {
+                                    inner: declared.with_qualifiers(qualifiers),
+                                })
                         } else {
                             // The symbol is declared and bound in the class body,
                             // but we did not find any attribute assignments in
@@ -2840,14 +3557,27 @@ impl<'db> StaticClassLiteral<'db> {
                     // The attribute is not *declared* in the class body. It could still be declared/bound
                     // in a method.
 
-                    Self::implicit_attribute(db, body_scope, name, MethodDecorator::None)
+                    let implicit =
+                        Self::implicit_attribute(db, body_scope, name, MethodDecorator::None);
+                    if implicit.is_undefined() {
+                        self.own_plugin_instance_member_after_miss(db, name)
+                            .unwrap_or(implicit)
+                    } else {
+                        implicit
+                    }
                 }
             }
         } else {
             // This attribute is neither declared nor bound in the class body.
             // It could still be implicitly defined in a method.
 
-            Self::implicit_attribute(db, body_scope, name, MethodDecorator::None)
+            let implicit = Self::implicit_attribute(db, body_scope, name, MethodDecorator::None);
+            if implicit.is_undefined() {
+                self.own_plugin_instance_member_after_miss(db, name)
+                    .unwrap_or(implicit)
+            } else {
+                implicit
+            }
         }
     }
 
@@ -3113,6 +3843,1805 @@ fn expanded_fixed_length_starred_class_base_tuple<'db>(
     Some(tuple)
 }
 
+fn plugin_class_transform_route_candidates<'db>(
+    db: &'db dyn Db,
+    class: StaticClassLiteral<'db>,
+) -> Vec<String> {
+    let mut candidates = vec![ClassLiteral::Static(class).qualified_name(db).to_string()];
+
+    for base in class.explicit_bases(db) {
+        if let Some(base_class) = (*base).to_class_type(db) {
+            candidates.push(base_class.qualified_name(db).to_string());
+        }
+    }
+
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+#[salsa::tracked(
+    returns(ref),
+    cycle_initial=|_, _, _| PluginProjectIndex::default(),
+    heap_size=get_size2::GetSize::get_heap_size
+)]
+fn plugin_project_index<'db>(
+    db: &'db dyn Db,
+    plugin_id: SemanticPluginId<'db>,
+) -> PluginProjectIndex<'db> {
+    let semantic_plugins = Program::get(db).semantic_plugins(db);
+    let Some(plugin) = semantic_plugins
+        .plugins()
+        .iter()
+        .find(|plugin| plugin.id() == plugin_id.id(db) && plugin.project_index_enabled())
+    else {
+        return PluginProjectIndex::default();
+    };
+
+    let settings = plugin_settings_summaries(db, plugin);
+    let settings_diagnostics = settings
+        .iter()
+        .flat_map(|settings| settings.diagnostics.iter().cloned())
+        .filter_map(plugin_project_diagnostic_from_protocol)
+        .collect::<Vec<_>>();
+
+    let request = protocol::PluginRequest::BuildProjectIndex(protocol::BuildProjectIndexRequest {
+        context: protocol::ProjectContext {
+            root: String::new(),
+            python_version: Program::get(db).python_version(db).to_string(),
+            platform: Program::get(db).python_platform(db).to_string(),
+            config: serde_json::json!({
+                "strict_settings": plugin.strict_settings(),
+            }),
+        },
+        classes: plugin_project_class_summaries(db),
+        settings,
+        previous_index_fingerprint: None,
+    });
+
+    let protocol::PluginResponse::ProjectIndex(response) =
+        execute_project_index_plugin(db, plugin, &request)
+    else {
+        return PluginProjectIndex::default();
+    };
+
+    let virtual_types = plugin_virtual_type_patches_from_protocol(db, response.virtual_types);
+    let mut contributions = response
+        .contributions
+        .into_iter()
+        .filter_map(|contribution| {
+            plugin_contribution_to_patch(db, contribution, virtual_types.as_ref())
+        })
+        .collect::<Vec<_>>();
+    contributions.sort_by(|left, right| {
+        plugin_contribution_sort_key(left).cmp(&plugin_contribution_sort_key(right))
+    });
+    contributions.dedup_by(|left, right| {
+        left.target == right.target && left.patch.sort_name() == right.patch.sort_name()
+    });
+
+    PluginProjectIndex {
+        plugin_index_json: (!response.plugin_index.is_null())
+            .then(|| serde_json::to_string(&response.plugin_index).ok())
+            .flatten(),
+        contributions: contributions.into_boxed_slice(),
+        virtual_types,
+        diagnostics: settings_diagnostics
+            .into_iter()
+            .chain(
+                response
+                    .diagnostics
+                    .into_iter()
+                    .filter_map(plugin_project_diagnostic_from_protocol),
+            )
+            .collect(),
+    }
+}
+
+pub(crate) fn plugin_project_index_diagnostics_for_file(
+    db: &dyn Db,
+    file: File,
+) -> Vec<Diagnostic> {
+    let semantic_plugins = Program::get(db).semantic_plugins(db);
+    if semantic_plugins.is_empty() {
+        return Vec::new();
+    }
+
+    semantic_plugins
+        .plugins()
+        .iter()
+        .filter(|plugin| plugin.project_index_enabled())
+        .flat_map(|plugin| {
+            plugin_project_index(db, SemanticPluginId::new(db, plugin.id().to_string()))
+                .diagnostics
+                .iter()
+                .filter_map(|diagnostic| {
+                    plugin_project_diagnostic_to_diagnostic(db, file, diagnostic)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn plugin_project_diagnostic_from_protocol(
+    diagnostic: protocol::PluginDiagnostic,
+) -> Option<PluginProjectDiagnostic> {
+    Some(PluginProjectDiagnostic {
+        id: diagnostic.id,
+        message: diagnostic.message,
+        severity: match diagnostic.severity {
+            protocol::DiagnosticSeverity::Error => PluginProjectDiagnosticSeverity::Error,
+            protocol::DiagnosticSeverity::Warning => PluginProjectDiagnosticSeverity::Warning,
+            protocol::DiagnosticSeverity::Info => PluginProjectDiagnosticSeverity::Info,
+        },
+        location: diagnostic
+            .location
+            .map(|location| PluginProjectDiagnosticLocation {
+                file_path: location.file_path,
+                start_line: location.start.line,
+                start_column: location.start.column,
+                end_line: location.end.line,
+                end_column: location.end.column,
+            }),
+    })
+}
+
+fn plugin_project_diagnostic_to_diagnostic(
+    db: &dyn Db,
+    file: File,
+    plugin_diagnostic: &PluginProjectDiagnostic,
+) -> Option<Diagnostic> {
+    let location = plugin_diagnostic.location.as_ref()?;
+    if location.file_path != file.path(db).to_string() {
+        return None;
+    }
+
+    let source = source_text(db, file);
+    let index = line_index(db, file);
+    let start = index.offset(
+        SourceLocation {
+            line: OneIndexed::new(location.start_line as usize)?,
+            character_offset: OneIndexed::new(location.start_column as usize)?,
+        },
+        source.as_str(),
+        PositionEncoding::Utf32,
+    );
+    let end = index.offset(
+        SourceLocation {
+            line: OneIndexed::new(location.end_line as usize)?,
+            character_offset: OneIndexed::new(location.end_column as usize)?,
+        },
+        source.as_str(),
+        PositionEncoding::Utf32,
+    );
+    let range = if start <= end {
+        TextRange::new(start, end)
+    } else {
+        TextRange::empty(start)
+    };
+
+    let mut diagnostic = Diagnostic::new(
+        DiagnosticId::PluginConfiguration,
+        match plugin_diagnostic.severity {
+            PluginProjectDiagnosticSeverity::Error => Severity::Error,
+            PluginProjectDiagnosticSeverity::Warning => Severity::Warning,
+            PluginProjectDiagnosticSeverity::Info => Severity::Info,
+        },
+        plugin_diagnostic.message.as_str(),
+    );
+    diagnostic.annotate(
+        Annotation::primary(Span::from(file).with_range(range))
+            .message(plugin_diagnostic.id.as_str()),
+    );
+    Some(diagnostic)
+}
+
+pub(crate) fn plugin_project_index_json(
+    db: &dyn Db,
+    plugin: &SemanticPlugin,
+) -> Option<serde_json::Value> {
+    if !plugin.project_index_enabled() {
+        return None;
+    }
+
+    let plugin_index_json =
+        plugin_project_index(db, SemanticPluginId::new(db, plugin.id().to_string()))
+            .plugin_index_json
+            .as_ref()?;
+    serde_json::from_str(plugin_index_json).ok()
+}
+
+pub(crate) fn plugin_project_index_virtual_types<'db>(
+    db: &'db dyn Db,
+    plugin: &SemanticPlugin,
+) -> &'db [PluginVirtualTypePatch<'db>] {
+    if !plugin.project_index_enabled() {
+        return &[];
+    }
+
+    &plugin_project_index(db, SemanticPluginId::new(db, plugin.id().to_string())).virtual_types
+}
+
+fn plugin_project_class_summaries(db: &dyn Db) -> Vec<protocol::ClassSummary> {
+    let mut summaries = Vec::new();
+
+    for module in all_modules(db) {
+        let Some(file) = module.file(db) else {
+            continue;
+        };
+        if !db.should_check_file(file) {
+            continue;
+        }
+
+        let parsed = parsed_module(db, file).load(db);
+        for statement in &parsed.syntax().body {
+            let Some(class) = static_class_literal_from_statement(db, file, statement) else {
+                continue;
+            };
+            let summary = plugin_class_summary(db, class);
+            summaries.push(plugin_protocol_class_summary(db, class, &summary));
+        }
+    }
+
+    summaries
+}
+
+fn plugin_settings_summaries(
+    db: &dyn Db,
+    plugin: &SemanticPlugin,
+) -> Vec<protocol::SettingsModuleSummary> {
+    plugin
+        .settings_module_claims()
+        .iter()
+        .map(|module_name| {
+            plugin_settings_module_summary(db, module_name, plugin.strict_settings())
+        })
+        .collect()
+}
+
+fn plugin_settings_module_summary(
+    db: &dyn Db,
+    module_name: &str,
+    strict: bool,
+) -> protocol::SettingsModuleSummary {
+    let Some(file) = plugin_settings_module_file(db, module_name) else {
+        return protocol::SettingsModuleSummary {
+            module: module_name.to_string(),
+            values: Vec::new(),
+            dependencies: Vec::new(),
+            diagnostics: vec![plugin_settings_diagnostic(
+                "ty.settings.module-not-found",
+                format!("Settings module `{module_name}` could not be resolved"),
+                None,
+                plugin_settings_diagnostic_severity(strict),
+            )],
+            source: protocol::SymbolSource {
+                module: Some(module_name.to_string()),
+                ..protocol::SymbolSource::default()
+            },
+        };
+    };
+
+    let parsed = parsed_module(db, file).load(db);
+    let mut values = Vec::new();
+    let mut diagnostics = Vec::new();
+    let mut dependencies = BTreeSet::from([file.path(db).to_string()]);
+    let settings_bindings = parsed
+        .syntax()
+        .body
+        .iter()
+        .filter_map(setting_assignment_from_statement)
+        .filter(|(name, _, _)| is_static_settings_name(name))
+        .map(|(name, value, _)| (name, value))
+        .collect::<BTreeMap<_, _>>();
+    let import_bindings = plugin_settings_import_bindings(parsed.syntax().body.as_slice());
+
+    for statement in &parsed.syntax().body {
+        if let Some(value) = setting_summary_from_statement(
+            db,
+            file,
+            module_name,
+            statement,
+            &settings_bindings,
+            &import_bindings,
+            &mut dependencies,
+            &mut diagnostics,
+            strict,
+        ) {
+            values.push(value);
+        }
+    }
+
+    protocol::SettingsModuleSummary {
+        module: module_name.to_string(),
+        values,
+        dependencies: dependencies
+            .into_iter()
+            .map(|path| protocol::PluginDependency { path, sha256: None })
+            .collect(),
+        diagnostics,
+        source: protocol::SymbolSource {
+            module: Some(module_name.to_string()),
+            file_path: Some(file.path(db).to_string()),
+            ..protocol::SymbolSource::default()
+        },
+    }
+}
+
+fn plugin_settings_module_file(db: &dyn Db, module_name: &str) -> Option<File> {
+    for module in all_modules(db) {
+        if module.name(db).to_string() == module_name {
+            return module.file(db);
+        }
+    }
+    None
+}
+
+#[derive(Default)]
+struct PluginSettingsImportBindings {
+    values: BTreeMap<String, (String, String)>,
+    modules: BTreeMap<String, String>,
+}
+
+fn plugin_settings_import_bindings(statements: &[ast::Stmt]) -> PluginSettingsImportBindings {
+    let mut bindings = PluginSettingsImportBindings::default();
+
+    for statement in statements {
+        match statement {
+            ast::Stmt::Import(import) => {
+                for alias in &import.names {
+                    let imported_module = alias.name.as_str();
+                    let local_name = alias.asname.as_ref().map_or_else(
+                        || imported_module.split('.').next(),
+                        |asname| Some(asname.as_str()),
+                    );
+                    if let Some(local_name) = local_name {
+                        bindings
+                            .modules
+                            .insert(local_name.to_string(), imported_module.to_string());
+                    }
+                }
+            }
+            ast::Stmt::ImportFrom(import_from) if import_from.level == 0 => {
+                let Some(module) = import_from.module.as_ref() else {
+                    continue;
+                };
+                let module = module.as_str();
+                for alias in &import_from.names {
+                    let imported_name = alias.name.as_str();
+                    if !is_static_settings_name(imported_name) {
+                        continue;
+                    }
+                    let local_name = alias
+                        .asname
+                        .as_ref()
+                        .map_or(imported_name, |asname| asname.as_str());
+                    bindings.values.insert(
+                        local_name.to_string(),
+                        (module.to_string(), imported_name.to_string()),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    bindings
+}
+
+fn setting_assignment_from_statement(
+    statement: &ast::Stmt,
+) -> Option<(String, &ast::Expr, TextRange)> {
+    match statement {
+        ast::Stmt::Assign(assign) => {
+            let target = assign.targets.first()?.as_name_expr()?;
+            Some((target.id.to_string(), assign.value.as_ref(), target.range()))
+        }
+        ast::Stmt::AnnAssign(assign) => {
+            let target = assign.target.as_name_expr()?;
+            let value = assign.value.as_deref()?;
+            Some((target.id.to_string(), value, target.range()))
+        }
+        _ => None,
+    }
+}
+
+fn setting_summary_from_statement(
+    db: &dyn Db,
+    file: File,
+    module_name: &str,
+    statement: &ast::Stmt,
+    settings_bindings: &BTreeMap<String, &ast::Expr>,
+    import_bindings: &PluginSettingsImportBindings,
+    dependencies: &mut BTreeSet<String>,
+    diagnostics: &mut Vec<protocol::PluginDiagnostic>,
+    strict: bool,
+) -> Option<protocol::SettingValueSummary> {
+    let (name, value, target_range) = setting_assignment_from_statement(statement)?;
+
+    if !is_static_settings_name(&name) {
+        return None;
+    }
+
+    let source = plugin_symbol_source(
+        db,
+        file,
+        target_range,
+        Some(format!("{module_name}.{name}")),
+    );
+    let value = plugin_settings_literal_value_from_expr(
+        db,
+        module_name,
+        value,
+        settings_bindings,
+        import_bindings,
+        &mut BTreeSet::new(),
+        dependencies,
+    );
+    if value.is_unknown() {
+        diagnostics.push(plugin_settings_diagnostic(
+            "ty.settings.unsupported-value",
+            format!("Setting `{module_name}.{name}` is not a supported static literal"),
+            Some(&source),
+            plugin_settings_diagnostic_severity(strict),
+        ));
+        return None;
+    }
+
+    Some(protocol::SettingValueSummary {
+        name,
+        value,
+        source,
+    })
+}
+
+fn is_static_settings_name(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_uppercase())
+        && name.chars().all(|character| {
+            character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+        })
+}
+
+fn plugin_settings_diagnostic(
+    id: impl Into<String>,
+    message: impl Into<String>,
+    source: Option<&protocol::SymbolSource>,
+    severity: protocol::DiagnosticSeverity,
+) -> protocol::PluginDiagnostic {
+    protocol::PluginDiagnostic {
+        id: id.into(),
+        message: message.into(),
+        severity,
+        location: source.and_then(plugin_diagnostic_location_from_source),
+        metadata: Default::default(),
+    }
+}
+
+fn plugin_settings_diagnostic_severity(strict: bool) -> protocol::DiagnosticSeverity {
+    if strict {
+        protocol::DiagnosticSeverity::Error
+    } else {
+        protocol::DiagnosticSeverity::Warning
+    }
+}
+
+fn plugin_diagnostic_location_from_source(
+    source: &protocol::SymbolSource,
+) -> Option<protocol::DiagnosticLocation> {
+    Some(protocol::DiagnosticLocation {
+        file_path: source.file_path.clone()?,
+        start: source.start?,
+        end: source.end?,
+    })
+}
+
+fn static_class_literal_from_statement<'db>(
+    db: &'db dyn Db,
+    file: File,
+    statement: &ast::Stmt,
+) -> Option<StaticClassLiteral<'db>> {
+    let class_node = statement.as_class_def_stmt()?;
+    let definition = semantic_index(db, file).expect_single_definition(class_node);
+    let ClassLiteral::Static(class) = crate::types::infer::original_class_type(db, definition)?
+    else {
+        return None;
+    };
+    Some(class)
+}
+
+fn plugin_contribution_to_patch<'db>(
+    db: &'db dyn Db,
+    contribution: protocol::Contribution,
+    virtual_types: &[PluginVirtualTypePatch<'db>],
+) -> Option<PluginContributionPatch<'db>> {
+    let target = match contribution.target {
+        protocol::ContributionTarget::Class { qualified_name } => {
+            PluginContributionTarget::Class(qualified_name)
+        }
+        protocol::ContributionTarget::Instance { qualified_name } => {
+            PluginContributionTarget::Instance(qualified_name)
+        }
+        protocol::ContributionTarget::Constructor { qualified_name } => {
+            PluginContributionTarget::Constructor(qualified_name)
+        }
+    };
+    let patch = match contribution.patch {
+        protocol::ContributionPatch::Member(member) => {
+            PluginContributionMemberPatch::Member(PluginMemberPatch {
+                name: Name::new(&member.name),
+                ty: plugin_type_expr_to_type_with_virtual_types(
+                    db,
+                    member.access.instance_get_type(),
+                    virtual_types,
+                ),
+                read_only: member.read_only,
+            })
+        }
+        protocol::ContributionPatch::Field(field) => PluginContributionMemberPatch::Field(
+            plugin_contribution_field_to_patch(db, field, virtual_types),
+        ),
+        protocol::ContributionPatch::Constructor(signature) => {
+            PluginContributionMemberPatch::Constructor(PluginConstructorPatch {
+                parameters: signature
+                    .parameters
+                    .into_iter()
+                    .map(|parameter| {
+                        plugin_constructor_parameter_from_protocol_type_expr(
+                            db,
+                            parameter,
+                            virtual_types,
+                        )
+                    })
+                    .collect(),
+            })
+        }
+        protocol::ContributionPatch::Diagnostic(_) => return None,
+    };
+
+    Some(PluginContributionPatch { target, patch })
+}
+
+fn plugin_contribution_field_to_patch<'db>(
+    db: &'db dyn Db,
+    field: protocol::FieldPatch,
+    virtual_types: &[PluginVirtualTypePatch<'db>],
+) -> PluginContributionFieldPatch<'db> {
+    let descriptor_class_ty = match field.descriptor.as_ref() {
+        Some(protocol::MemberAccessPatch::Value { type_expr }) => Some(
+            plugin_type_expr_to_type_with_virtual_types(db, type_expr, virtual_types),
+        ),
+        Some(protocol::MemberAccessPatch::Descriptor { class_type, .. }) => {
+            class_type.as_ref().map(|type_expr| {
+                plugin_type_expr_to_type_with_virtual_types(db, type_expr, virtual_types)
+            })
+        }
+        None => None,
+    };
+
+    PluginContributionFieldPatch {
+        name: Name::new(&field.name),
+        descriptor_class_ty,
+        instance_get_ty: plugin_type_expr_to_type_with_virtual_types(
+            db,
+            &field.instance_get_type,
+            virtual_types,
+        ),
+        instance_set_ty: field.instance_set_type.as_ref().map(|type_expr| {
+            plugin_type_expr_to_type_with_virtual_types(db, type_expr, virtual_types)
+        }),
+    }
+}
+
+fn plugin_contribution_sort_key(
+    contribution: &PluginContributionPatch<'_>,
+) -> (String, u8, String) {
+    let (qualified_name, scope_order) = match &contribution.target {
+        PluginContributionTarget::Class(qualified_name) => (qualified_name.as_str(), 0),
+        PluginContributionTarget::Instance(qualified_name) => (qualified_name.as_str(), 1),
+        PluginContributionTarget::Constructor(qualified_name) => (qualified_name.as_str(), 2),
+    };
+    (
+        qualified_name.to_string(),
+        scope_order,
+        contribution.patch.sort_name().to_string(),
+    )
+}
+
+fn plugin_class_summary<'db>(
+    db: &'db dyn Db,
+    class: StaticClassLiteral<'db>,
+) -> PluginClassSummary<'db> {
+    let file = class.file(db);
+    let module = parsed_module(db, file).load(db);
+    let class_node = class.node(db, &module);
+    let class_definition = semantic_index(db, file).expect_single_definition(class_node);
+    let qualified_name = ClassLiteral::Static(class).qualified_name(db).to_string();
+
+    let fields = plugin_class_field_summaries(db, class, &module);
+    let decorators = class_node
+        .decorator_list
+        .iter()
+        .map(|decorator| plugin_call_or_symbol_summary(db, class_definition, &decorator.expression))
+        .collect();
+    let metaclass = class_node.arguments.as_ref().and_then(|arguments| {
+        arguments
+            .keywords
+            .iter()
+            .find(|keyword| keyword.arg.as_ref().is_some_and(|arg| arg == "metaclass"))
+            .map(|keyword| definition_expression_type(db, class_definition, &keyword.value))
+    });
+    let nested_classes = class_node
+        .body
+        .iter()
+        .filter_map(|statement| nested_class_summary(db, file, &module, &qualified_name, statement))
+        .collect();
+    let class_constants = class_node
+        .body
+        .iter()
+        .filter_map(|statement| constant_summary_from_statement(db, file, &module, statement, None))
+        .collect();
+
+    PluginClassSummary {
+        fields,
+        decorators,
+        metaclass,
+        nested_classes,
+        class_constants,
+        source: plugin_symbol_source(db, file, class_node.range(), Some(qualified_name)),
+    }
+}
+
+fn plugin_class_field_summaries<'db>(
+    db: &'db dyn Db,
+    class: StaticClassLiteral<'db>,
+    module: &ParsedModuleRef,
+) -> Vec<PluginClassFieldSummary<'db>> {
+    let class_body_scope = class.body_scope(db);
+    let file = class.file(db);
+    let class_definition = class.definition(db);
+    let table = place_table(db, class_body_scope);
+    let use_def = use_def_map(db, class_body_scope);
+    let mut field_definitions = Vec::new();
+
+    for (symbol_id, declarations) in use_def.all_end_of_scope_symbol_declarations() {
+        let declaration_result = place_from_declarations(db, declarations.clone());
+        let attr = declaration_result.ignore_conflicting_declarations();
+        if attr.is_class_var() || attr.is_init_var() {
+            continue;
+        }
+
+        let annotated_definition = use_def
+            .reachable_symbol_declarations(symbol_id)
+            .filter_map(|declaration| {
+                let DefinitionState::Defined(definition) = declaration.declaration else {
+                    return None;
+                };
+                matches!(definition.kind(db), DefinitionKind::AnnotatedAssignment(..))
+                    .then_some((declaration.declaration_order, definition))
+            })
+            .min_by_key(|(order, _)| *order);
+
+        let binding_definition = use_def
+            .end_of_scope_symbol_bindings(symbol_id)
+            .filter_map(|binding| {
+                let DefinitionState::Defined(definition) = binding.binding else {
+                    return None;
+                };
+                matches!(
+                    definition.kind(db),
+                    DefinitionKind::Assignment(..) | DefinitionKind::AnnotatedAssignment(..)
+                )
+                .then_some((binding.binding_order, definition))
+            })
+            .min_by_key(|(order, _)| *order);
+
+        let Some((first_definition_order, definition)) =
+            annotated_definition.or(binding_definition)
+        else {
+            continue;
+        };
+
+        field_definitions.push((
+            first_definition_order,
+            symbol_id,
+            definition,
+            attr.place.ignore_possibly_undefined(),
+        ));
+    }
+
+    for (symbol_id, bindings) in use_def.all_end_of_scope_symbol_bindings() {
+        if field_definitions
+            .iter()
+            .any(|(_, existing_symbol_id, _, _)| *existing_symbol_id == symbol_id)
+        {
+            continue;
+        }
+
+        let Some((first_definition_order, definition)) = bindings
+            .filter_map(|binding| {
+                let DefinitionState::Defined(definition) = binding.binding else {
+                    return None;
+                };
+                matches!(definition.kind(db), DefinitionKind::Assignment(..))
+                    .then_some((binding.binding_order, definition))
+            })
+            .min_by_key(|(order, _)| *order)
+        else {
+            continue;
+        };
+
+        field_definitions.push((first_definition_order, symbol_id, definition, None));
+    }
+
+    field_definitions.sort_unstable_by_key(|(definition_order, _, _, _)| *definition_order);
+
+    let mut fields = Vec::new();
+    for (_, symbol_id, definition, annotation_ty) in field_definitions {
+        let symbol = table.symbol(symbol_id);
+        let binding_place =
+            place_from_bindings(db, use_def.end_of_scope_symbol_bindings(symbol_id))
+                .place
+                .ignore_possibly_undefined();
+        let value = definition.kind(db).value(module);
+
+        fields.push(PluginClassFieldSummary {
+            name: symbol.name().clone(),
+            annotation: annotation_ty,
+            assigned_value: value.map(|value| {
+                plugin_assigned_value_summary(db, class_definition, value, binding_place)
+            }),
+            inferred_type: binding_place.or(annotation_ty),
+            has_default: value.is_some(),
+            source: plugin_symbol_source(db, file, definition.kind(db).target_range(module), None),
+        });
+    }
+
+    fields
+}
+
+fn plugin_analyze_class_request<'db>(
+    db: &'db dyn Db,
+    class: StaticClassLiteral<'db>,
+    summary: &PluginClassSummary<'db>,
+    project_index: Option<serde_json::Value>,
+) -> protocol::PluginRequest {
+    let file = class.file(db);
+
+    protocol::PluginRequest::AnalyzeClass(protocol::AnalyzeClassRequest {
+        context: plugin_semantic_context(db, file, false),
+        class: plugin_protocol_class_summary(db, class, summary),
+        project_index,
+    })
+}
+
+fn plugin_protocol_class_summary<'db>(
+    db: &'db dyn Db,
+    class: StaticClassLiteral<'db>,
+    summary: &PluginClassSummary<'db>,
+) -> protocol::ClassSummary {
+    protocol::ClassSummary {
+        qualified_name: ClassLiteral::Static(class).qualified_name(db).to_string(),
+        bases: class
+            .explicit_bases(db)
+            .iter()
+            .map(|base| plugin_type_expr_from_type(db, *base))
+            .collect(),
+        decorators: summary.decorators.clone(),
+        metaclass: summary
+            .metaclass
+            .map(|metaclass| plugin_type_expr_from_type(db, metaclass)),
+        fields: summary
+            .fields
+            .iter()
+            .map(|field| protocol::FieldSummary {
+                name: field.name.to_string(),
+                annotation: field
+                    .annotation
+                    .map(|ty| plugin_type_expr_from_type(db, ty)),
+                assigned_value: field.assigned_value.clone(),
+                inferred_type: field
+                    .inferred_type
+                    .map(|ty| plugin_type_expr_from_type(db, ty)),
+                has_default: field.has_default,
+                source: field.source.clone(),
+            })
+            .collect(),
+        nested_classes: summary.nested_classes.clone(),
+        class_constants: summary.class_constants.clone(),
+        source: summary.source.clone(),
+    }
+}
+
+fn nested_class_summary(
+    db: &dyn Db,
+    file: File,
+    module: &ParsedModuleRef,
+    owner_qualified_name: &str,
+    statement: &ast::Stmt,
+) -> Option<protocol::NestedClassSummary> {
+    let class = statement.as_class_def_stmt()?;
+    let qualified_name = format!("{owner_qualified_name}.{}", class.name);
+
+    Some(protocol::NestedClassSummary {
+        name: class.name.to_string(),
+        qualified_name: qualified_name.clone(),
+        bases: Vec::new(),
+        class_constants: class
+            .body
+            .iter()
+            .filter_map(|statement| {
+                constant_summary_from_statement(db, file, module, statement, Some(&qualified_name))
+            })
+            .collect(),
+        source: plugin_symbol_source(db, file, class.range(), Some(qualified_name)),
+    })
+}
+
+fn constant_summary_from_statement(
+    db: &dyn Db,
+    file: File,
+    _module: &ParsedModuleRef,
+    statement: &ast::Stmt,
+    owner_qualified_name: Option<&str>,
+) -> Option<protocol::ConstantSummary> {
+    let (name, value, target_range) = match statement {
+        ast::Stmt::Assign(assign) => {
+            let target = assign.targets.first()?.as_name_expr()?;
+            (target.id.to_string(), assign.value.as_ref(), target.range())
+        }
+        ast::Stmt::AnnAssign(assign) => {
+            let target = assign.target.as_name_expr()?;
+            let value = assign.value.as_deref()?;
+            (target.id.to_string(), value, target.range())
+        }
+        _ => return None,
+    };
+
+    let value_summary = plugin_literal_value_from_expr(value);
+    if value_summary.is_unknown() {
+        return None;
+    }
+
+    Some(protocol::ConstantSummary {
+        name: name.clone(),
+        value: value_summary,
+        type_expr: None,
+        source: plugin_symbol_source(
+            db,
+            file,
+            target_range,
+            owner_qualified_name.map(|owner| format!("{owner}.{name}")),
+        ),
+    })
+}
+
+fn plugin_assigned_value_summary<'db>(
+    db: &'db dyn Db,
+    definition: Definition<'db>,
+    value: &ast::Expr,
+    inferred_type: Option<Type<'db>>,
+) -> protocol::AssignedValueSummary {
+    if let ast::Expr::Call(call) = value
+        && let Some(callee) = plugin_symbol_ref_from_expr(&call.func)
+    {
+        return protocol::AssignedValueSummary::Call(protocol::CallValueSummary {
+            callee,
+            arguments: plugin_argument_summaries(db, definition, &call.arguments),
+            return_type: inferred_type.map(|ty| plugin_type_expr_from_type(db, ty)),
+        });
+    }
+
+    let literal = plugin_literal_value_from_expr(value);
+    if !literal.is_unknown() {
+        return protocol::AssignedValueSummary::Literal { value: literal };
+    }
+
+    if let Some(symbol) = plugin_symbol_ref_from_expr(value) {
+        return match value {
+            ast::Expr::Attribute(_) => protocol::AssignedValueSummary::Attribute(symbol),
+            ast::Expr::Name(_) => protocol::AssignedValueSummary::Name(symbol),
+            _ => protocol::AssignedValueSummary::Other {
+                inferred_type: inferred_type.map(|ty| plugin_type_expr_from_type(db, ty)),
+            },
+        };
+    }
+
+    protocol::AssignedValueSummary::Other {
+        inferred_type: inferred_type.map(|ty| plugin_type_expr_from_type(db, ty)),
+    }
+}
+
+fn plugin_call_or_symbol_summary<'db>(
+    db: &'db dyn Db,
+    definition: Definition<'db>,
+    expression: &ast::Expr,
+) -> protocol::CallOrSymbolSummary {
+    if let ast::Expr::Call(call) = expression
+        && let Some(callee) = plugin_symbol_ref_from_expr(&call.func)
+    {
+        return protocol::CallOrSymbolSummary::Call(protocol::CallValueSummary {
+            callee,
+            arguments: plugin_argument_summaries(db, definition, &call.arguments),
+            return_type: Some(plugin_type_expr_from_type(
+                db,
+                definition_expression_type(db, definition, expression),
+            )),
+        });
+    }
+
+    if let Some(symbol) = plugin_symbol_ref_from_expr(expression) {
+        return protocol::CallOrSymbolSummary::Symbol(symbol);
+    }
+
+    protocol::CallOrSymbolSummary::Other {
+        inferred_type: Some(plugin_type_expr_from_type(
+            db,
+            definition_expression_type(db, definition, expression),
+        )),
+    }
+}
+
+fn plugin_argument_summaries<'db>(
+    db: &'db dyn Db,
+    definition: Definition<'db>,
+    arguments: &ast::Arguments,
+) -> Vec<protocol::ArgumentSummary> {
+    let mut summaries = Vec::with_capacity(arguments.len());
+
+    for argument in &arguments.args {
+        let kind = if argument.is_starred_expr() {
+            protocol::ArgumentKind::StarArgs
+        } else {
+            protocol::ArgumentKind::Positional
+        };
+        summaries.push(protocol::ArgumentSummary {
+            name: None,
+            kind,
+            type_expr: Some(plugin_type_expr_from_type(
+                db,
+                definition_expression_type(db, definition, argument),
+            )),
+            value: plugin_literal_value_from_expr(argument),
+            source: Some(plugin_symbol_source(
+                db,
+                definition.file(db),
+                argument.range(),
+                None,
+            )),
+        });
+    }
+
+    for keyword in &arguments.keywords {
+        summaries.push(protocol::ArgumentSummary {
+            name: keyword.arg.as_ref().map(|arg| arg.as_str().to_string()),
+            kind: if keyword.arg.is_some() {
+                protocol::ArgumentKind::Keyword
+            } else {
+                protocol::ArgumentKind::StarKwargs
+            },
+            type_expr: Some(plugin_type_expr_from_type(
+                db,
+                definition_expression_type(db, definition, &keyword.value),
+            )),
+            value: plugin_literal_value_from_expr(&keyword.value),
+            source: Some(plugin_symbol_source(
+                db,
+                definition.file(db),
+                keyword.range(),
+                None,
+            )),
+        });
+    }
+
+    summaries
+}
+
+fn plugin_literal_value_from_expr(expression: &ast::Expr) -> protocol::LiteralValue {
+    match expression {
+        ast::Expr::BooleanLiteral(boolean) => protocol::LiteralValue::Bool {
+            value: boolean.value,
+        },
+        ast::Expr::NoneLiteral(_) => protocol::LiteralValue::None,
+        ast::Expr::StringLiteral(string) => protocol::LiteralValue::Str {
+            value: string.value.to_str().to_string(),
+        },
+        ast::Expr::NumberLiteral(number) => match &number.value {
+            ast::Number::Int(int) => int
+                .as_i64()
+                .map_or(protocol::LiteralValue::Unknown, |value| {
+                    protocol::LiteralValue::Int { value }
+                }),
+            ast::Number::Float(_) | ast::Number::Complex { .. } => protocol::LiteralValue::Unknown,
+        },
+        ast::Expr::Name(_) => plugin_symbol_ref_from_expr(expression).map_or(
+            protocol::LiteralValue::Unknown,
+            protocol::LiteralValue::SymbolRef,
+        ),
+        ast::Expr::Attribute(_) => plugin_symbol_ref_from_expr(expression).map_or(
+            protocol::LiteralValue::Unknown,
+            protocol::LiteralValue::EnumRef,
+        ),
+        ast::Expr::Tuple(tuple) => protocol::LiteralValue::Tuple {
+            items: tuple
+                .elts
+                .iter()
+                .map(plugin_literal_value_from_expr)
+                .collect(),
+        },
+        ast::Expr::List(list) => protocol::LiteralValue::List {
+            items: list
+                .elts
+                .iter()
+                .map(plugin_literal_value_from_expr)
+                .collect(),
+        },
+        ast::Expr::Dict(dict) => protocol::LiteralValue::Dict {
+            entries: dict
+                .items
+                .iter()
+                .filter_map(|item| {
+                    Some(protocol::LiteralDictEntry {
+                        key: plugin_literal_value_from_expr(item.key.as_ref()?),
+                        value: plugin_literal_value_from_expr(&item.value),
+                    })
+                })
+                .collect(),
+        },
+        ast::Expr::BinOp(binary) if binary.op == ast::Operator::Add => plugin_literal_add(
+            plugin_literal_value_from_expr(&binary.left),
+            plugin_literal_value_from_expr(&binary.right),
+        ),
+        _ => protocol::LiteralValue::Unknown,
+    }
+}
+
+fn plugin_settings_literal_value_from_expr(
+    db: &dyn Db,
+    module_name: &str,
+    expression: &ast::Expr,
+    settings_bindings: &BTreeMap<String, &ast::Expr>,
+    import_bindings: &PluginSettingsImportBindings,
+    resolving: &mut BTreeSet<String>,
+    dependencies: &mut BTreeSet<String>,
+) -> protocol::LiteralValue {
+    match expression {
+        ast::Expr::Name(name) => {
+            let name = name.id.as_str();
+            if let Some(value) = settings_bindings.get(name).copied() {
+                let resolving_key = format!("{module_name}.{name}");
+                if !resolving.insert(resolving_key.clone()) {
+                    return protocol::LiteralValue::Unknown;
+                }
+                let resolved = plugin_settings_literal_value_from_expr(
+                    db,
+                    module_name,
+                    value,
+                    settings_bindings,
+                    import_bindings,
+                    resolving,
+                    dependencies,
+                );
+                resolving.remove(&resolving_key);
+                return resolved;
+            }
+
+            let Some((imported_module, imported_name)) = import_bindings.values.get(name) else {
+                return protocol::LiteralValue::Unknown;
+            };
+            plugin_imported_settings_literal_value(
+                db,
+                imported_module,
+                imported_name,
+                resolving,
+                dependencies,
+            )
+        }
+        ast::Expr::Attribute(attribute) => {
+            let ast::Expr::Name(module_alias) = attribute.value.as_ref() else {
+                return plugin_literal_value_from_expr(expression);
+            };
+            let Some(imported_module) = import_bindings.modules.get(module_alias.id.as_str())
+            else {
+                return plugin_literal_value_from_expr(expression);
+            };
+            let imported_name = attribute.attr.as_str();
+            if !is_static_settings_name(imported_name) {
+                return protocol::LiteralValue::Unknown;
+            }
+            plugin_imported_settings_literal_value(
+                db,
+                imported_module,
+                imported_name,
+                resolving,
+                dependencies,
+            )
+        }
+        ast::Expr::Tuple(tuple) => protocol::LiteralValue::Tuple {
+            items: tuple
+                .elts
+                .iter()
+                .map(|item| {
+                    plugin_settings_literal_value_from_expr(
+                        db,
+                        module_name,
+                        item,
+                        settings_bindings,
+                        import_bindings,
+                        resolving,
+                        dependencies,
+                    )
+                })
+                .collect(),
+        },
+        ast::Expr::List(list) => protocol::LiteralValue::List {
+            items: list
+                .elts
+                .iter()
+                .map(|item| {
+                    plugin_settings_literal_value_from_expr(
+                        db,
+                        module_name,
+                        item,
+                        settings_bindings,
+                        import_bindings,
+                        resolving,
+                        dependencies,
+                    )
+                })
+                .collect(),
+        },
+        ast::Expr::Dict(dict) => protocol::LiteralValue::Dict {
+            entries: dict
+                .items
+                .iter()
+                .filter_map(|item| {
+                    Some(protocol::LiteralDictEntry {
+                        key: plugin_settings_literal_value_from_expr(
+                            db,
+                            module_name,
+                            item.key.as_ref()?,
+                            settings_bindings,
+                            import_bindings,
+                            resolving,
+                            dependencies,
+                        ),
+                        value: plugin_settings_literal_value_from_expr(
+                            db,
+                            module_name,
+                            &item.value,
+                            settings_bindings,
+                            import_bindings,
+                            resolving,
+                            dependencies,
+                        ),
+                    })
+                })
+                .collect(),
+        },
+        ast::Expr::BinOp(binary) if binary.op == ast::Operator::Add => plugin_literal_add(
+            plugin_settings_literal_value_from_expr(
+                db,
+                module_name,
+                &binary.left,
+                settings_bindings,
+                import_bindings,
+                resolving,
+                dependencies,
+            ),
+            plugin_settings_literal_value_from_expr(
+                db,
+                module_name,
+                &binary.right,
+                settings_bindings,
+                import_bindings,
+                resolving,
+                dependencies,
+            ),
+        ),
+        _ => plugin_literal_value_from_expr(expression),
+    }
+}
+
+fn plugin_imported_settings_literal_value(
+    db: &dyn Db,
+    module_name: &str,
+    setting_name: &str,
+    resolving: &mut BTreeSet<String>,
+    dependencies: &mut BTreeSet<String>,
+) -> protocol::LiteralValue {
+    let resolving_key = format!("{module_name}.{setting_name}");
+    if !resolving.insert(resolving_key.clone()) {
+        return protocol::LiteralValue::Unknown;
+    }
+    let Some(file) = plugin_settings_module_file(db, module_name) else {
+        resolving.remove(&resolving_key);
+        return protocol::LiteralValue::Unknown;
+    };
+    dependencies.insert(file.path(db).to_string());
+
+    let parsed = parsed_module(db, file).load(db);
+    let settings_bindings = parsed
+        .syntax()
+        .body
+        .iter()
+        .filter_map(setting_assignment_from_statement)
+        .filter(|(name, _, _)| is_static_settings_name(name))
+        .map(|(name, value, _)| (name, value))
+        .collect::<BTreeMap<_, _>>();
+    let Some(value) = settings_bindings.get(setting_name).copied() else {
+        resolving.remove(&resolving_key);
+        return protocol::LiteralValue::Unknown;
+    };
+    let import_bindings = plugin_settings_import_bindings(parsed.syntax().body.as_slice());
+    let resolved = plugin_settings_literal_value_from_expr(
+        db,
+        module_name,
+        value,
+        &settings_bindings,
+        &import_bindings,
+        resolving,
+        dependencies,
+    );
+    resolving.remove(&resolving_key);
+    resolved
+}
+
+fn plugin_literal_add(
+    left: protocol::LiteralValue,
+    right: protocol::LiteralValue,
+) -> protocol::LiteralValue {
+    match (left, right) {
+        (
+            protocol::LiteralValue::Str { value: left },
+            protocol::LiteralValue::Str { value: right },
+        ) => protocol::LiteralValue::Str {
+            value: format!("{left}{right}"),
+        },
+        (
+            protocol::LiteralValue::List { items: mut left },
+            protocol::LiteralValue::List { items: right },
+        ) => {
+            left.extend(right);
+            protocol::LiteralValue::List { items: left }
+        }
+        (
+            protocol::LiteralValue::Tuple { items: mut left },
+            protocol::LiteralValue::Tuple { items: right },
+        ) => {
+            left.extend(right);
+            protocol::LiteralValue::Tuple { items: left }
+        }
+        (
+            protocol::LiteralValue::Int { value: left },
+            protocol::LiteralValue::Int { value: right },
+        ) => left
+            .checked_add(right)
+            .map_or(protocol::LiteralValue::Unknown, |value| {
+                protocol::LiteralValue::Int { value }
+            }),
+        _ => protocol::LiteralValue::Unknown,
+    }
+}
+
+fn plugin_symbol_ref_from_expr(expression: &ast::Expr) -> Option<protocol::SymbolRef> {
+    match expression {
+        ast::Expr::Name(name) => Some(protocol::SymbolRef {
+            qualified_name: name.id.to_string(),
+        }),
+        ast::Expr::Attribute(attribute) => {
+            let mut qualified_name = plugin_symbol_ref_from_expr(&attribute.value)?.qualified_name;
+            qualified_name.push('.');
+            qualified_name.push_str(attribute.attr.as_str());
+            Some(protocol::SymbolRef { qualified_name })
+        }
+        _ => None,
+    }
+}
+
+fn plugin_symbol_source(
+    db: &dyn Db,
+    file: File,
+    range: TextRange,
+    qualified_name: Option<String>,
+) -> protocol::SymbolSource {
+    let source = source_text(db, file);
+    let index = line_index(db, file);
+    let start = index.line_column(range.start(), source.as_str());
+    let end = index.line_column(range.end(), source.as_str());
+
+    protocol::SymbolSource {
+        module: Some(plugin_module_name(db, file)),
+        qualified_name,
+        file_path: Some(file.path(db).to_string()),
+        start: Some(protocol::TextPosition {
+            line: u32::try_from(start.line.get()).unwrap_or(u32::MAX),
+            column: u32::try_from(start.column.get()).unwrap_or(u32::MAX),
+        }),
+        end: Some(protocol::TextPosition {
+            line: u32::try_from(end.line.get()).unwrap_or(u32::MAX),
+            column: u32::try_from(end.column.get()).unwrap_or(u32::MAX),
+        }),
+    }
+}
+
+fn plugin_module_name(db: &dyn Db, file: File) -> String {
+    ty_module_resolver::file_to_module(db, file)
+        .map(|module| module.name(db).to_string())
+        .unwrap_or_default()
+}
+
+fn plugin_resolve_member_request<'db>(
+    db: &'db dyn Db,
+    class: StaticClassLiteral<'db>,
+    member_name: &str,
+    scope: PluginMemberScope,
+    project_index: Option<serde_json::Value>,
+) -> protocol::PluginRequest {
+    let file = class.file(db);
+    let owner = match scope {
+        PluginMemberScope::Class => Type::ClassLiteral(ClassLiteral::Static(class)),
+        PluginMemberScope::Instance => ClassLiteral::Static(class).to_non_generic_instance(db),
+    };
+    let request = protocol::ResolveMemberRequest {
+        context: plugin_semantic_context(db, file, false),
+        owner: plugin_type_expr_from_type(db, owner),
+        member_name: member_name.to_string(),
+        existing_member: None,
+        project_index,
+    };
+
+    match scope {
+        PluginMemberScope::Class => protocol::PluginRequest::ResolveClassMember(request),
+        PluginMemberScope::Instance => protocol::PluginRequest::ResolveInstanceMember(request),
+    }
+}
+
+fn mock_plugin_execute_class_transform(
+    request: &protocol::PluginRequest,
+) -> protocol::PluginResponse {
+    let protocol::PluginRequest::AnalyzeClass(request) = request else {
+        return protocol::PluginResponse::NoChange;
+    };
+
+    protocol::PluginResponse::ClassPatch(protocol::ClassPatch {
+        fields: request
+            .class
+            .fields
+            .iter()
+            .filter_map(|field| {
+                let type_expr = field.annotation.clone()?;
+                Some(protocol::FieldPatch {
+                    name: field.name.clone(),
+                    descriptor: None,
+                    instance_get_type: type_expr.clone(),
+                    instance_set_type: Some(type_expr.clone()),
+                    constructor_parameter: Some(protocol::Parameter {
+                        name: Some(field.name.clone()),
+                        kind: protocol::ParameterKind::KeywordOnly,
+                        type_expr: Some(type_expr),
+                        required: !field.has_default,
+                    }),
+                    has_default: field.has_default,
+                })
+            })
+            .collect(),
+        class_members: Vec::new(),
+        instance_members: Vec::new(),
+        constructor: None,
+        diagnostics: Vec::new(),
+    })
+}
+
+fn mock_plugin_execute_project_index(
+    request: &protocol::PluginRequest,
+) -> protocol::PluginResponse {
+    let protocol::PluginRequest::BuildProjectIndex(_) = request else {
+        return protocol::PluginResponse::NoChange;
+    };
+
+    protocol::PluginResponse::ProjectIndex(protocol::ProjectIndexResponse {
+        plugin_index: serde_json::Value::Null,
+        contributions: Vec::new(),
+        virtual_types: Vec::new(),
+        dependencies: Vec::new(),
+        diagnostics: Vec::new(),
+    })
+}
+
+fn execute_project_index_plugin(
+    db: &dyn Db,
+    plugin: &SemanticPlugin,
+    request: &protocol::PluginRequest,
+) -> protocol::PluginResponse {
+    match plugin.runtime() {
+        SemanticPluginRuntime::Mock => mock_plugin_execute_project_index(request),
+        SemanticPluginRuntime::InProcess | SemanticPluginRuntime::Wasm => db
+            .execute_semantic_plugin(plugin.id(), request)
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    plugin_id = plugin.id(),
+                    error = error.message(),
+                    hint = error.hint(),
+                    "plugin project-index hook failed; falling back to no index"
+                );
+                protocol::PluginResponse::NoChange
+            }),
+    }
+}
+
+fn execute_class_transform_plugin(
+    db: &dyn Db,
+    plugin: &SemanticPlugin,
+    request: &protocol::PluginRequest,
+) -> protocol::PluginResponse {
+    match plugin.runtime() {
+        SemanticPluginRuntime::Mock => mock_plugin_execute_class_transform(request),
+        SemanticPluginRuntime::InProcess | SemanticPluginRuntime::Wasm => db
+            .execute_semantic_plugin(plugin.id(), request)
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    plugin_id = plugin.id(),
+                    error = error.message(),
+                    hint = error.hint(),
+                    "plugin class-transform hook failed; falling back to no change"
+                );
+                protocol::PluginResponse::NoChange
+            }),
+    }
+}
+
+fn mock_plugin_execute_member(request: &protocol::PluginRequest) -> protocol::PluginResponse {
+    let (protocol::PluginRequest::ResolveClassMember(request)
+    | protocol::PluginRequest::ResolveInstanceMember(request)) = request
+    else {
+        return protocol::PluginResponse::NoChange;
+    };
+
+    protocol::PluginResponse::MemberPatch(protocol::MemberPatch {
+        name: request.member_name.clone(),
+        access: protocol::MemberAccessPatch::value(protocol::TypeExpr {
+            expression: "str".to_string(),
+            imports: Vec::new(),
+            mode: protocol::TypeExprMode::Annotation,
+        }),
+        read_only: false,
+        diagnostics: Vec::new(),
+    })
+}
+
+fn execute_member_plugin(
+    db: &dyn Db,
+    plugin: &SemanticPlugin,
+    request: &protocol::PluginRequest,
+) -> protocol::PluginResponse {
+    match plugin.runtime() {
+        SemanticPluginRuntime::Mock => mock_plugin_execute_member(request),
+        SemanticPluginRuntime::InProcess | SemanticPluginRuntime::Wasm => db
+            .execute_semantic_plugin(plugin.id(), request)
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    plugin_id = plugin.id(),
+                    error = error.message(),
+                    hint = error.hint(),
+                    "plugin member hook failed; falling back to no change"
+                );
+                protocol::PluginResponse::NoChange
+            }),
+    }
+}
+
+fn merge_plugin_class_response<'db>(
+    db: &'db dyn Db,
+    class: StaticClassLiteral<'db>,
+    response: protocol::PluginResponse,
+    virtual_types: &[PluginVirtualTypePatch<'db>],
+    fields: &mut Vec<PluginClassFieldPatch<'db>>,
+    class_members: &mut Vec<PluginMemberPatch<'db>>,
+    instance_members: &mut Vec<PluginMemberPatch<'db>>,
+    constructor: &mut Option<PluginConstructorPatch<'db>>,
+) {
+    let protocol::PluginResponse::ClassPatch(patch) = response else {
+        return;
+    };
+
+    for field in patch.fields {
+        let name = Name::new(&field.name);
+        if fields.iter().any(|existing| existing.name == name) {
+            continue;
+        }
+        let descriptor_class_ty = match field.descriptor.as_ref() {
+            Some(protocol::MemberAccessPatch::Value { type_expr }) => {
+                Some(plugin_type_expr_to_type_in_class_with_virtual_types(
+                    db,
+                    type_expr,
+                    class,
+                    virtual_types,
+                ))
+            }
+            Some(protocol::MemberAccessPatch::Descriptor { class_type, .. }) => {
+                class_type.as_ref().map(|type_expr| {
+                    plugin_type_expr_to_type_in_class_with_virtual_types(
+                        db,
+                        type_expr,
+                        class,
+                        virtual_types,
+                    )
+                })
+            }
+            None => None,
+        };
+        fields.push(PluginClassFieldPatch {
+            name,
+            descriptor_class_ty,
+            instance_get_ty: plugin_type_expr_to_type_in_class_with_virtual_types(
+                db,
+                &field.instance_get_type,
+                class,
+                virtual_types,
+            ),
+            instance_set_ty: field.instance_set_type.as_ref().map(|type_expr| {
+                plugin_type_expr_to_type_in_class_with_virtual_types(
+                    db,
+                    type_expr,
+                    class,
+                    virtual_types,
+                )
+            }),
+            has_default: field.has_default,
+            constructor_parameter: field.constructor_parameter.map(|parameter| {
+                plugin_constructor_parameter_from_protocol(db, class, parameter, virtual_types)
+            }),
+        });
+    }
+
+    for member in patch.class_members {
+        let name = Name::new(&member.name);
+        if class_members.iter().any(|existing| existing.name == name) {
+            continue;
+        }
+        class_members.push(PluginMemberPatch {
+            name,
+            ty: plugin_type_expr_to_type_in_class_with_virtual_types(
+                db,
+                member.access.instance_get_type(),
+                class,
+                virtual_types,
+            ),
+            read_only: member.read_only,
+        });
+    }
+
+    for member in patch.instance_members {
+        let name = Name::new(&member.name);
+        if instance_members
+            .iter()
+            .any(|existing| existing.name == name)
+        {
+            continue;
+        }
+        instance_members.push(PluginMemberPatch {
+            name,
+            ty: plugin_type_expr_to_type_in_class_with_virtual_types(
+                db,
+                member.access.instance_get_type(),
+                class,
+                virtual_types,
+            ),
+            read_only: member.read_only,
+        });
+    }
+
+    if constructor.is_none() {
+        *constructor = patch.constructor.map(|signature| PluginConstructorPatch {
+            parameters: signature
+                .parameters
+                .into_iter()
+                .map(|parameter| {
+                    plugin_constructor_parameter_from_protocol(db, class, parameter, virtual_types)
+                })
+                .collect(),
+        });
+    }
+}
+
+fn plugin_constructor_parameter_from_protocol<'db>(
+    db: &'db dyn Db,
+    class: StaticClassLiteral<'db>,
+    parameter: protocol::Parameter,
+    virtual_types: &[PluginVirtualTypePatch<'db>],
+) -> PluginConstructorParameter<'db> {
+    PluginConstructorParameter {
+        name: parameter.name.map(Name::new),
+        kind: match parameter.kind {
+            protocol::ParameterKind::PositionalOnly => {
+                PluginConstructorParameterKind::PositionalOnly
+            }
+            protocol::ParameterKind::PositionalOrKeyword => {
+                PluginConstructorParameterKind::PositionalOrKeyword
+            }
+            protocol::ParameterKind::VarArgs => PluginConstructorParameterKind::VarArgs,
+            protocol::ParameterKind::KeywordOnly => PluginConstructorParameterKind::KeywordOnly,
+            protocol::ParameterKind::Kwargs => PluginConstructorParameterKind::Kwargs,
+        },
+        ty: parameter
+            .type_expr
+            .as_ref()
+            .map_or_else(Type::unknown, |type_expr| {
+                plugin_type_expr_to_type_in_class_with_virtual_types(
+                    db,
+                    type_expr,
+                    class,
+                    virtual_types,
+                )
+            }),
+        required: parameter.required,
+    }
+}
+
+fn plugin_constructor_parameter_from_protocol_type_expr<'db>(
+    db: &'db dyn Db,
+    parameter: protocol::Parameter,
+    virtual_types: &[PluginVirtualTypePatch<'db>],
+) -> PluginConstructorParameter<'db> {
+    PluginConstructorParameter {
+        name: parameter.name.map(Name::new),
+        kind: match parameter.kind {
+            protocol::ParameterKind::PositionalOnly => {
+                PluginConstructorParameterKind::PositionalOnly
+            }
+            protocol::ParameterKind::PositionalOrKeyword => {
+                PluginConstructorParameterKind::PositionalOrKeyword
+            }
+            protocol::ParameterKind::VarArgs => PluginConstructorParameterKind::VarArgs,
+            protocol::ParameterKind::KeywordOnly => PluginConstructorParameterKind::KeywordOnly,
+            protocol::ParameterKind::Kwargs => PluginConstructorParameterKind::Kwargs,
+        },
+        ty: parameter
+            .type_expr
+            .as_ref()
+            .map_or_else(Type::unknown, |type_expr| {
+                plugin_type_expr_to_type_with_virtual_types(db, type_expr, virtual_types)
+            }),
+        required: parameter.required,
+    }
+}
+
+fn plugin_member_response_to_patch<'db>(
+    db: &'db dyn Db,
+    response: protocol::PluginResponse,
+    expected_name: &Name,
+    virtual_types: &[PluginVirtualTypePatch<'db>],
+) -> Option<PluginMemberPatch<'db>> {
+    let protocol::PluginResponse::MemberPatch(member) = response else {
+        return None;
+    };
+
+    if member.name != expected_name.as_str() {
+        return None;
+    }
+
+    Some(PluginMemberPatch {
+        name: Name::new(&member.name),
+        ty: plugin_type_expr_to_type_with_virtual_types(
+            db,
+            member.access.instance_get_type(),
+            virtual_types,
+        ),
+        read_only: member.read_only,
+    })
+}
+
+fn plugin_member_to_member<'db>(member: &PluginMemberPatch<'db>) -> Member<'db> {
+    let qualifiers = if member.read_only {
+        TypeQualifiers::READ_ONLY
+    } else {
+        TypeQualifiers::empty()
+    };
+
+    Member {
+        inner: Place::declared(member.ty).with_qualifiers(qualifiers),
+    }
+}
+
+impl<'db> PluginContributionMemberPatch<'db> {
+    fn member_name(&self) -> Option<&Name> {
+        match self {
+            Self::Member(member) => Some(&member.name),
+            Self::Field(field) => Some(&field.name),
+            Self::Constructor(_) => None,
+        }
+    }
+
+    fn sort_name(&self) -> &str {
+        match self {
+            Self::Member(member) => member.name.as_str(),
+            Self::Field(field) => field.name.as_str(),
+            Self::Constructor(_) => "__init__",
+        }
+    }
+}
+
+fn plugin_contribution_to_member<'db>(
+    patch: &PluginContributionMemberPatch<'db>,
+    scope: PluginMemberScope,
+) -> Option<Member<'db>> {
+    match patch {
+        PluginContributionMemberPatch::Member(member) => Some(plugin_member_to_member(member)),
+        PluginContributionMemberPatch::Field(field) => match scope {
+            PluginMemberScope::Class => field.descriptor_class_ty.map(Member::definitely_declared),
+            PluginMemberScope::Instance => Some(Member::definitely_declared(field.instance_get_ty)),
+        },
+        PluginContributionMemberPatch::Constructor(_) => None,
+    }
+}
+
+fn plugin_field_constructor_parameter<'db>(
+    field: &PluginClassFieldPatch<'db>,
+) -> Option<Parameter<'db>> {
+    let constructor_parameter = field.constructor_parameter.as_ref()?;
+    let mut parameter = plugin_signature_parameter(constructor_parameter)?;
+    let parameter_ty = if constructor_parameter.ty.is_unknown() {
+        field.instance_set_ty.unwrap_or(field.instance_get_ty)
+    } else {
+        constructor_parameter.ty
+    };
+    parameter = parameter.with_annotated_type(parameter_ty);
+    if !constructor_parameter.required || field.has_default {
+        Some(parameter.with_default_type(parameter_ty))
+    } else {
+        Some(parameter)
+    }
+}
+
+fn plugin_signature_parameter<'db>(
+    parameter: &PluginConstructorParameter<'db>,
+) -> Option<Parameter<'db>> {
+    let signature_parameter = match parameter.kind {
+        PluginConstructorParameterKind::PositionalOnly => {
+            Parameter::positional_only(parameter.name.clone())
+        }
+        PluginConstructorParameterKind::PositionalOrKeyword => {
+            Parameter::positional_or_keyword(parameter.name.clone()?)
+        }
+        PluginConstructorParameterKind::VarArgs => Parameter::variadic(
+            parameter
+                .name
+                .clone()
+                .unwrap_or_else(|| Name::new_static("args")),
+        ),
+        PluginConstructorParameterKind::KeywordOnly => {
+            Parameter::keyword_only(parameter.name.clone()?)
+        }
+        PluginConstructorParameterKind::Kwargs => Parameter::keyword_variadic(
+            parameter
+                .name
+                .clone()
+                .unwrap_or_else(|| Name::new_static("kwargs")),
+        ),
+    }
+    .with_annotated_type(parameter.ty);
+
+    match parameter.kind {
+        PluginConstructorParameterKind::PositionalOnly
+        | PluginConstructorParameterKind::PositionalOrKeyword
+        | PluginConstructorParameterKind::KeywordOnly
+            if !parameter.required =>
+        {
+            Some(signature_parameter.with_default_type(parameter.ty))
+        }
+        _ => Some(signature_parameter),
+    }
+}
+
+fn is_plugin_self_parameter(parameter: &PluginConstructorParameter<'_>) -> bool {
+    parameter
+        .name
+        .as_ref()
+        .is_some_and(|name| matches!(name.as_str(), "self" | "cls"))
+}
+
 #[salsa::tracked]
 impl<'db> VarianceInferable<'db> for StaticClassLiteral<'db> {
     #[salsa::tracked(cycle_initial=|_, _, _, _| TypeVarVariance::Bivariant, heap_size=ruff_memory_usage::heap_size)]
@@ -3345,4 +5874,2003 @@ fn implicit_attribute_cycle_recover<'db>(
         .inner
         .cycle_normalized(db, previous_member.inner, cycle);
     Member { inner }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use crate::db::tests::{TestDb, TestDbBuilder};
+    use crate::place::global_symbol;
+    use ruff_db::files::system_path_to_file;
+    use ruff_db::system::DbWithWritableSystem as _;
+    use ty_plugin_examples::{
+        MiniDjangoPlugin, ModelClassTransformPlugin, class_transform, minidjango,
+    };
+    use ty_plugin_sdk::Plugin as _;
+    use ty_python_core::program::{
+        ProgramSettings, SemanticPluginEnvironment, SemanticPluginMemberClaim,
+        SemanticPluginMethodClaim,
+    };
+    use ty_python_core::semantic_index;
+
+    fn static_class_literal<'db>(
+        db: &'db TestDb,
+        path: &str,
+        class_name: &str,
+    ) -> StaticClassLiteral<'db> {
+        let file = system_path_to_file(db, path).expect("test file should exist");
+        let module = parsed_module(db, file).load(db);
+        let class_node = module
+            .syntax()
+            .body
+            .iter()
+            .find_map(|statement| {
+                let class = statement.as_class_def_stmt()?;
+                (class.name.as_str() == class_name).then_some(class)
+            })
+            .expect("test class should exist");
+        let definition = semantic_index(db, file).expect_single_definition(class_node);
+        let ClassLiteral::Static(class) =
+            crate::types::infer::original_class_type(db, definition).expect("class type")
+        else {
+            panic!("expected static class");
+        };
+        class
+    }
+
+    fn class_transform_request<'db>(
+        db: &'db TestDb,
+        path: &str,
+        class_name: &str,
+    ) -> protocol::AnalyzeClassRequest {
+        let class = static_class_literal(db, path, class_name);
+
+        let summary = plugin_class_summary(db, class);
+        let protocol::PluginRequest::AnalyzeClass(request) =
+            plugin_analyze_class_request(db, class, &summary, None)
+        else {
+            panic!("expected AnalyzeClass request");
+        };
+        request
+    }
+
+    fn install_semantic_plugin(db: &mut TestDb, plugin: SemanticPlugin) {
+        let current_program = Program::get(db);
+        let settings = ProgramSettings {
+            python_version: current_program.python_version_with_source(db).clone(),
+            python_platform: current_program.python_platform(db).clone(),
+            search_paths: current_program.search_paths(db).clone(),
+            semantic_plugins: SemanticPluginEnvironment::new(1, [plugin]),
+        };
+        Program::init_or_update(db, settings);
+    }
+
+    fn write_minidjango_harness(db: &mut TestDb) -> anyhow::Result<()> {
+        db.write_files([
+            (
+                "/src/minidjango.py",
+                include_str!("../../../resources/plugin_fixtures/minidjango/minidjango.py"),
+            ),
+            (
+                "/src/library.py",
+                include_str!("../../../resources/plugin_fixtures/minidjango/library.py"),
+            ),
+            (
+                "/src/accounts.py",
+                include_str!("../../../resources/plugin_fixtures/minidjango/accounts.py"),
+            ),
+            (
+                "/src/minidjango_settings.py",
+                include_str!(
+                    "../../../resources/plugin_fixtures/minidjango/minidjango_settings.py"
+                ),
+            ),
+            (
+                "/src/models.py",
+                include_str!("../../../resources/plugin_fixtures/minidjango/models.py"),
+            ),
+        ])?;
+
+        Ok(())
+    }
+
+    fn install_minidjango_plugin(db: &mut TestDb) {
+        let sdk_plugin = MiniDjangoPlugin;
+        let plugin_id = sdk_plugin.manifest().id;
+        db.register_semantic_plugin_executor(plugin_id.clone(), move |request| {
+            Ok(sdk_plugin.handle(request))
+        });
+        install_semantic_plugin(
+            db,
+            SemanticPlugin::new(
+                plugin_id,
+                SemanticPluginRuntime::InProcess,
+                vec![minidjango::MODEL_BASE.to_string()],
+                Vec::<SemanticPluginMemberClaim>::new(),
+                Vec::<SemanticPluginMemberClaim>::new(),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .with_call_method_on_subclass_claims(
+                Vec::<SemanticPluginMethodClaim>::new(),
+                vec![
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::MANAGER_BASE, "filter"),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::MANAGER_BASE, "get"),
+                    SemanticPluginMethodClaim::on_subclass_of(
+                        minidjango::MANAGER_BASE,
+                        "get_or_create",
+                    ),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::MANAGER_BASE, "first"),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::MANAGER_BASE, "count"),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::MANAGER_BASE, "exists"),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::MANAGER_BASE, "values"),
+                    SemanticPluginMethodClaim::on_subclass_of(
+                        minidjango::MANAGER_BASE,
+                        "values_list",
+                    ),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::MANAGER_BASE, "annotate"),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::QUERYSET_BASE, "filter"),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::QUERYSET_BASE, "get"),
+                    SemanticPluginMethodClaim::on_subclass_of(
+                        minidjango::QUERYSET_BASE,
+                        "get_or_create",
+                    ),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::QUERYSET_BASE, "first"),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::QUERYSET_BASE, "count"),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::QUERYSET_BASE, "exists"),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::QUERYSET_BASE, "values"),
+                    SemanticPluginMethodClaim::on_subclass_of(
+                        minidjango::QUERYSET_BASE,
+                        "values_list",
+                    ),
+                    SemanticPluginMethodClaim::on_subclass_of(
+                        minidjango::QUERYSET_BASE,
+                        "annotate",
+                    ),
+                ],
+            )
+            .with_settings_module_claims(vec!["minidjango_settings".to_string()])
+            .with_project_index_enabled(true),
+        );
+    }
+
+    #[test]
+    fn class_transform_executes_sdk_plugin_through_in_process_runtime() -> anyhow::Result<()> {
+        let mut db = TestDbBuilder::new().build()?;
+        db.write_dedented(
+            "/src/toy.py",
+            r#"
+            class Model: ...
+            "#,
+        )?;
+        db.write_dedented(
+            "/src/models.py",
+            r#"
+            from toy import Model
+
+            class Book(Model):
+                title: str
+                pages: int = 1
+            "#,
+        )?;
+
+        let sdk_plugin = ModelClassTransformPlugin;
+        let plugin_id = sdk_plugin.manifest().id;
+        db.register_semantic_plugin_executor(plugin_id.clone(), move |request| {
+            Ok(sdk_plugin.handle(request))
+        });
+        install_semantic_plugin(
+            &mut db,
+            SemanticPlugin::new(
+                plugin_id,
+                SemanticPluginRuntime::InProcess,
+                vec![class_transform::MODEL_BASE.to_string()],
+                Vec::<SemanticPluginMemberClaim>::new(),
+                Vec::<SemanticPluginMemberClaim>::new(),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            ),
+        );
+
+        let class = static_class_literal(&db, "/src/models.py", "Book");
+        let patch = class.plugin_class_transform_patch(&db);
+
+        let title = patch
+            .fields
+            .iter()
+            .find(|field| field.name.as_str() == "title")
+            .expect("title field should come from SDK plugin");
+        assert_eq!(title.instance_get_ty.display(&db).to_string(), "str");
+        assert!(title.constructor_parameter.is_some());
+        assert!(!title.has_default);
+
+        let pages = patch
+            .fields
+            .iter()
+            .find(|field| field.name.as_str() == "pages")
+            .expect("pages field should come from SDK plugin");
+        assert_eq!(pages.instance_get_ty.display(&db).to_string(), "int");
+        assert!(pages.constructor_parameter.is_some());
+        assert!(pages.has_default);
+
+        let constructor = patch.constructor.as_ref().expect("constructor patch");
+        let parameters = constructor.parameters.as_ref();
+        assert_eq!(parameters.len(), 2);
+        assert_eq!(parameters[0].name.as_ref().map(Name::as_str), Some("title"));
+        assert_eq!(
+            parameters[0].kind,
+            PluginConstructorParameterKind::KeywordOnly
+        );
+        assert!(parameters[0].required);
+        assert_eq!(parameters[1].name.as_ref().map(Name::as_str), Some("pages"));
+        assert_eq!(
+            parameters[1].kind,
+            PluginConstructorParameterKind::KeywordOnly
+        );
+        assert!(!parameters[1].required);
+
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_project_index_is_passed_to_later_hooks() -> anyhow::Result<()> {
+        let mut db = TestDbBuilder::new().build()?;
+        db.write_dedented(
+            "/src/toy.py",
+            r#"
+            class Model: ...
+            "#,
+        )?;
+        db.write_dedented(
+            "/src/models.py",
+            r#"
+            import toy
+
+            def indexed_field():
+                return object()
+
+            class Model(toy.Model):
+                pass
+
+            def check(model: Model) -> None:
+                good: str = model.indexed
+                bad: int = model.indexed
+                call_good: str = indexed_field()
+                call_bad: int = indexed_field()
+            "#,
+        )?;
+
+        let plugin_id = "example.project-index".to_string();
+        db.register_semantic_plugin_executor(plugin_id.clone(), |request| match request {
+            protocol::PluginRequest::BuildProjectIndex(request) => {
+                assert!(
+                    request
+                        .classes
+                        .iter()
+                        .any(|class| class.qualified_name == "models.Model"),
+                    "project index should receive real project class summaries: {request:#?}"
+                );
+                Ok(protocol::PluginResponse::ProjectIndex(
+                    protocol::ProjectIndexResponse {
+                        plugin_index: serde_json::json!({ "member_type": "str" }),
+                        contributions: Vec::new(),
+                        virtual_types: Vec::new(),
+                        dependencies: Vec::new(),
+                        diagnostics: Vec::new(),
+                    },
+                ))
+            }
+            protocol::PluginRequest::AnalyzeClass(request) => {
+                assert_eq!(
+                    request
+                        .project_index
+                        .as_ref()
+                        .and_then(|index| index.get("member_type")),
+                    Some(&serde_json::json!("str"))
+                );
+                Ok(protocol::PluginResponse::ClassPatch(protocol::ClassPatch {
+                    fields: Vec::new(),
+                    class_members: Vec::new(),
+                    instance_members: Vec::new(),
+                    constructor: None,
+                    diagnostics: Vec::new(),
+                }))
+            }
+            protocol::PluginRequest::ResolveInstanceMember(request) => {
+                assert_eq!(
+                    request
+                        .project_index
+                        .as_ref()
+                        .and_then(|index| index.get("member_type")),
+                    Some(&serde_json::json!("str"))
+                );
+                Ok(protocol::PluginResponse::MemberPatch(
+                    protocol::MemberPatch {
+                        name: request.member_name.clone(),
+                        access: protocol::MemberAccessPatch::value(protocol::TypeExpr::annotation(
+                            "str",
+                        )),
+                        read_only: true,
+                        diagnostics: Vec::new(),
+                    },
+                ))
+            }
+            protocol::PluginRequest::AdjustCallReturn(request) => {
+                assert_eq!(
+                    request
+                        .project_index
+                        .as_ref()
+                        .and_then(|index| index.get("member_type")),
+                    Some(&serde_json::json!("str"))
+                );
+                Ok(protocol::PluginResponse::CallReturnPatch(
+                    protocol::CallReturnPatch {
+                        return_type: protocol::TypeExpr::annotation("str"),
+                        diagnostics: Vec::new(),
+                        result_metadata: None,
+                    },
+                ))
+            }
+            _ => Ok(protocol::PluginResponse::NoChange),
+        });
+        install_semantic_plugin(
+            &mut db,
+            SemanticPlugin::new(
+                plugin_id,
+                SemanticPluginRuntime::InProcess,
+                vec!["toy.Model".to_string()],
+                Vec::<SemanticPluginMemberClaim>::new(),
+                vec![SemanticPluginMemberClaim::new("models.Model", "indexed")],
+                Vec::<String>::new(),
+                vec!["models.indexed_field".to_string()],
+            )
+            .with_project_index_enabled(true),
+        );
+
+        let class = static_class_literal(&db, "/src/models.py", "Model");
+        let patch = class.plugin_class_transform_patch(&db);
+        assert!(patch.fields.is_empty());
+
+        let file = system_path_to_file(&db, "/src/models.py").expect("models.py");
+        let diagnostics = db.check_file(file);
+        let messages = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.primary_message())
+            .collect::<Vec<_>>();
+        assert!(
+            messages
+                .iter()
+                .filter(|message| message.contains("not assignable"))
+                .count()
+                >= 2,
+            "project-index-backed dynamic member and call hook should be typed as str: {messages:#?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_project_index_applies_constructor_contributions() -> anyhow::Result<()> {
+        let mut db = TestDbBuilder::new().build()?;
+        db.write_dedented(
+            "/src/models.py",
+            r#"
+            class Widget:
+                pass
+
+            def check() -> None:
+                Widget(name="ok")
+                Widget(name=1)
+            "#,
+        )?;
+
+        let plugin_id = "example.constructor-contribution".to_string();
+        db.register_semantic_plugin_executor(plugin_id.clone(), |request| match request {
+            protocol::PluginRequest::BuildProjectIndex(request) => {
+                assert!(
+                    request
+                        .classes
+                        .iter()
+                        .any(|class| class.qualified_name == "models.Widget"),
+                    "project index should receive Widget summary: {request:#?}"
+                );
+                Ok(protocol::PluginResponse::ProjectIndex(
+                    protocol::ProjectIndexResponse {
+                        plugin_index: serde_json::Value::Null,
+                        contributions: vec![protocol::Contribution {
+                            source: protocol::SymbolSource::default(),
+                            target: protocol::ContributionTarget::Constructor {
+                                qualified_name: "models.Widget".to_string(),
+                            },
+                            patch: protocol::ContributionPatch::Constructor(
+                                protocol::CallableSignature {
+                                    parameters: vec![protocol::Parameter {
+                                        name: Some("name".to_string()),
+                                        kind: protocol::ParameterKind::KeywordOnly,
+                                        type_expr: Some(protocol::TypeExpr::annotation("str")),
+                                        required: true,
+                                    }],
+                                    return_type: protocol::TypeExpr::annotation("None"),
+                                },
+                            ),
+                            conflict_key: "models.Widget.__init__".to_string(),
+                            diagnostics: Vec::new(),
+                        }],
+                        virtual_types: Vec::new(),
+                        dependencies: Vec::new(),
+                        diagnostics: Vec::new(),
+                    },
+                ))
+            }
+            _ => Ok(protocol::PluginResponse::NoChange),
+        });
+        install_semantic_plugin(
+            &mut db,
+            SemanticPlugin::new(
+                plugin_id,
+                SemanticPluginRuntime::InProcess,
+                Vec::<String>::new(),
+                Vec::<SemanticPluginMemberClaim>::new(),
+                Vec::<SemanticPluginMemberClaim>::new(),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .with_project_index_enabled(true),
+        );
+
+        let file = system_path_to_file(&db, "/src/models.py").expect("models.py");
+        let diagnostics = db.check_file(file);
+        let messages = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.primary_message())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages.len(),
+            1,
+            "constructor contribution should accept the good keyword call and reject only the bad value type: {messages:#?}"
+        );
+        assert!(
+            messages[0].contains("Argument is incorrect") || messages[0].contains("not assignable"),
+            "expected an argument type diagnostic, got {messages:#?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_project_index_applies_contributed_field_set_type() -> anyhow::Result<()> {
+        let mut db = TestDbBuilder::new().build()?;
+        db.write_dedented(
+            "/src/models.py",
+            r#"
+            class Target:
+                pass
+
+            def check(target: Target) -> None:
+                good_read: int = target.contributed
+                bad_read: str = target.contributed
+                target.contributed = "ok"
+                target.contributed = 1
+            "#,
+        )?;
+
+        let plugin_id = "example.field-contribution-set-type".to_string();
+        db.register_semantic_plugin_executor(plugin_id.clone(), |request| match request {
+            protocol::PluginRequest::BuildProjectIndex(request) => {
+                assert!(
+                    request
+                        .classes
+                        .iter()
+                        .any(|class| class.qualified_name == "models.Target"),
+                    "project index should receive Target summary: {request:#?}"
+                );
+                Ok(protocol::PluginResponse::ProjectIndex(
+                    protocol::ProjectIndexResponse {
+                        plugin_index: serde_json::Value::Null,
+                        contributions: vec![protocol::Contribution {
+                            source: protocol::SymbolSource::default(),
+                            target: protocol::ContributionTarget::Instance {
+                                qualified_name: "models.Target".to_string(),
+                            },
+                            patch: protocol::ContributionPatch::Field(protocol::FieldPatch {
+                                name: "contributed".to_string(),
+                                descriptor: None,
+                                instance_get_type: protocol::TypeExpr::annotation("int"),
+                                instance_set_type: Some(protocol::TypeExpr::annotation("str")),
+                                constructor_parameter: None,
+                                has_default: true,
+                            }),
+                            conflict_key: "models.Target.contributed".to_string(),
+                            diagnostics: Vec::new(),
+                        }],
+                        virtual_types: Vec::new(),
+                        dependencies: Vec::new(),
+                        diagnostics: Vec::new(),
+                    },
+                ))
+            }
+            _ => Ok(protocol::PluginResponse::NoChange),
+        });
+        install_semantic_plugin(
+            &mut db,
+            SemanticPlugin::new(
+                plugin_id,
+                SemanticPluginRuntime::InProcess,
+                Vec::<String>::new(),
+                Vec::<SemanticPluginMemberClaim>::new(),
+                Vec::<SemanticPluginMemberClaim>::new(),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .with_project_index_enabled(true),
+        );
+
+        let file = system_path_to_file(&db, "/src/models.py").expect("models.py");
+        let diagnostics = db.check_file(file);
+        let messages = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.primary_message())
+            .collect::<Vec<_>>();
+        assert!(
+            messages
+                .iter()
+                .filter(|message| message.contains("not assignable"))
+                .count()
+                >= 2,
+            "contributed field read type should be int and assignment type should be str: {messages:#?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_project_index_receives_static_settings_summaries() -> anyhow::Result<()> {
+        let mut db = TestDbBuilder::new().build()?;
+        db.write_dedented(
+            "/src/toy.py",
+            r#"
+            class Model: ...
+            "#,
+        )?;
+        db.write_dedented(
+            "/src/base_settings.py",
+            r#"
+            SHARED_APPS = ["shared"]
+            AUTH_MODEL = "accounts.User"
+            DB_ENGINE = "postgresql"
+            "#,
+        )?;
+        db.write_dedented(
+            "/src/minidjango_settings.py",
+            r#"
+            from base_settings import SHARED_APPS, AUTH_MODEL as IMPORTED_AUTH_USER_MODEL
+            import base_settings as base
+
+            BASE_APPS = SHARED_APPS + ["library"]
+            EXTRA_APPS = ["accounts"]
+            INSTALLED_APPS = BASE_APPS + EXTRA_APPS
+            AUTH_USER_MODEL = IMPORTED_AUTH_USER_MODEL
+            MINIDJANGO_PK_TYPE = "u" + "uid"
+            FEATURE_ENABLED: bool = True
+            RETRY_CODES = (1,) + (2,)
+            MAX_RETRIES = 1 + 2
+            DATABASES = {"default": {"ENGINE": base.DB_ENGINE}}
+            TIME_ZONE = build_timezone()
+            helper_name = "ignored"
+            "#,
+        )?;
+        db.write_dedented(
+            "/src/models.py",
+            r#"
+            import toy
+
+            class Model(toy.Model):
+                pass
+            "#,
+        )?;
+
+        let plugin_id = "example.settings-index".to_string();
+        db.register_semantic_plugin_executor(plugin_id.clone(), |request| match request {
+            protocol::PluginRequest::BuildProjectIndex(request) => {
+                assert_eq!(
+                    request.context.config["strict_settings"],
+                    serde_json::json!(false)
+                );
+                let settings = request
+                    .settings
+                    .iter()
+                    .find(|settings| settings.module == "minidjango_settings")
+                    .unwrap_or_else(|| panic!("expected settings summary: {request:#?}"));
+                assert_eq!(
+                    settings
+                        .values
+                        .iter()
+                        .map(|value| value.name.as_str())
+                        .collect::<Vec<_>>(),
+                    [
+                        "BASE_APPS",
+                        "EXTRA_APPS",
+                        "INSTALLED_APPS",
+                        "AUTH_USER_MODEL",
+                        "MINIDJANGO_PK_TYPE",
+                        "FEATURE_ENABLED",
+                        "RETRY_CODES",
+                        "MAX_RETRIES",
+                        "DATABASES"
+                    ]
+                );
+                let setting_value = |name: &str| {
+                    settings
+                        .values
+                        .iter()
+                        .find(|value| value.name == name)
+                        .unwrap_or_else(|| panic!("expected setting `{name}`: {settings:#?}"))
+                        .value
+                        .clone()
+                };
+                assert_eq!(
+                    setting_value("INSTALLED_APPS"),
+                    protocol::LiteralValue::List {
+                        items: vec![
+                            protocol::LiteralValue::Str {
+                                value: "shared".to_string()
+                            },
+                            protocol::LiteralValue::Str {
+                                value: "library".to_string()
+                            },
+                            protocol::LiteralValue::Str {
+                                value: "accounts".to_string()
+                            }
+                        ]
+                    }
+                );
+                assert_eq!(
+                    setting_value("AUTH_USER_MODEL"),
+                    protocol::LiteralValue::Str {
+                        value: "accounts.User".to_string()
+                    }
+                );
+                assert_eq!(
+                    setting_value("MINIDJANGO_PK_TYPE"),
+                    protocol::LiteralValue::Str {
+                        value: "uuid".to_string()
+                    }
+                );
+                assert_eq!(
+                    setting_value("FEATURE_ENABLED"),
+                    protocol::LiteralValue::Bool { value: true }
+                );
+                assert_eq!(
+                    setting_value("RETRY_CODES"),
+                    protocol::LiteralValue::Tuple {
+                        items: vec![
+                            protocol::LiteralValue::Int { value: 1 },
+                            protocol::LiteralValue::Int { value: 2 }
+                        ]
+                    }
+                );
+                assert_eq!(
+                    setting_value("MAX_RETRIES"),
+                    protocol::LiteralValue::Int { value: 3 }
+                );
+                assert_eq!(
+                    setting_value("DATABASES"),
+                    protocol::LiteralValue::Dict {
+                        entries: vec![protocol::LiteralDictEntry {
+                            key: protocol::LiteralValue::Str {
+                                value: "default".to_string()
+                            },
+                            value: protocol::LiteralValue::Dict {
+                                entries: vec![protocol::LiteralDictEntry {
+                                    key: protocol::LiteralValue::Str {
+                                        value: "ENGINE".to_string()
+                                    },
+                                    value: protocol::LiteralValue::Str {
+                                        value: "postgresql".to_string()
+                                    }
+                                }]
+                            }
+                        }]
+                    }
+                );
+                assert_eq!(settings.dependencies.len(), 2);
+                assert!(
+                    settings
+                        .dependencies
+                        .iter()
+                        .any(|dependency| dependency.path.ends_with("/src/base_settings.py"))
+                );
+                assert!(
+                    settings
+                        .dependencies
+                        .iter()
+                        .any(|dependency| dependency.path.ends_with("/src/minidjango_settings.py"))
+                );
+                let [unsupported] = settings.diagnostics.as_slice() else {
+                    panic!("expected unsupported setting diagnostic: {settings:#?}");
+                };
+                assert_eq!(unsupported.id, "ty.settings.unsupported-value");
+                assert_eq!(unsupported.severity, protocol::DiagnosticSeverity::Warning);
+                assert!(unsupported.location.is_some());
+
+                let missing = request
+                    .settings
+                    .iter()
+                    .find(|settings| settings.module == "missing_settings")
+                    .unwrap_or_else(|| panic!("expected missing settings summary: {request:#?}"));
+                let [missing_diagnostic] = missing.diagnostics.as_slice() else {
+                    panic!("expected missing settings diagnostic: {missing:#?}");
+                };
+                assert_eq!(missing_diagnostic.id, "ty.settings.module-not-found");
+                assert_eq!(
+                    missing_diagnostic.severity,
+                    protocol::DiagnosticSeverity::Warning
+                );
+
+                Ok(protocol::PluginResponse::ProjectIndex(
+                    protocol::ProjectIndexResponse {
+                        plugin_index: serde_json::json!({ "pk_type": "uuid" }),
+                        contributions: Vec::new(),
+                        virtual_types: Vec::new(),
+                        dependencies: Vec::new(),
+                        diagnostics: Vec::new(),
+                    },
+                ))
+            }
+            protocol::PluginRequest::AnalyzeClass(request) => {
+                assert_eq!(
+                    request
+                        .project_index
+                        .as_ref()
+                        .and_then(|index| index.get("pk_type")),
+                    Some(&serde_json::json!("uuid"))
+                );
+                Ok(protocol::PluginResponse::ClassPatch(protocol::ClassPatch {
+                    fields: Vec::new(),
+                    class_members: Vec::new(),
+                    instance_members: Vec::new(),
+                    constructor: None,
+                    diagnostics: Vec::new(),
+                }))
+            }
+            _ => Ok(protocol::PluginResponse::NoChange),
+        });
+        install_semantic_plugin(
+            &mut db,
+            SemanticPlugin::new(
+                plugin_id,
+                SemanticPluginRuntime::InProcess,
+                vec!["toy.Model".to_string()],
+                Vec::<SemanticPluginMemberClaim>::new(),
+                Vec::<SemanticPluginMemberClaim>::new(),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .with_settings_module_claims(vec![
+                "minidjango_settings".to_string(),
+                "missing_settings".to_string(),
+            ])
+            .with_project_index_enabled(true),
+        );
+
+        let class = static_class_literal(&db, "/src/models.py", "Model");
+        let patch = class.plugin_class_transform_patch(&db);
+        assert!(patch.fields.is_empty());
+
+        let settings_file =
+            system_path_to_file(&db, "/src/minidjango_settings.py").expect("settings file");
+        let diagnostics = db.check_file(settings_file);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| {
+                diagnostic
+                    .primary_message()
+                    .contains("is not a supported static literal")
+            })
+            .unwrap_or_else(|| panic!("expected settings diagnostic: {diagnostics:#?}"));
+        assert_eq!(diagnostic.severity(), Severity::Warning);
+
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_project_index_strict_settings_promotes_settings_diagnostics() -> anyhow::Result<()>
+    {
+        let mut db = TestDbBuilder::new().build()?;
+        db.write_dedented(
+            "/src/minidjango_settings.py",
+            r#"
+            INSTALLED_APPS = ["library"]
+            TIME_ZONE = build_timezone()
+            "#,
+        )?;
+
+        let plugin_id = "example.strict-settings-index".to_string();
+        db.register_semantic_plugin_executor(plugin_id.clone(), |request| match request {
+            protocol::PluginRequest::BuildProjectIndex(request) => {
+                assert_eq!(
+                    request.context.config["strict_settings"],
+                    serde_json::json!(true)
+                );
+
+                let settings = request
+                    .settings
+                    .iter()
+                    .find(|settings| settings.module == "minidjango_settings")
+                    .unwrap_or_else(|| panic!("expected settings summary: {request:#?}"));
+                let [unsupported] = settings.diagnostics.as_slice() else {
+                    panic!("expected unsupported setting diagnostic: {settings:#?}");
+                };
+                assert_eq!(unsupported.id, "ty.settings.unsupported-value");
+                assert_eq!(unsupported.severity, protocol::DiagnosticSeverity::Error);
+
+                let missing = request
+                    .settings
+                    .iter()
+                    .find(|settings| settings.module == "missing_settings")
+                    .unwrap_or_else(|| panic!("expected missing settings summary: {request:#?}"));
+                let [missing_diagnostic] = missing.diagnostics.as_slice() else {
+                    panic!("expected missing settings diagnostic: {missing:#?}");
+                };
+                assert_eq!(missing_diagnostic.id, "ty.settings.module-not-found");
+                assert_eq!(
+                    missing_diagnostic.severity,
+                    protocol::DiagnosticSeverity::Error
+                );
+
+                Ok(protocol::PluginResponse::ProjectIndex(
+                    protocol::ProjectIndexResponse {
+                        plugin_index: serde_json::Value::Null,
+                        contributions: Vec::new(),
+                        virtual_types: Vec::new(),
+                        dependencies: Vec::new(),
+                        diagnostics: Vec::new(),
+                    },
+                ))
+            }
+            _ => Ok(protocol::PluginResponse::NoChange),
+        });
+        install_semantic_plugin(
+            &mut db,
+            SemanticPlugin::new(
+                plugin_id,
+                SemanticPluginRuntime::InProcess,
+                Vec::<String>::new(),
+                Vec::<SemanticPluginMemberClaim>::new(),
+                Vec::<SemanticPluginMemberClaim>::new(),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .with_settings_module_claims(vec![
+                "minidjango_settings".to_string(),
+                "missing_settings".to_string(),
+            ])
+            .with_strict_settings(true)
+            .with_project_index_enabled(true),
+        );
+
+        let settings_file =
+            system_path_to_file(&db, "/src/minidjango_settings.py").expect("settings file");
+        let diagnostics = db.check_file(settings_file);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| {
+                diagnostic
+                    .primary_message()
+                    .contains("is not a supported static literal")
+            })
+            .unwrap_or_else(|| panic!("expected settings diagnostic: {diagnostics:#?}"));
+        assert_eq!(diagnostic.severity(), Severity::Error);
+
+        Ok(())
+    }
+
+    #[test]
+    fn class_transform_preserves_distinct_field_get_set_and_constructor_types() -> anyhow::Result<()>
+    {
+        let mut db = TestDbBuilder::new().build()?;
+        db.write_dedented(
+            "/src/models.py",
+            r#"
+            class Model: ...
+            "#,
+        )?;
+        let class = static_class_literal(&db, "/src/models.py", "Model");
+        let response = protocol::PluginResponse::ClassPatch(protocol::ClassPatch {
+            fields: vec![protocol::FieldPatch {
+                name: "field".to_string(),
+                descriptor: Some(protocol::MemberAccessPatch::Descriptor {
+                    class_type: Some(protocol::TypeExpr::annotation("object")),
+                    instance_get_type: protocol::TypeExpr::annotation("int"),
+                    instance_set_type: Some(protocol::TypeExpr::annotation("str")),
+                }),
+                instance_get_type: protocol::TypeExpr::annotation("int"),
+                instance_set_type: Some(protocol::TypeExpr::annotation("str")),
+                constructor_parameter: Some(protocol::Parameter {
+                    name: Some("field".to_string()),
+                    kind: protocol::ParameterKind::KeywordOnly,
+                    type_expr: None,
+                    required: true,
+                }),
+                has_default: false,
+            }],
+            class_members: vec![protocol::MemberPatch {
+                name: "self_class_member".to_string(),
+                access: protocol::MemberAccessPatch::value(protocol::TypeExpr::annotation("Self")),
+                read_only: false,
+                diagnostics: Vec::new(),
+            }],
+            instance_members: vec![protocol::MemberPatch {
+                name: "self_instance_member".to_string(),
+                access: protocol::MemberAccessPatch::value(protocol::TypeExpr::annotation(
+                    "list[Self]",
+                )),
+                read_only: false,
+                diagnostics: Vec::new(),
+            }],
+            constructor: Some(protocol::CallableSignature {
+                parameters: vec![protocol::Parameter {
+                    name: Some("self_value".to_string()),
+                    kind: protocol::ParameterKind::KeywordOnly,
+                    type_expr: Some(protocol::TypeExpr::annotation("Self")),
+                    required: false,
+                }],
+                return_type: protocol::TypeExpr::annotation("None"),
+            }),
+            diagnostics: Vec::new(),
+        });
+        let mut fields = Vec::new();
+        let mut class_members = Vec::new();
+        let mut instance_members = Vec::new();
+        let mut constructor = None;
+
+        merge_plugin_class_response(
+            &db,
+            class,
+            response,
+            &[],
+            &mut fields,
+            &mut class_members,
+            &mut instance_members,
+            &mut constructor,
+        );
+
+        let [field] = fields.as_slice() else {
+            panic!("expected one field patch");
+        };
+        assert_eq!(
+            field
+                .descriptor_class_ty
+                .expect("class descriptor type")
+                .display(&db)
+                .to_string(),
+            "object"
+        );
+        assert_eq!(field.instance_get_ty.display(&db).to_string(), "int");
+        assert_eq!(
+            field
+                .instance_set_ty
+                .expect("set type")
+                .display(&db)
+                .to_string(),
+            "str"
+        );
+        let parameter = plugin_field_constructor_parameter(field).expect("constructor parameter");
+        assert_eq!(parameter.annotated_type().display(&db).to_string(), "str");
+
+        let [class_member] = class_members.as_slice() else {
+            panic!("expected one class member");
+        };
+        assert_eq!(class_member.ty.display(&db).to_string(), "Model");
+        let [instance_member] = instance_members.as_slice() else {
+            panic!("expected one instance member");
+        };
+        assert_eq!(instance_member.ty.display(&db).to_string(), "list[Model]");
+        let constructor = constructor.as_ref().expect("constructor patch");
+        let [constructor_parameter] = constructor.parameters.as_ref() else {
+            panic!("expected one constructor parameter");
+        };
+        assert_eq!(constructor_parameter.ty.display(&db).to_string(), "Model");
+
+        Ok(())
+    }
+
+    #[test]
+    fn plugin_field_assignment_uses_instance_set_type() -> anyhow::Result<()> {
+        let mut db = TestDbBuilder::new().build()?;
+        db.write_dedented(
+            "/src/models.py",
+            r#"
+            class Base: ...
+
+            def field_factory() -> int:
+                return 1
+
+            class Model(Base):
+                value = field_factory()
+
+            class Child(Model): ...
+
+            def check(model: Model, child: Child) -> None:
+                model.value = "ok"
+                model.value = 1
+                child.value = "child"
+                child.value = 2
+            "#,
+        )?;
+
+        db.register_semantic_plugin_executor("example.assignment".to_string(), |request| {
+            let protocol::PluginRequest::AnalyzeClass(request) = request else {
+                return Ok(protocol::PluginResponse::NoChange);
+            };
+            if request.class.qualified_name != "models.Model" {
+                return Ok(protocol::PluginResponse::NoChange);
+            }
+
+            Ok(protocol::PluginResponse::ClassPatch(protocol::ClassPatch {
+                fields: vec![
+                    protocol::FieldPatch {
+                        name: "value".to_string(),
+                        descriptor: Some(protocol::MemberAccessPatch::Descriptor {
+                            class_type: Some(protocol::TypeExpr::annotation("int")),
+                            instance_get_type: protocol::TypeExpr::annotation("int"),
+                            instance_set_type: Some(protocol::TypeExpr::annotation("str")),
+                        }),
+                        instance_get_type: protocol::TypeExpr::annotation("int"),
+                        instance_set_type: Some(protocol::TypeExpr::annotation("str")),
+                        constructor_parameter: None,
+                        has_default: true,
+                    },
+                    protocol::FieldPatch {
+                        name: "virtual".to_string(),
+                        descriptor: Some(protocol::MemberAccessPatch::Descriptor {
+                            class_type: Some(protocol::TypeExpr::annotation("object")),
+                            instance_get_type: protocol::TypeExpr::annotation("int"),
+                            instance_set_type: Some(protocol::TypeExpr::annotation("str")),
+                        }),
+                        instance_get_type: protocol::TypeExpr::annotation("int"),
+                        instance_set_type: Some(protocol::TypeExpr::annotation("str")),
+                        constructor_parameter: None,
+                        has_default: true,
+                    },
+                ],
+                class_members: Vec::new(),
+                instance_members: Vec::new(),
+                constructor: None,
+                diagnostics: Vec::new(),
+            }))
+        });
+        install_semantic_plugin(
+            &mut db,
+            SemanticPlugin::new(
+                "example.assignment".to_string(),
+                SemanticPluginRuntime::InProcess,
+                vec!["models.Base".to_string()],
+                Vec::<SemanticPluginMemberClaim>::new(),
+                Vec::<SemanticPluginMemberClaim>::new(),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            ),
+        );
+
+        let class = static_class_literal(&db, "/src/models.py", "Model");
+        let field = class
+            .plugin_class_transform_patch(&db)
+            .fields
+            .iter()
+            .find(|field| field.name.as_str() == "value")
+            .expect("plugin field");
+        assert_eq!(field.instance_get_ty.display(&db).to_string(), "int");
+        assert_eq!(
+            field
+                .instance_set_ty
+                .expect("set type")
+                .display(&db)
+                .to_string(),
+            "str"
+        );
+        assert_eq!(
+            class
+                .class_member(&db, "virtual", MemberLookupPolicy::default())
+                .place
+                .raw_type()
+                .expect("virtual class descriptor")
+                .display(&db)
+                .to_string(),
+            "object"
+        );
+        let child = static_class_literal(&db, "/src/models.py", "Child");
+        assert_eq!(
+            child
+                .class_member(&db, "virtual", MemberLookupPolicy::default())
+                .place
+                .raw_type()
+                .expect("inherited virtual class descriptor")
+                .display(&db)
+                .to_string(),
+            "object"
+        );
+
+        let file = system_path_to_file(&db, "/src/models.py").expect("models.py");
+        let diagnostics = db.check_file(file);
+        let messages = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.primary_message())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages.len(),
+            2,
+            "string assignments should pass and int assignments should fail on the base and subclass: {messages:#?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.contains("not assignable")),
+            "expected an assignment diagnostic, got {messages:#?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn minidjango_plugin_transforms_real_class_summary_through_semantic_hooks() -> anyhow::Result<()>
+    {
+        let mut db = TestDbBuilder::new().build()?;
+        db.write_dedented(
+            "/src/minidjango.py",
+            r#"
+            from typing import Generic, TypeVar
+
+            T = TypeVar("T")
+            Row = TypeVar("Row")
+
+            class Model: ...
+            class QuerySet(Generic[T, Row]):
+                def filter(self, **kwargs): ...
+                def get(self, **kwargs): ...
+                def get_or_create(self, **kwargs): ...
+                def first(self): ...
+                def count(self): ...
+                def exists(self): ...
+                def values(self, *fields): ...
+                def values_list(self, *fields, flat: bool = False, named: bool = False): ...
+                def annotate(self, **kwargs): ...
+            class Manager(Generic[T]):
+                def filter(self, **kwargs): ...
+                def get(self, **kwargs): ...
+                def get_or_create(self, **kwargs): ...
+                def first(self): ...
+                def count(self): ...
+                def exists(self): ...
+                def values(self, *fields): ...
+                def values_list(self, *fields, flat: bool = False, named: bool = False): ...
+                def annotate(self, **kwargs): ...
+            def CharField(*, max_length: int, null: bool = False): ...
+            def IntegerField(*, null: bool = False): ...
+            def ForeignKey(to, *, null: bool = False, related_name = None): ...
+            "#,
+        )?;
+        db.write_dedented(
+            "/src/library.py",
+            r#"
+            import minidjango
+
+            class Author(minidjango.Model):
+                name = minidjango.CharField(max_length=100)
+            "#,
+        )?;
+        db.write_dedented(
+            "/src/accounts.py",
+            r#"
+            import minidjango
+
+            class User(minidjango.Model):
+                username = minidjango.CharField(max_length=100)
+            "#,
+        )?;
+        db.write_dedented(
+            "/src/minidjango_settings.py",
+            r#"
+            AUTH_USER_MODEL = "accounts.User"
+            "#,
+        )?;
+        db.write_dedented(
+            "/src/models.py",
+            r#"
+            from typing import TypedDict
+
+            import minidjango
+            import library
+            import accounts
+            import minidjango_settings
+
+            class BookManager: ...
+
+            class BookValueRow(TypedDict):
+                title: str
+                pages: int | None
+
+            class BookTitleRow(TypedDict):
+                title: str
+
+            class Book(minidjango.Model):
+                title = minidjango.CharField(max_length=200)
+                pages = minidjango.IntegerField(null=True)
+                author = minidjango.ForeignKey("library.Author", related_name="books")
+                alternate_author = minidjango.ForeignKey("library.Author", null=True, related_name="books")
+                parent = minidjango.ForeignKey("self", null=True, related_name="children")
+                missing_author = minidjango.ForeignKey("library.Missing", null=True, related_name="missing_books")
+                owner = minidjango.ForeignKey(minidjango_settings.AUTH_USER_MODEL, null=True, related_name="owned_books")
+                published = BookManager()
+
+            def check(a: library.Author, b: Book, u: accounts.User) -> None:
+                Book(title="ok", author=a)
+                Book(title=123, author=a)
+                Book(title="ok", author=b)
+                default_manager: minidjango.Manager[Book] = Book._default_manager
+                bad_default_manager: minidjango.Manager[library.Author] = Book._default_manager
+                custom_manager: minidjango.Manager[Book] = Book.published
+                bad_custom_manager: minidjango.Manager[library.Author] = Book.published
+                books: minidjango.QuerySet[Book, Book] = Book.objects.filter(title="ok")
+                bad_books: minidjango.QuerySet[library.Author, library.Author] = Book.objects.filter(title="ok")
+                published_books: minidjango.QuerySet[Book, Book] = Book.published.filter(title="ok")
+                bad_published_books: minidjango.QuerySet[library.Author, library.Author] = Book.published.filter(title="ok")
+                chained_books: minidjango.QuerySet[Book, Book] = Book.objects.filter(title="ok").filter(pages=1)
+                bad_chained_books: minidjango.QuerySet[library.Author, library.Author] = Book.objects.filter(title="ok").filter(pages=1)
+                exact_books: minidjango.QuerySet[Book, Book] = Book.objects.filter(title__exact="ok")
+                iexact_books: minidjango.QuerySet[Book, Book] = Book.objects.filter(title__iexact="ok")
+                contains_books: minidjango.QuerySet[Book, Book] = Book.objects.filter(title__contains="ok")
+                regex_books: minidjango.QuerySet[Book, Book] = Book.objects.filter(title__regex="^ok")
+                iregex_books: minidjango.QuerySet[Book, Book] = Book.objects.filter(title__iregex="^ok")
+                nullable_books: minidjango.QuerySet[Book, Book] = Book.objects.filter(pages__isnull=True)
+                range_books: minidjango.QuerySet[Book, Book] = Book.objects.filter(pages__range=(1, 10))
+                author_named_books: minidjango.QuerySet[Book, Book] = Book.objects.filter(author__name="Ada")
+                owner_named_books: minidjango.QuerySet[Book, Book] = Book.objects.filter(owner__username="kev")
+                Book.objects.filter(missing="bad")
+                Book.objects.get(title__year="bad")
+                Book.objects.filter(author__missing="bad")
+                value_rows: minidjango.QuerySet[Book, BookValueRow] = Book.objects.values("title", "pages")
+                bad_value_rows: minidjango.QuerySet[Book, dict[str, int]] = Book.objects.values("title", "pages")
+                chained_value_rows: minidjango.QuerySet[Book, BookTitleRow] = Book.objects.values("title").filter(author__name="Ada")
+                bad_chained_value_rows: minidjango.QuerySet[Book, dict[str, int]] = Book.objects.values("title").filter(author__name="Ada")
+                Book.objects.values("missing")
+                title_rows: minidjango.QuerySet[Book, str] = Book.objects.values_list("title", flat=True)
+                bad_title_rows: minidjango.QuerySet[Book, int] = Book.objects.values_list("title", flat=True)
+                page_rows: minidjango.QuerySet[Book, int | None] = Book.objects.values_list("pages", flat=True)
+                bad_page_rows: minidjango.QuerySet[Book, str] = Book.objects.values_list("pages", flat=True)
+                title_page_rows: minidjango.QuerySet[Book, tuple[str, int | None]] = Book.objects.values_list("title", "pages")
+                bad_title_page_rows: minidjango.QuerySet[Book, tuple[int, str]] = Book.objects.values_list("title", "pages")
+                chained_title_rows: minidjango.QuerySet[Book, str] = Book.objects.values_list("title", flat=True).filter(pages=1)
+                bad_chained_title_rows: minidjango.QuerySet[Book, int] = Book.objects.values_list("title", flat=True).filter(pages=1)
+                chained_title_page_rows: minidjango.QuerySet[Book, tuple[str, int | None]] = Book.objects.values_list("title", "pages").filter(title="ok")
+                bad_chained_title_page_rows: minidjango.QuerySet[Book, tuple[int, str]] = Book.objects.values_list("title", "pages").filter(title="ok")
+                named_title_value: str = Book.objects.values_list("title", named=True).get().title
+                bad_named_title_value: int = Book.objects.values_list("title", named=True).get().title
+                chained_named_page_value: int | None = Book.objects.values_list("title", "pages", named=True).filter(title="ok").get().pages
+                bad_chained_named_page_value: str = Book.objects.values_list("title", "pages", named=True).filter(title="ok").get().pages
+                Book.objects.values_list("missing", flat=True)
+                book: Book = Book.objects.get(title="ok")
+                bad_author: library.Author = Book.objects.get(title="ok")
+                created: tuple[Book, bool] = Book.objects.get_or_create(title="ok")
+                bad_created: tuple[library.Author, bool] = Book.objects.get_or_create(title="ok")
+                default_book: Book = Book._default_manager.get(title="ok")
+                bad_default_author: library.Author = Book._default_manager.get(title="ok")
+                queryset_book: Book = Book.objects.filter(title="ok").get(pages=1)
+                bad_queryset_author: library.Author = Book.objects.filter(title="ok").get(pages=1)
+                queryset_created: tuple[Book, bool] = Book.objects.filter(title="ok").get_or_create(pages=1)
+                bad_queryset_created: tuple[library.Author, bool] = Book.objects.filter(title="ok").get_or_create(pages=1)
+                maybe_book: Book | None = Book.objects.first()
+                title_value: str = Book.objects.values_list("title", flat=True).get()
+                bad_title_value: int = Book.objects.values_list("title", flat=True).get()
+                maybe_title: str | None = Book.objects.values_list("title", flat=True).first()
+                bad_maybe_title: int = Book.objects.values_list("title", flat=True).first()
+                title_page_value: tuple[str, int | None] = Book.objects.values_list("title", "pages").get()
+                bad_title_page_value: tuple[str, int] = Book.objects.values_list("title", "pages").get()
+                maybe_title_page: tuple[str, int | None] | None = Book.objects.values_list("title", "pages").first()
+                bad_maybe_title_page: tuple[str, int] = Book.objects.values_list("title", "pages").first()
+                value_row: BookTitleRow = Book.objects.values("title").get()
+                bad_value_row: dict[str, int] = Book.objects.values("title").get()
+                maybe_value_row: BookTitleRow | None = Book.objects.values("title").first()
+                bad_maybe_value_row: dict[str, int] = Book.objects.values("title").first()
+                all_value_title: str = Book.objects.values().get()["title"]
+                bad_all_value_title: int = Book.objects.values().get()["title"]
+                all_named_title: str = Book.objects.values_list(named=True).get().title
+                bad_all_named_title: int = Book.objects.values_list(named=True).get().title
+                queryset_count: int = Book.objects.filter(title="ok").count()
+                bad_queryset_count: str = Book.objects.filter(title="ok").count()
+                queryset_exists: bool = Book.objects.filter(title="ok").exists()
+                bad_queryset_exists: str = Book.objects.filter(title="ok").exists()
+                annotated_book: Book = Book.objects.annotate(score=1).get()
+                bad_annotated_author: library.Author = Book.objects.annotate(score=1).get()
+                annotated_score: int = Book.objects.annotate(score=1).get().score
+                bad_annotated_score: str = Book.objects.annotate(score=1).get().score
+                chained_annotated_score: int = Book.objects.filter(title="ok").annotate(score=1).filter(pages=1).get().score
+                bad_chained_annotated_score: str = Book.objects.filter(title="ok").annotate(score=1).filter(pages=1).get().score
+                books_from_author: minidjango.Manager[Book] = a.books
+                bad_reverse: minidjango.Manager[library.Author] = a.books
+                children: minidjango.Manager[Book] = b.children
+                bad_children: minidjango.Manager[library.Author] = b.children
+                owned_books: minidjango.Manager[Book] = u.owned_books
+                bad_owned_books: minidjango.Manager[library.Author] = u.owned_books
+            "#,
+        )?;
+
+        let sdk_plugin = MiniDjangoPlugin;
+        let plugin_id = sdk_plugin.manifest().id;
+        db.register_semantic_plugin_executor(plugin_id.clone(), move |request| {
+            Ok(sdk_plugin.handle(request))
+        });
+        install_semantic_plugin(
+            &mut db,
+            SemanticPlugin::new(
+                plugin_id,
+                SemanticPluginRuntime::InProcess,
+                vec![minidjango::MODEL_BASE.to_string()],
+                Vec::<SemanticPluginMemberClaim>::new(),
+                Vec::<SemanticPluginMemberClaim>::new(),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .with_call_method_on_subclass_claims(
+                Vec::<SemanticPluginMethodClaim>::new(),
+                vec![
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::MANAGER_BASE, "filter"),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::MANAGER_BASE, "get"),
+                    SemanticPluginMethodClaim::on_subclass_of(
+                        minidjango::MANAGER_BASE,
+                        "get_or_create",
+                    ),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::MANAGER_BASE, "first"),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::MANAGER_BASE, "count"),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::MANAGER_BASE, "exists"),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::MANAGER_BASE, "values"),
+                    SemanticPluginMethodClaim::on_subclass_of(
+                        minidjango::MANAGER_BASE,
+                        "values_list",
+                    ),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::MANAGER_BASE, "annotate"),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::QUERYSET_BASE, "filter"),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::QUERYSET_BASE, "get"),
+                    SemanticPluginMethodClaim::on_subclass_of(
+                        minidjango::QUERYSET_BASE,
+                        "get_or_create",
+                    ),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::QUERYSET_BASE, "first"),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::QUERYSET_BASE, "count"),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::QUERYSET_BASE, "exists"),
+                    SemanticPluginMethodClaim::on_subclass_of(minidjango::QUERYSET_BASE, "values"),
+                    SemanticPluginMethodClaim::on_subclass_of(
+                        minidjango::QUERYSET_BASE,
+                        "values_list",
+                    ),
+                    SemanticPluginMethodClaim::on_subclass_of(
+                        minidjango::QUERYSET_BASE,
+                        "annotate",
+                    ),
+                ],
+            )
+            .with_settings_module_claims(vec!["minidjango_settings".to_string()])
+            .with_project_index_enabled(true),
+        );
+
+        let class = static_class_literal(&db, "/src/models.py", "Book");
+        let patch = class.plugin_class_transform_patch(&db);
+
+        let field_type = |name: &str| {
+            patch
+                .fields
+                .iter()
+                .find(|field| field.name.as_str() == name)
+                .unwrap_or_else(|| panic!("expected field `{name}`"))
+                .instance_get_ty
+                .display(&db)
+                .to_string()
+        };
+
+        assert_eq!(field_type("id"), "int");
+        assert_eq!(field_type("pk"), "int");
+        assert_eq!(field_type("title"), "str");
+        assert_eq!(field_type("pages"), "int | None");
+        assert_eq!(field_type("author"), "Author");
+        assert_eq!(field_type("author_id"), "int");
+        assert_eq!(field_type("parent"), "Book | None");
+        assert_eq!(field_type("parent_id"), "int | None");
+        assert_eq!(field_type("owner"), "User | None");
+        assert_eq!(field_type("owner_id"), "int | None");
+
+        let manager_type = |name: &str| {
+            patch
+                .class_members
+                .iter()
+                .find(|member| member.name.as_str() == name)
+                .unwrap_or_else(|| panic!("expected `{name}` manager"))
+                .ty
+                .display(&db)
+                .to_string()
+        };
+        assert_eq!(manager_type("objects"), "Manager");
+        assert_eq!(manager_type("_default_manager"), "Manager");
+        assert_eq!(manager_type("published"), "Manager");
+
+        let file = system_path_to_file(&db, "/src/models.py").expect("models.py");
+        let diagnostics = db.check_file(file);
+        let messages = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.primary_message())
+            .collect::<Vec<_>>();
+        assert!(
+            messages
+                .iter()
+                .any(|message| *message == "Argument is incorrect"),
+            "the valid plugin constructor call should pass and the bad title type should fail: {messages:#?}"
+        );
+        assert!(
+            messages.len() >= 3,
+            "constructor, manager return hooks, and reverse relation contributions should produce focused failures: {messages:#?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .filter(|message| message.contains("not assignable"))
+                .count()
+                >= 14,
+            "manager receiver return hooks and reverse relation contributions should make bad assignments fail: {messages:#?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .filter(|message| message.contains("Unknown Mini-Django lookup"))
+                .count()
+                >= 3,
+            "bad direct, unsupported transformed, and values_list lookups should produce plugin diagnostics: {messages:#?}"
+        );
+        assert!(
+            messages.iter().any(|message| *message
+                == "Conflicting Mini-Django reverse relation `library.Author.books`"),
+            "duplicate reverse relation names should produce a project-index diagnostic: {messages:#?}"
+        );
+        assert!(
+            messages.iter().any(|message| *message
+                == "Unknown Mini-Django relation target `library.Missing` for field `models.Book.missing_author`"),
+            "bad relation targets should produce a project-index diagnostic at the field source: {messages:#?}"
+        );
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.contains("title__exact")),
+            "the supported field__exact lookup should not produce a plugin diagnostic: {messages:#?}"
+        );
+        let unknown_lookup_messages = messages
+            .iter()
+            .filter(|message| message.contains("Unknown Mini-Django lookup"))
+            .collect::<Vec<_>>();
+        assert!(
+            !unknown_lookup_messages.iter().any(|message| {
+                message.contains("title__contains")
+                    || message.contains("pages__isnull")
+                    || message.contains("author__name")
+                    || message.contains("owner__username")
+            }),
+            "supported terminal and relation lookups should not produce plugin diagnostics: {messages:#?}"
+        );
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.contains("No parameter named")),
+            "valid plugin constructor keywords should not be rejected: {messages:#?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn minidjango_fixture_harness_runs_through_semantic_hooks() -> anyhow::Result<()> {
+        let mut db = TestDbBuilder::new().build()?;
+        write_minidjango_harness(&mut db)?;
+        install_minidjango_plugin(&mut db);
+        let annotate_returns = Arc::new(Mutex::new(Vec::new()));
+        {
+            let annotate_returns = Arc::clone(&annotate_returns);
+            let sdk_plugin = MiniDjangoPlugin;
+            let plugin_id = sdk_plugin.manifest().id;
+            db.register_semantic_plugin_executor(plugin_id, move |request| {
+                let response = sdk_plugin.handle(request);
+                if let protocol::PluginRequest::AdjustCallReturn(call) = request
+                    && call.callee.expression.ends_with(".annotate")
+                {
+                    let return_expression = match &response {
+                        protocol::PluginResponse::CallReturnPatch(patch) => {
+                            patch.return_type.expression.clone()
+                        }
+                        _ => "<no change>".to_string(),
+                    };
+                    annotate_returns.lock().unwrap().push(return_expression);
+                }
+                Ok(response)
+            });
+        }
+
+        let class = static_class_literal(&db, "/src/models.py", "Book");
+        let patch = class.plugin_class_transform_patch(&db);
+
+        let field_type = |name: &str| {
+            patch
+                .fields
+                .iter()
+                .find(|field| field.name.as_str() == name)
+                .unwrap_or_else(|| panic!("expected field `{name}`"))
+                .instance_get_ty
+                .display(&db)
+                .to_string()
+        };
+        assert_eq!(field_type("title"), "str");
+        assert_eq!(field_type("pages"), "int | None");
+        assert_eq!(field_type("owner"), "User | None");
+        assert_eq!(field_type("owner_id"), "int | None");
+
+        let manager_type = |name: &str| {
+            patch
+                .class_members
+                .iter()
+                .find(|member| member.name.as_str() == name)
+                .unwrap_or_else(|| panic!("expected `{name}` manager"))
+                .ty
+                .display(&db)
+                .to_string()
+        };
+        assert_eq!(manager_type("objects"), "Manager");
+        assert_eq!(manager_type("_default_manager"), "Manager");
+        assert_eq!(manager_type("published"), "Manager");
+
+        let file = system_path_to_file(&db, "/src/models.py").expect("models.py");
+        let annotate_method_ty = global_symbol(&db, file, "annotate_method_probe")
+            .place
+            .expect_type()
+            .display(&db)
+            .to_string();
+        assert!(
+            annotate_method_ty != "Unknown",
+            "Book.objects.annotate should resolve to a callable, got {annotate_method_ty}"
+        );
+        let annotated_probe_ty = global_symbol(&db, file, "annotated_probe")
+            .place
+            .expect_type()
+            .display(&db)
+            .to_string();
+        let observed_annotate_returns = annotate_returns.lock().unwrap().clone();
+        assert_eq!(
+            annotated_probe_ty, "MiniDjangoAnnotatedRow",
+            "observed annotate returns: {observed_annotate_returns:#?}"
+        );
+        let annotated_score_ty = global_symbol(&db, file, "annotated_score_probe")
+            .place
+            .expect_type()
+            .display(&db)
+            .to_string();
+        assert!(
+            matches!(annotated_score_ty.as_str(), "int" | "Literal[1]"),
+            "annotate score should retain the keyword argument type, got {annotated_score_ty}"
+        );
+        let diagnostics = db.check_file(file);
+        let messages = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.primary_message())
+            .collect::<Vec<_>>();
+        assert!(
+            messages
+                .iter()
+                .any(|message| *message == "Object of type `str` is not assignable to `int`"),
+            "Django-style plugin fields should expose their instance type, not their raw class-body field value: {messages:#?}"
+        );
+        assert!(
+            !messages.iter().any(|message| message.contains("CharField")),
+            "Django-style plugin fields should not leak raw field classes into instance access: {messages:#?}"
+        );
+
+        assert!(
+            messages
+                .iter()
+                .any(|message| *message == "Argument is incorrect"),
+            "bad constructor calls should fail while valid constructor calls pass: {messages:#?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .filter(|message| message.contains("not assignable"))
+                .count()
+                >= 24,
+            "manager/queryset/values/annotate/reverse relation hooks should reject bad assignments: {messages:#?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .filter(|message| *message == &"Object of type `Book` is not assignable to `Author`")
+                .count()
+                >= 3,
+            "manager and queryset hooks should reject bad model assignments: {messages:#?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .filter(|message| message.contains("Unknown Mini-Django lookup"))
+                .count()
+                >= 5,
+            "invalid direct, transformed, relation, values, and values_list lookups should fail: {messages:#?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .filter(|message| message.contains("Invalid Mini-Django lookup value"))
+                .count()
+                >= 4,
+            "invalid lookup literal values should fail: {messages:#?}"
+        );
+        assert!(
+            messages.iter().any(|message| *message
+                == "Conflicting Mini-Django reverse relation `library.Author.books`"),
+            "duplicate reverse relation names should produce a project-index diagnostic: {messages:#?}"
+        );
+        assert!(
+            messages.iter().any(|message| *message
+                == "Unknown Mini-Django relation target `library.Missing` for field `models.Book.missing_author`"),
+            "bad relation targets should produce a project-index diagnostic at the field source: {messages:#?}"
+        );
+        let unknown_lookup_messages = messages
+            .iter()
+            .filter(|message| message.contains("Unknown Mini-Django lookup"))
+            .collect::<Vec<_>>();
+        assert!(
+            !unknown_lookup_messages.iter().any(|message| {
+                message.contains("title__exact")
+                    || message.contains("title__contains")
+                    || message.contains("pages__isnull")
+                    || message.contains("author__name")
+                    || message.contains("owner__username")
+            }),
+            "supported terminal and relation lookups should not produce plugin diagnostics: {messages:#?}"
+        );
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.contains("No parameter named")),
+            "valid plugin constructor keywords should not be rejected: {messages:#?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn minidjango_project_index_is_cached_across_semantic_queries() -> anyhow::Result<()> {
+        let mut db = TestDbBuilder::new().build()?;
+        write_minidjango_harness(&mut db)?;
+        install_minidjango_plugin(&mut db);
+
+        let build_index_calls = Arc::new(AtomicUsize::new(0));
+        {
+            let build_index_calls = Arc::clone(&build_index_calls);
+            let sdk_plugin = MiniDjangoPlugin;
+            let plugin_id = sdk_plugin.manifest().id;
+            db.register_semantic_plugin_executor(plugin_id, move |request| {
+                if matches!(request, protocol::PluginRequest::BuildProjectIndex(_)) {
+                    build_index_calls.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(sdk_plugin.handle(request))
+            });
+        }
+
+        let class = static_class_literal(&db, "/src/models.py", "Book");
+        let patch = class.plugin_class_transform_patch(&db);
+        assert!(
+            patch
+                .fields
+                .iter()
+                .any(|field| field.name.as_str() == "owner"),
+            "settings-backed auth relation should be synthesized from the project index"
+        );
+        let warmed_build_index_calls = build_index_calls.load(Ordering::SeqCst);
+        assert!(
+            (1..=2).contains(&warmed_build_index_calls),
+            "class transform should warm the Mini-Django project index with at most one recursive retry, got {warmed_build_index_calls}"
+        );
+
+        let file = system_path_to_file(&db, "/src/models.py").expect("models.py");
+        let diagnostics = db.check_file(file);
+        let messages = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.primary_message())
+            .collect::<Vec<_>>();
+        assert!(
+            messages.iter().any(|message| *message
+                == "Conflicting Mini-Django reverse relation `library.Author.books`"),
+            "project-index diagnostics should flow through check_file: {messages:#?}"
+        );
+        assert!(
+            messages.iter().any(|message| *message
+                == "Invalid Mini-Django lookup value for `pages__isnull` on `models.Book.pages`; expected `int | None`"),
+            "call-return diagnostics should consume the cached project index: {messages:#?}"
+        );
+        assert_eq!(
+            build_index_calls.load(Ordering::SeqCst),
+            warmed_build_index_calls,
+            "check_file and call-return hooks should reuse the tracked Mini-Django project index"
+        );
+
+        let patch_again = class.plugin_class_transform_patch(&db);
+        assert!(
+            patch_again
+                .class_members
+                .iter()
+                .any(|member| member.name.as_str() == "published"),
+            "manager class-member synthesis should still be available from the cached index"
+        );
+        assert_eq!(
+            build_index_calls.load(Ordering::SeqCst),
+            warmed_build_index_calls,
+            "repeated semantic queries with unchanged inputs should not rebuild the Mini-Django index"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn minidjango_project_index_invalidates_when_model_source_changes() -> anyhow::Result<()> {
+        let mut db = TestDbBuilder::new().build()?;
+        write_minidjango_harness(&mut db)?;
+        db.write_dedented(
+            "/src/models.py",
+            r#"
+            import minidjango
+
+            class Book(minidjango.Model):
+                title = minidjango.CharField(max_length=200)
+
+            def check() -> None:
+                Book.objects.filter(title__contains="ok")
+            "#,
+        )?;
+        install_minidjango_plugin(&mut db);
+
+        let build_index_calls = Arc::new(AtomicUsize::new(0));
+        {
+            let build_index_calls = Arc::clone(&build_index_calls);
+            let sdk_plugin = MiniDjangoPlugin;
+            let plugin_id = sdk_plugin.manifest().id;
+            db.register_semantic_plugin_executor(plugin_id, move |request| {
+                if matches!(request, protocol::PluginRequest::BuildProjectIndex(_)) {
+                    build_index_calls.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(sdk_plugin.handle(request))
+            });
+        }
+
+        let file = system_path_to_file(&db, "/src/models.py").expect("models.py");
+        let diagnostics = db.check_file(file);
+        let messages = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.primary_message())
+            .collect::<Vec<_>>();
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.contains("Unknown Mini-Django lookup `title__contains`")),
+            "initial model field should make title__contains valid: {messages:#?}"
+        );
+        let initial_build_index_calls = build_index_calls.load(Ordering::SeqCst);
+        assert!(
+            initial_build_index_calls > 0,
+            "initial check_file should build the Mini-Django project index"
+        );
+
+        db.write_dedented(
+            "/src/models.py",
+            r#"
+            import minidjango
+
+            class Book(minidjango.Model):
+                pages = minidjango.IntegerField()
+
+            def check() -> None:
+                Book.objects.filter(title__contains="ok")
+            "#,
+        )?;
+
+        let file = system_path_to_file(&db, "/src/models.py").expect("models.py");
+        let diagnostics = db.check_file(file);
+        let messages = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.primary_message())
+            .collect::<Vec<_>>();
+        assert!(
+            messages.iter().any(|message| message
+                == &"Unknown Mini-Django lookup `title__contains` for model `models.Book`"),
+            "changed model source should invalidate lookup metadata: {messages:#?}"
+        );
+        assert!(
+            build_index_calls.load(Ordering::SeqCst) > initial_build_index_calls,
+            "changing a contributing model should rebuild the Mini-Django project index"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn plugin_class_summary_includes_django_like_assignment_calls() -> anyhow::Result<()> {
+        let mut db = TestDbBuilder::new().build()?;
+        db.write_dedented(
+            "/src/models.py",
+            r#"
+            def model_decorator(**kwargs): ...
+
+            class MetaBase: ...
+
+            class Model: ...
+
+            class models:
+                CASCADE = "cascade"
+
+            @model_decorator(enabled=True)
+            class Book(Model, metaclass=MetaBase):
+                title = CharField(max_length=100, null=True)
+                author = ForeignKey("library.Author", related_name="books", on_delete=models.CASCADE)
+                typed: int = 1
+            "#,
+        )?;
+
+        let request = class_transform_request(&db, "/src/models.py", "Book");
+        assert_eq!(request.class.qualified_name, "models.Book");
+        assert_eq!(request.class.decorators.len(), 1);
+        assert!(request.class.metaclass.is_some());
+
+        let title = request
+            .class
+            .fields
+            .iter()
+            .find(|field| field.name == "title")
+            .expect("title field");
+        let protocol::AssignedValueSummary::Call(call) =
+            title.assigned_value.as_ref().expect("title assignment")
+        else {
+            panic!("expected call summary for title");
+        };
+        assert_eq!(call.callee.qualified_name, "CharField");
+        assert_eq!(call.arguments.len(), 2);
+        assert_eq!(call.arguments[0].name.as_deref(), Some("max_length"));
+        assert_eq!(
+            call.arguments[0].value,
+            protocol::LiteralValue::Int { value: 100 }
+        );
+        assert_eq!(call.arguments[1].name.as_deref(), Some("null"));
+        assert_eq!(
+            call.arguments[1].value,
+            protocol::LiteralValue::Bool { value: true }
+        );
+
+        let author = request
+            .class
+            .fields
+            .iter()
+            .find(|field| field.name == "author")
+            .expect("author field");
+        let protocol::AssignedValueSummary::Call(call) =
+            author.assigned_value.as_ref().expect("author assignment")
+        else {
+            panic!("expected call summary for author");
+        };
+        assert_eq!(call.callee.qualified_name, "ForeignKey");
+        assert_eq!(
+            call.arguments[0].value,
+            protocol::LiteralValue::Str {
+                value: "library.Author".to_string()
+            }
+        );
+        assert_eq!(call.arguments[1].name.as_deref(), Some("related_name"));
+        assert_eq!(
+            call.arguments[1].value,
+            protocol::LiteralValue::Str {
+                value: "books".to_string()
+            }
+        );
+        assert_eq!(call.arguments[2].name.as_deref(), Some("on_delete"));
+        assert_eq!(
+            call.arguments[2].value,
+            protocol::LiteralValue::EnumRef(protocol::SymbolRef {
+                qualified_name: "models.CASCADE".to_string()
+            })
+        );
+
+        let typed = request
+            .class
+            .fields
+            .iter()
+            .find(|field| field.name == "typed")
+            .expect("typed field");
+        assert_eq!(
+            typed.annotation.as_ref().map(|ty| ty.expression.as_str()),
+            Some("int")
+        );
+        assert_eq!(
+            typed.assigned_value,
+            Some(protocol::AssignedValueSummary::Literal {
+                value: protocol::LiteralValue::Int { value: 1 }
+            })
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn plugin_class_summary_includes_nested_meta_constants_and_source() -> anyhow::Result<()> {
+        let mut db = TestDbBuilder::new().build()?;
+        db.write_dedented(
+            "/src/models.py",
+            r#"
+            class Model: ...
+
+            class Book(Model):
+                STATUS = "draft"
+                flags = {"indexed": True}
+
+                class Meta:
+                    abstract = True
+                    app_label = "library"
+            "#,
+        )?;
+
+        let request = class_transform_request(&db, "/src/models.py", "Book");
+        assert_eq!(
+            request.class.source.qualified_name.as_deref(),
+            Some("models.Book")
+        );
+        assert_eq!(request.class.source.module.as_deref(), Some("models"));
+        assert!(request.class.source.start.is_some());
+
+        let status = request
+            .class
+            .class_constants
+            .iter()
+            .find(|constant| constant.name == "STATUS")
+            .expect("STATUS constant");
+        assert_eq!(
+            status.value,
+            protocol::LiteralValue::Str {
+                value: "draft".to_string()
+            }
+        );
+
+        let meta = request
+            .class
+            .nested_classes
+            .iter()
+            .find(|nested| nested.name == "Meta")
+            .expect("Meta class");
+        assert_eq!(meta.qualified_name, "models.Book.Meta");
+        let abstract_constant = meta
+            .class_constants
+            .iter()
+            .find(|constant| constant.name == "abstract")
+            .expect("abstract constant");
+        assert_eq!(
+            abstract_constant.value,
+            protocol::LiteralValue::Bool { value: true }
+        );
+        let app_label = meta
+            .class_constants
+            .iter()
+            .find(|constant| constant.name == "app_label")
+            .expect("app_label constant");
+        assert_eq!(
+            app_label.value,
+            protocol::LiteralValue::Str {
+                value: "library".to_string()
+            }
+        );
+
+        Ok(())
+    }
 }

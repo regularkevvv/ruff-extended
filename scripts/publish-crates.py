@@ -23,7 +23,7 @@ import urllib.parse
 import urllib.request
 
 CRATES_IO_API = "https://crates.io/api/v1"
-USER_AGENT = "ruff-crates-io-publish (github.com/astral-sh/ruff)"
+USER_AGENT = "ty-extended-crates-io-publish (github.com/regularkevvv/ty-extended; github.com/regularkevvv/ruff-extended)"
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -108,18 +108,31 @@ def existing_crate_versions(crates: list[Crate], api_url: str) -> set[str]:
 
 
 def build_cargo_publish_command(
-    cargo: list[str], existing: set[str], cargo_publish_args: list[str]
+    cargo: list[str],
+    existing: set[str],
+    missing: list[Crate],
+    cargo_publish_args: list[str],
+    package_filter: set[str] | None,
 ) -> list[str]:
     """Build the `cargo publish` command for all not-yet-published workspace crates."""
-    command = [*cargo, "publish", "--workspace"]
-    for crate_name in sorted(existing):
-        command.extend(["--exclude", crate_name])
+    command = [*cargo, "publish"]
+    if package_filter is None:
+        command.append("--workspace")
+        for crate_name in sorted(existing):
+            command.extend(["--exclude", crate_name])
+    else:
+        for crate in sorted(missing, key=lambda crate: crate.name):
+            command.extend(["--package", crate.name])
     command.extend(cargo_publish_args)
     return command
 
 
 def publish_workspace(
-    cargo: list[str], crates: list[Crate], api_url: str, cargo_publish_args: list[str]
+    cargo: list[str],
+    crates: list[Crate],
+    api_url: str,
+    cargo_publish_args: list[str],
+    package_filter: set[str] | None,
 ) -> int:
     existing = existing_crate_versions(crates, api_url)
     missing = [crate for crate in crates if crate.name not in existing]
@@ -132,7 +145,9 @@ def publish_workspace(
     for crate in missing:
         print(f"  {crate.pretty()}")
 
-    command = build_cargo_publish_command(cargo, existing, cargo_publish_args)
+    command = build_cargo_publish_command(
+        cargo, existing, missing, cargo_publish_args, package_filter
+    )
     return subprocess.run(command, cwd=REPO_ROOT).returncode
 
 
@@ -162,6 +177,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Pass --no-verify through to cargo publish.",
     )
     parser.add_argument(
+        "--package",
+        dest="packages",
+        action="append",
+        default=[],
+        help="Only publish the named workspace package. May be passed more than once.",
+    )
+    parser.add_argument(
         "cargo_publish_args",
         nargs=argparse.REMAINDER,
         help=argparse.SUPPRESS,
@@ -182,8 +204,19 @@ def main(argv: list[str] | None = None) -> int:
         cargo_publish_args.append("--no-verify")
     cargo_publish_args.extend(args.cargo_publish_args)
 
+    package_filter = set(args.packages) or None
     crates = get_publishable_crates(args.cargo)
-    return publish_workspace(args.cargo, crates, args.api_url, cargo_publish_args)
+    if package_filter is not None:
+        publishable_names = {crate.name for crate in crates}
+        unknown = package_filter - publishable_names
+        if unknown:
+            packages = ", ".join(sorted(unknown))
+            print(f"error: package filter includes unpublished workspace crates: {packages}")
+            return 2
+        crates = [crate for crate in crates if crate.name in package_filter]
+    return publish_workspace(
+        args.cargo, crates, args.api_url, cargo_publish_args, package_filter
+    )
 
 
 if __name__ == "__main__":

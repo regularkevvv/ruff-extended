@@ -1,0 +1,27 @@
+[package]
+name = "ty_plugin_protocol"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+homepage = "https://github.com/regularkevvv/ty-extended"
+documentation = "https://docs.rs/ty_plugin_protocol"
+repository = "https://github.com/regularkevvv/ruff-extended"
+authors = ["Kevin Castro <hola@kev.pe>"]
+license.workspace = true
+description = "Stable serialized protocol types for ty semantic extensions."
+readme = "README.md"
+keywords = ["ty", "typing", "extensions"]
+categories = ["development-tools"]
+
+[lib]
+doctest = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true, features = ["json"] }
+
+[lints]
+workspace = true

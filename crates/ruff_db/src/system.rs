@@ -103,6 +103,11 @@ pub trait System: Debug + Sync + Send {
     /// Reads the content of the file at `path` into a [`String`].
     fn read_to_string(&self, path: &SystemPath) -> Result<String>;
 
+    /// Reads the content of the file at `path` as bytes.
+    fn read_to_bytes(&self, path: &SystemPath) -> Result<Vec<u8>> {
+        self.read_to_string(path).map(String::into_bytes)
+    }
+
     /// Reads the content of the file at `path` as a Notebook.
     ///
     /// This method optimizes for the case where the system holds a structured representation of a [`Notebook`],

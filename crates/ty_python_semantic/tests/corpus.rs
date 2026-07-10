@@ -9,7 +9,9 @@ use ruff_python_ast::PythonVersion;
 
 use ty_module_resolver::SearchPathSettings;
 use ty_python_core::platform::PythonPlatform;
-use ty_python_core::program::{FallibleStrategy, Program, ProgramSettings};
+use ty_python_core::program::{
+    FallibleStrategy, Program, ProgramSettings, SemanticPluginEnvironment,
+};
 use ty_python_semantic::lint::{LintRegistry, RuleSelection};
 use ty_python_semantic::pull_types::pull_types;
 use ty_python_semantic::{AnalysisSettings, check_file_unwrap, default_lint_registry};
@@ -209,6 +211,7 @@ impl CorpusDb {
                 search_paths: SearchPathSettings::new(vec![])
                     .to_search_paths(db.system(), db.vendored(), &FallibleStrategy)
                     .unwrap(),
+                semantic_plugins: SemanticPluginEnvironment::default(),
             },
         );
 
@@ -283,6 +286,15 @@ impl ty_python_semantic::Db for CorpusDb {
 
     fn analysis_settings(&self, _file: File) -> &AnalysisSettings {
         &self.analysis_settings
+    }
+
+    fn execute_semantic_plugin(
+        &self,
+        _plugin_id: &str,
+        _request: &ty_plugin_protocol::PluginRequest,
+    ) -> Result<ty_plugin_protocol::PluginResponse, ty_python_semantic::SemanticPluginRuntimeError>
+    {
+        Ok(ty_plugin_protocol::PluginResponse::NoChange)
     }
 
     fn dyn_clone(&self) -> Box<dyn ty_python_semantic::Db> {

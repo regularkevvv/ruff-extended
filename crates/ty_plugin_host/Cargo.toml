@@ -1,0 +1,41 @@
+[package]
+name = "ty_plugin_host"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+repository.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+ty_plugin_protocol = { workspace = true }
+
+thiserror = { workspace = true }
+
+# WASM backend dependencies, pulled in only by the `plugins-wasm` feature. wasmtime does not build
+# for `wasm32` targets, so it is declared per-target and disabled there (see `ty_wasm`).
+serde_json = { workspace = true, optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wasmtime = { workspace = true, optional = true }
+
+[dev-dependencies]
+ty_plugin_protocol = { workspace = true }
+ty_plugin_examples = { workspace = true }
+ty_plugin_sdk = { workspace = true }
+
+[features]
+default = ["mock"]
+mock = []
+# Non-default production backend: embeds wasmtime to execute real `.wasm` plugin artifacts. Enabled
+# for native builds that want to run WASM plugins; never enabled for the `wasm32` `ty_wasm` build.
+plugins-wasm = ["dep:wasmtime", "dep:serde_json"]
+
+[lints]
+workspace = true

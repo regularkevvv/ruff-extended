@@ -63,6 +63,7 @@ use crate::types::bound_super::BoundSuperType;
 use crate::types::call::bind::ConstructorCallableKind;
 use crate::types::call::{Binding, Bindings, CallArguments, CallableBinding};
 pub(crate) use crate::types::callable::{CallableType, CallableTypes};
+use crate::types::class::plugin_project_index_diagnostics_for_file;
 pub(crate) use crate::types::class_base::ClassBase;
 use crate::types::constraints::ConstraintSetBuilder;
 use crate::types::context::{LintDiagnosticGuard, LintDiagnosticGuardBuilder};
@@ -148,6 +149,7 @@ mod mro;
 pub(crate) mod narrow;
 mod newtype;
 mod overrides;
+mod plugin;
 mod protocol_class;
 pub(crate) mod relation;
 mod relation_error;
@@ -202,6 +204,7 @@ pub fn check_types(db: &dyn Db, file: File) -> Vec<Diagnostic> {
             .iter()
             .map(|error| Diagnostic::invalid_syntax(file, error, error)),
     );
+    diagnostics.extend_diagnostics(plugin_project_index_diagnostics_for_file(db, file));
 
     let diagnostics = check_suppressions(db, file, diagnostics);
 
@@ -3170,6 +3173,63 @@ impl<'db> Type<'db> {
         }
     }
 
+    fn plugin_class_transform_instance_member(
+        self,
+        db: &'db dyn Db,
+        name: &str,
+    ) -> Option<PlaceAndQualifiers<'db>> {
+        match self {
+            Type::NominalInstance(instance) => instance
+                .class(db)
+                .plugin_class_transform_instance_member(db, name),
+            Type::NewTypeInstance(newtype) => newtype
+                .concrete_base_type(db)
+                .plugin_class_transform_instance_member(db, name),
+            Type::TypeAlias(alias) => alias
+                .value_type(db)
+                .plugin_class_transform_instance_member(db, name),
+            _ => None,
+        }
+    }
+
+    fn plugin_instance_assignment_member(
+        self,
+        db: &'db dyn Db,
+        name: &str,
+    ) -> Option<PlaceAndQualifiers<'db>> {
+        match self {
+            Type::NominalInstance(instance) => instance
+                .class(db)
+                .plugin_instance_assignment_member(db, name),
+            Type::NewTypeInstance(newtype) => newtype
+                .concrete_base_type(db)
+                .plugin_instance_assignment_member(db, name),
+            Type::TypeAlias(alias) => alias
+                .value_type(db)
+                .plugin_instance_assignment_member(db, name),
+            _ => None,
+        }
+    }
+
+    fn plugin_contributed_instance_assignment_member(
+        self,
+        db: &'db dyn Db,
+        name: &str,
+    ) -> Option<PlaceAndQualifiers<'db>> {
+        match self {
+            Type::NominalInstance(instance) => instance
+                .class(db)
+                .plugin_contributed_instance_assignment_member(db, name),
+            Type::NewTypeInstance(newtype) => newtype
+                .concrete_base_type(db)
+                .plugin_contributed_instance_assignment_member(db, name),
+            Type::TypeAlias(alias) => alias
+                .value_type(db)
+                .plugin_contributed_instance_assignment_member(db, name),
+            _ => None,
+        }
+    }
+
     /// Access an attribute of this type without invoking the descriptor protocol. This
     /// method corresponds to `inspect.getattr_static(<object of type 'self'>, name)`.
     ///
@@ -3811,6 +3871,14 @@ impl<'db> Type<'db> {
                 }
 
                 let fallback = this.instance_member(db, name_str);
+
+                if let Some(plugin_field) =
+                    this.plugin_class_transform_instance_member(db, name_str)
+                {
+                    let result = this.fallback_to_getattr(db, name, plugin_field, policy);
+                    let result = result.map_type(|ty| ty.bind_self_typevars(db, receiver));
+                    return promote_inferred_attribute_class_literals(db, result);
+                }
 
                 let result = this.invoke_descriptor_protocol(
                     db,

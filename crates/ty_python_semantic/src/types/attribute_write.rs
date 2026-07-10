@@ -611,6 +611,14 @@ pub(super) fn assignment_attribute_members<'db>(
     object_ty: Type<'db>,
     attribute: &str,
 ) -> Option<AssignmentAttributeMembers<'db>> {
+    if let Some(plugin_assignment_member) =
+        object_ty.plugin_instance_assignment_member(db, attribute)
+    {
+        return Some(AssignmentAttributeMembers::ReceiverMember(
+            plugin_assignment_member,
+        ));
+    }
+
     // Precise `functools.partial` instances synthesize a refined `__call__` member instead of
     // using the broad signature from typeshed.
     let type_member = if attribute == "__call__"
@@ -673,6 +681,13 @@ pub(super) fn assignment_attribute_members<'db>(
     } else {
         None
     };
+    let contributed_member = object_ty.plugin_contributed_instance_assignment_member(db, attribute);
+    let receiver_fallback = match receiver_fallback {
+        Some(member) if member.is_undefined() => contributed_member.or(Some(member)),
+        None => contributed_member,
+        receiver_fallback => receiver_fallback,
+    };
+
     Some(AssignmentAttributeMembers::TypeMember {
         member: type_member,
         receiver_fallback,

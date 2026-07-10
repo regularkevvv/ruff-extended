@@ -1088,6 +1088,9 @@ pub enum DiagnosticId {
     /// Use of an invalid command-line option.
     InvalidCliOption,
 
+    /// Plugin configuration is invalid or cannot be loaded.
+    PluginConfiguration,
+
     /// Experimental feature requires preview mode.
     PreviewFeature,
 
@@ -1144,6 +1147,7 @@ impl DiagnosticId {
             DiagnosticId::UnsupportedPythonVersion => "unsupported-python-version",
             DiagnosticId::Unformatted => "unformatted",
             DiagnosticId::InvalidCliOption => "invalid-cli-option",
+            DiagnosticId::PluginConfiguration => "plugin-configuration",
             DiagnosticId::PreviewFeature => "preview-feature",
             DiagnosticId::InternalError => "internal-error",
         }

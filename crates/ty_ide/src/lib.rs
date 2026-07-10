@@ -412,7 +412,9 @@ mod tests {
     use ty_module_resolver::SearchPathSettings;
     use ty_project::ProjectMetadata;
     use ty_python_core::platform::PythonPlatform;
-    use ty_python_core::program::{FallibleStrategy, Program, ProgramSettings};
+    use ty_python_core::program::{
+        FallibleStrategy, Program, ProgramSettings, SemanticPluginEnvironment,
+    };
     use ty_python_semantic::PythonVersionWithSource;
 
     /// A way to create a simple single-file (named `main.py`) cursor test.
@@ -612,6 +614,7 @@ mod tests {
             SitePackagesCursorTestBuilder {
                 sources: self.sources,
                 site_packages_sources: Vec::new(),
+                plugin_stub_overlay_sources: Vec::new(),
             }
         }
     }
@@ -630,12 +633,14 @@ mod tests {
     pub(super) struct SitePackagesCursorTestBuilder {
         sources: Vec<Source>,
         site_packages_sources: Vec<Source>,
+        plugin_stub_overlay_sources: Vec<Source>,
     }
 
     impl SitePackagesCursorTestBuilder {
         pub(super) fn build(&self) -> CursorTest {
             let project_root = SystemPathBuf::from("/src");
             let site_packages_path = SystemPathBuf::from("/site-packages");
+            let plugin_stub_overlay_path = SystemPathBuf::from("/plugin-stub-overlay");
 
             let mut db =
                 ty_project::TestDb::new(ProjectMetadata::new("test", project_root.clone()));
@@ -652,6 +657,17 @@ mod tests {
                     .expect("write to memory file system to be successful");
             }
 
+            for Source {
+                path,
+                contents,
+                cursor_offset: _,
+            } in &self.plugin_stub_overlay_sources
+            {
+                let full_path = plugin_stub_overlay_path.join(path);
+                db.write_file(&full_path, contents)
+                    .expect("write to memory file system to be successful");
+            }
+
             // Create /src directory for first-party code
             db.memory_file_system()
                 .create_directory_all(&project_root)
@@ -660,6 +676,10 @@ mod tests {
             // Configure search paths with site-packages
             let search_paths = SearchPathSettings {
                 src_roots: vec![project_root.clone()],
+                plugin_stub_overlay_paths: (!self.plugin_stub_overlay_sources.is_empty())
+                    .then(|| plugin_stub_overlay_path.clone())
+                    .into_iter()
+                    .collect(),
                 site_packages_paths: vec![site_packages_path.clone()],
                 ..SearchPathSettings::empty()
             }
@@ -672,6 +692,7 @@ mod tests {
                     python_version: PythonVersionWithSource::default(),
                     python_platform: PythonPlatform::default(),
                     search_paths,
+                    semantic_plugins: SemanticPluginEnvironment::default(),
                 },
             );
 
@@ -679,6 +700,10 @@ mod tests {
                 .try_add_root(&db, &project_root, FileRootKind::Project);
             db.files()
                 .try_add_root(&db, &site_packages_path, FileRootKind::SearchPath);
+            if !self.plugin_stub_overlay_sources.is_empty() {
+                db.files()
+                    .try_add_root(&db, &plugin_stub_overlay_path, FileRootKind::SearchPath);
+            }
 
             let mut cursor: Option<Cursor> = None;
             for &Source {
@@ -745,6 +770,22 @@ mod tests {
             let path = path.into();
             let contents = dedent(contents.as_ref()).into_owned();
             self.site_packages_sources.push(Source {
+                path,
+                contents,
+                cursor_offset: None,
+            });
+            self
+        }
+
+        /// Add a file to the plugin stub overlay root.
+        pub(super) fn plugin_stub_overlay(
+            &mut self,
+            path: impl Into<SystemPathBuf>,
+            contents: impl AsRef<str>,
+        ) -> &mut SitePackagesCursorTestBuilder {
+            let path = path.into();
+            let contents = dedent(contents.as_ref()).into_owned();
+            self.plugin_stub_overlay_sources.push(Source {
                 path,
                 contents,
                 cursor_offset: None,

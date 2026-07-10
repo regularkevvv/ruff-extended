@@ -1,0 +1,25 @@
+[package]
+name = "ty_plugin_wasm_fixture"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+repository.workspace = true
+authors.workspace = true
+license.workspace = true
+
+# A `cdylib` so it links to a `.wasm` artifact when built for `wasm32-unknown-unknown`. On the host
+# target it builds to an (unused) empty dynamic library, which keeps the workspace build happy.
+[lib]
+crate-type = ["cdylib"]
+doctest = false
+test = false
+
+[dependencies]
+ty_plugin_examples = { workspace = true }
+ty_plugin_sdk = { workspace = true }
+
+[lints]
+workspace = true

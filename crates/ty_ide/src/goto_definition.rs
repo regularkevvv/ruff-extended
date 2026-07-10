@@ -252,6 +252,31 @@ def other_function(): ...
     }
 
     #[test]
+    fn goto_definition_plugin_stub_overlay_maps_to_site_packages_source() {
+        let mut builder = CursorTest::builder().with_site_packages();
+        builder
+            .source("main.py", "from foo import make\nmake<CURSOR>()\n")
+            .plugin_stub_overlay("foo/__init__.pyi", "def make() -> int: ...\n")
+            .site_packages("foo/__init__.py", "def make():\n    return 1\n");
+        let test = builder.build();
+
+        assert_snapshot!(test.goto_definition(), @"
+        info[goto-definition]: Go to definition
+         --> src/main.py:2:1
+          |
+        2 | make()
+          | ^^^^ Clicking here
+          |
+        info: Found 1 definition
+         --> site-packages/foo/__init__.py:1:5
+          |
+        1 | def make():
+          |     ----
+          |
+        ");
+    }
+
+    #[test]
     fn goto_definition_stub_map_reexported_function() {
         let test = CursorTest::builder()
             .source(

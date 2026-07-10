@@ -138,6 +138,18 @@ impl MemoryFileSystem {
         read_to_string(self, path.as_ref())
     }
 
+    pub fn read_to_bytes(&self, path: impl AsRef<SystemPath>) -> Result<Vec<u8>> {
+        let by_path = self.inner.by_path.read().unwrap();
+        let normalized = self.normalize_path(path.as_ref());
+
+        let entry = by_path.get(&normalized).ok_or_else(not_found)?;
+
+        match entry {
+            Entry::File(file) => Ok(file.content.to_vec()),
+            Entry::Directory(_) => Err(io::Error::from(io::ErrorKind::IsADirectory)),
+        }
+    }
+
     pub(crate) fn read_virtual_path_to_string(
         &self,
         path: impl AsRef<SystemVirtualPath>,
@@ -896,6 +908,29 @@ mod tests {
         fs.write_file_all(path, "Test content")?;
 
         assert_eq!(fs.read_to_string(path)?, "Test content");
+
+        Ok(())
+    }
+
+    #[test]
+    fn read_plugin_artifact_to_bytes() -> Result<()> {
+        let fs = MemoryFileSystem::new();
+
+        fs.write_file_all("artifact.wasm", [0, 97, 115, 109, 0xff])?;
+        fs.create_directory_all("plugins")?;
+
+        assert_eq!(
+            fs.read_to_bytes("artifact.wasm")?,
+            vec![0, 97, 115, 109, 0xff]
+        );
+        assert_eq!(
+            fs.read_to_bytes("plugins").unwrap_err().kind(),
+            ErrorKind::IsADirectory
+        );
+        assert_eq!(
+            fs.read_to_bytes("missing.wasm").unwrap_err().kind(),
+            ErrorKind::NotFound
+        );
 
         Ok(())
     }

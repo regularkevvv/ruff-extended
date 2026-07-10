@@ -253,8 +253,16 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             }
         };
 
-        let dynamic_class =
-            DynamicClassLiteral::new(db, &name, anchor, members, has_dynamic_namespace, None);
+        let instance_members: Box<[(ast::name::Name, Type<'db>)]> = Box::new([]);
+        let dynamic_class = DynamicClassLiteral::new(
+            db,
+            &name,
+            anchor,
+            members,
+            instance_members,
+            has_dynamic_namespace,
+            None,
+        );
 
         // For dangling calls, validate bases eagerly. For assigned calls, validation is
         // deferred along with bases inference.

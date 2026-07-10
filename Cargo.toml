@@ -50,6 +50,11 @@ ty_completion_bench = { path = "crates/ty_completion_bench" }
 ty_completion_eval = { path = "crates/ty_completion_eval" }
 ty_ide = { path = "crates/ty_ide" }
 ty_module_resolver = { version = "0.0.4", path = "crates/ty_module_resolver" }
+ty_plugin_examples = { path = "crates/ty_plugin_examples" }
+ty_plugin_host = { path = "crates/ty_plugin_host" }
+ty_plugin_protocol = { version = "0.0.1", path = "crates/ty_plugin_protocol" }
+ty_plugin_sdk = { version = "0.0.1", path = "crates/ty_plugin_sdk" }
+ty_plugin_wasm_fixture = { path = "crates/ty_plugin_wasm_fixture" }
 ty_project = { path = "crates/ty_project", default-features = false }
 ty_python_semantic = { version = "0.0.4", path = "crates/ty_python_semantic" }
 ty_python_core = { version = "0.0.4", path = "crates/ty_python_core" }
@@ -210,6 +215,12 @@ uuid = { version = "1.6.1" }
 walkdir = { version = "2.3.2" }
 wasm-bindgen = { version = "0.2.92" }
 wasm-bindgen-test = { version = "0.3.42" }
+wasmtime = { version = "46", default-features = false, features = [
+    "cranelift",
+    "runtime",
+    "std",
+    "wat",
+] }
 which = { version = "8.0.0" }
 wild = { version = "2" }
 zip = { version = "8.0", default-features = false }

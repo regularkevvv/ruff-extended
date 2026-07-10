@@ -37,10 +37,10 @@ import tomllib
 import httpx
 
 CRATES_IO_API = "https://crates.io/api/v1"
-USER_AGENT = "ruff-crates-io-publish-setup (github.com/astral-sh/ruff)"
+USER_AGENT = "ty-extended-crates-io-publish-setup (github.com/regularkevvv/ty-extended; github.com/regularkevvv/ruff-extended)"
 
-REPOSITORY_OWNER = "astral-sh"
-REPOSITORY_NAME = "ruff"
+REPOSITORY_OWNER = "regularkevvv"
+REPOSITORY_NAME = "ty-extended"
 WORKFLOW_FILENAME = "release.yml"
 ENVIRONMENT = "release"
 
@@ -140,9 +140,7 @@ def publish_placeholder_crate(
         repository = workspace_package.get("repository")
         license_expression = workspace_package.get("license")
 
-        description = (
-            "This is a placeholder release for an internal component crate of Ruff"
-        )
+        description = "Placeholder release for a ty-extended semantic extension SDK crate"
 
         manifest = (
             "[package]\n"
@@ -161,7 +159,7 @@ def publish_placeholder_crate(
         (temp_path / "README.md").write_text(
             "<!-- This file is generated. DO NOT EDIT -->\n\n"
             f"# {crate_name}\n\n"
-            f"This crate is an internal component of [Ruff](https://crates.io/crates/ruff). "
+            "This crate is part of the ty-extended semantic extension SDK. "
             f"This placeholder version ({PLACEHOLDER_VERSION}) only exists to reserve the "
             "crate name and enable trusted publishing for future releases.\n"
         )
@@ -288,15 +286,31 @@ def main() -> None:
     parser.add_argument(
         "--quiet", "-q", action="store_true", help="Suppress informational output"
     )
+    parser.add_argument(
+        "--package",
+        dest="packages",
+        action="append",
+        default=[],
+        help="Only configure the named workspace package. May be passed more than once.",
+    )
     args = parser.parse_args()
 
     dry_run = args.dry_run
     force = args.force
     quiet = args.quiet
+    package_filter = set(args.packages) or None
 
     workspace_package = load_workspace_package_metadata()
 
     crates = get_publishable_crates()
+    if package_filter is not None:
+        publishable_names = {crate["name"] for crate in crates}
+        unknown = package_filter - publishable_names
+        if unknown:
+            packages = ", ".join(sorted(unknown))
+            print(f"error: package filter includes unpublished workspace crates: {packages}")
+            sys.exit(2)
+        crates = [crate for crate in crates if crate["name"] in package_filter]
     known = set() if force else load_known_crates()
     candidates = [c for c in crates if c["name"] not in known]
 

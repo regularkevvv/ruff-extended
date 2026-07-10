@@ -184,7 +184,8 @@ impl<'db> DynamicNamedTupleLiteral<'db> {
         match self.anchor(db) {
             DynamicNamedTupleAnchor::CollectionsDefinition { definition, .. }
             | DynamicNamedTupleAnchor::TypingDefinition(definition) => Some(*definition),
-            DynamicNamedTupleAnchor::ScopeOffset { .. } => None,
+            DynamicNamedTupleAnchor::ScopeOffset { .. }
+            | DynamicNamedTupleAnchor::PluginVirtual { .. } => None,
         }
     }
 
@@ -193,7 +194,8 @@ impl<'db> DynamicNamedTupleLiteral<'db> {
         match self.anchor(db) {
             DynamicNamedTupleAnchor::CollectionsDefinition { definition, .. }
             | DynamicNamedTupleAnchor::TypingDefinition(definition) => definition.scope(db),
-            DynamicNamedTupleAnchor::ScopeOffset { scope, .. } => *scope,
+            DynamicNamedTupleAnchor::ScopeOffset { scope, .. }
+            | DynamicNamedTupleAnchor::PluginVirtual { scope, .. } => *scope,
         }
     }
 
@@ -234,6 +236,7 @@ impl<'db> DynamicNamedTupleLiteral<'db> {
                     .expect("scope offset should point to ExprCall");
                 node.range()
             }
+            DynamicNamedTupleAnchor::PluginVirtual { .. } => TextRange::default(),
         }
     }
 
@@ -457,7 +460,8 @@ impl<'db> DynamicNamedTupleLiteral<'db> {
 
         match self.anchor(db) {
             DynamicNamedTupleAnchor::CollectionsDefinition { spec, .. }
-            | DynamicNamedTupleAnchor::ScopeOffset { spec, .. } => *spec,
+            | DynamicNamedTupleAnchor::ScopeOffset { spec, .. }
+            | DynamicNamedTupleAnchor::PluginVirtual { spec, .. } => *spec,
             DynamicNamedTupleAnchor::TypingDefinition(definition) => deferred_spec(db, *definition),
         }
     }
@@ -531,6 +535,17 @@ pub enum DynamicNamedTupleAnchor<'db> {
         offset: u32,
         spec: NamedTupleSpec<'db>,
     },
+
+    /// A named tuple class synthesized from a semantic plugin response.
+    ///
+    /// Unlike dynamic named tuples created from source, this has no AST call
+    /// expression. The scope and identity are host-owned stable inputs used only
+    /// for interning and diagnostics.
+    PluginVirtual {
+        scope: ScopeId<'db>,
+        identity: String,
+        spec: NamedTupleSpec<'db>,
+    },
 }
 
 impl<'db> DynamicNamedTupleAnchor<'db> {
@@ -553,6 +568,15 @@ impl<'db> DynamicNamedTupleAnchor<'db> {
             } => Some(Self::ScopeOffset {
                 scope: *scope,
                 offset: *offset,
+                spec: spec.recursive_type_normalized_impl(db, div, nested)?,
+            }),
+            Self::PluginVirtual {
+                scope,
+                identity,
+                spec,
+            } => Some(Self::PluginVirtual {
+                scope: *scope,
+                identity: identity.clone(),
                 spec: spec.recursive_type_normalized_impl(db, div, nested)?,
             }),
         }

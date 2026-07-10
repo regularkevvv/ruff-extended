@@ -69,6 +69,12 @@ pub struct DynamicClassLiteral<'db> {
     #[returns(deref)]
     pub members: Box<[(Name, Type<'db>)]>,
 
+    /// Synthetic instance members. This is currently populated only by semantic
+    /// plugin virtual classes; ordinary runtime-created dynamic classes still
+    /// use Python namespace semantics and leave this empty.
+    #[returns(deref)]
+    pub instance_members: Box<[(Name, Type<'db>)]>,
+
     /// Whether the namespace is dynamic (not a literal dict, or contains
     /// non-string-literal keys). When true, attribute lookups on this class
     /// and its instances return `Unknown` instead of failing.
@@ -102,6 +108,14 @@ pub enum DynamicClassAnchor<'db> {
     ScopeOffset {
         scope: ScopeId<'db>,
         offset: u32,
+        explicit_bases: Box<[Type<'db>]>,
+    },
+
+    /// A synthetic class defined by a semantic plugin through
+    /// `VirtualTypeDefinition`.
+    PluginVirtual {
+        scope: ScopeId<'db>,
+        identity: String,
         explicit_bases: Box<[Type<'db>]>,
     },
 }
@@ -138,6 +152,29 @@ impl<'db> DynamicClassAnchor<'db> {
                     explicit_bases,
                 })
             }
+            Self::PluginVirtual {
+                scope,
+                identity,
+                explicit_bases,
+            } => {
+                let explicit_bases = explicit_bases
+                    .iter()
+                    .map(|base| {
+                        let base = base.recursive_type_normalized_impl(db, div, true);
+                        if nested {
+                            base
+                        } else {
+                            Some(base.unwrap_or(div))
+                        }
+                    })
+                    .collect::<Option<Box<_>>>()?;
+
+                Some(Self::PluginVirtual {
+                    scope: *scope,
+                    identity: identity.clone(),
+                    explicit_bases,
+                })
+            }
         }
     }
 }
@@ -164,7 +201,9 @@ impl<'db> DynamicClassLiteral<'db> {
     pub(crate) fn definition(self, db: &'db dyn Db) -> Option<Definition<'db>> {
         match self.anchor(db) {
             DynamicClassAnchor::Definition(definition) => Some(*definition),
-            DynamicClassAnchor::ScopeOffset { .. } => None,
+            DynamicClassAnchor::ScopeOffset { .. } | DynamicClassAnchor::PluginVirtual { .. } => {
+                None
+            }
         }
     }
 
@@ -172,7 +211,15 @@ impl<'db> DynamicClassLiteral<'db> {
     pub(crate) fn scope(self, db: &'db dyn Db) -> ScopeId<'db> {
         match self.anchor(db) {
             DynamicClassAnchor::Definition(definition) => definition.scope(db),
-            DynamicClassAnchor::ScopeOffset { scope, .. } => *scope,
+            DynamicClassAnchor::ScopeOffset { scope, .. }
+            | DynamicClassAnchor::PluginVirtual { scope, .. } => *scope,
+        }
+    }
+
+    pub(crate) fn plugin_virtual_identity(self, db: &'db dyn Db) -> Option<&'db str> {
+        match self.anchor(db) {
+            DynamicClassAnchor::PluginVirtual { identity, .. } => Some(identity.as_str()),
+            DynamicClassAnchor::Definition(_) | DynamicClassAnchor::ScopeOffset { .. } => None,
         }
     }
 
@@ -220,7 +267,8 @@ impl<'db> DynamicClassLiteral<'db> {
 
         match self.anchor(db) {
             // For dangling calls, bases are stored directly on the anchor.
-            DynamicClassAnchor::ScopeOffset { explicit_bases, .. } => explicit_bases.as_ref(),
+            DynamicClassAnchor::ScopeOffset { explicit_bases, .. }
+            | DynamicClassAnchor::PluginVirtual { explicit_bases, .. } => explicit_bases.as_ref(),
             // For assigned calls, use deferred inference.
             DynamicClassAnchor::Definition(definition) => deferred_explicit_bases(db, *definition),
         }
@@ -264,6 +312,7 @@ impl<'db> DynamicClassLiteral<'db> {
                     .expect("scope offset should point to ExprCall");
                 node.range()
             }
+            DynamicClassAnchor::PluginVirtual { .. } => TextRange::default(),
         }
     }
 
@@ -446,8 +495,12 @@ impl<'db> DynamicClassLiteral<'db> {
     ///
     /// Namespace entries are class attributes, not values stored directly on instances.
     #[expect(clippy::unused_self)]
-    pub(super) fn own_instance_member(self, _db: &'db dyn Db, _name: &str) -> Member<'db> {
-        Member::unbound()
+    pub(super) fn own_instance_member(self, db: &'db dyn Db, name: &str) -> Member<'db> {
+        self.instance_members(db)
+            .iter()
+            .find_map(|(member_name, ty)| (name == member_name).then_some(*ty))
+            .map(Member::definitely_declared)
+            .unwrap_or_else(Member::unbound)
     }
 
     /// Try to compute the MRO for this dynamic class.
@@ -523,6 +576,7 @@ impl<'db> DynamicClassLiteral<'db> {
             self.name(db),
             self.anchor(db),
             self.members(db),
+            self.instance_members(db),
             self.has_dynamic_namespace(db),
             dataclass_params,
         )
@@ -549,6 +603,15 @@ impl<'db> DynamicClassLiteral<'db> {
                 Some((name.clone(), ty))
             })
             .collect::<Option<Box<_>>>()?;
+        let instance_members = self
+            .instance_members(db)
+            .iter()
+            .map(|(name, ty)| {
+                let ty = ty.recursive_type_normalized_impl(db, div, true);
+                let ty = if nested { ty? } else { ty.unwrap_or(div) };
+                Some((name.clone(), ty))
+            })
+            .collect::<Option<Box<_>>>()?;
         let dataclass_params = match self.dataclass_params(db) {
             Some(params) => Some(params.recursive_type_normalized_impl(db, div, nested)?),
             None => None,
@@ -559,6 +622,7 @@ impl<'db> DynamicClassLiteral<'db> {
             self.name(db),
             anchor,
             members,
+            instance_members,
             self.has_dynamic_namespace(db),
             dataclass_params,
         ))

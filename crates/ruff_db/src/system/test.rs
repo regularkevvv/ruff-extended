@@ -109,6 +109,10 @@ impl System for TestSystem {
         self.system().read_to_string(path)
     }
 
+    fn read_to_bytes(&self, path: &SystemPath) -> Result<Vec<u8>> {
+        self.system().read_to_bytes(path)
+    }
+
     fn read_to_notebook(&self, path: &SystemPath) -> std::result::Result<Notebook, NotebookError> {
         self.system().read_to_notebook(path)
     }
@@ -364,6 +368,10 @@ impl System for InMemorySystem {
 
     fn read_to_string(&self, path: &SystemPath) -> Result<String> {
         self.memory_fs.read_to_string(path)
+    }
+
+    fn read_to_bytes(&self, path: &SystemPath) -> Result<Vec<u8>> {
+        self.memory_fs.read_to_bytes(path)
     }
 
     fn read_to_notebook(&self, path: &SystemPath) -> std::result::Result<Notebook, NotebookError> {

@@ -3,10 +3,9 @@ name = "ty"
 version = "0.0.0"
 publish = false
 # required for correct pypi metadata
-homepage = "https://github.com/astral-sh/ty/"
-documentation = "https://docs.astral.sh/ty/"
-# Releases occur in this other repository!
-repository = "https://github.com/astral-sh/ty/"
+homepage = "https://github.com/regularkevvv/ty-extended/"
+documentation = "https://github.com/regularkevvv/ty-extended/tree/main/docs"
+repository = "https://github.com/regularkevvv/ty-extended/"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -66,6 +65,7 @@ toml = { workspace = true }
 
 [features]
 default = []
+plugins-wasm = ["ty_project/plugins-wasm"]
 
 [lints]
 workspace = true

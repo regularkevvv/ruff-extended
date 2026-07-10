@@ -20,7 +20,9 @@ use ty_module_resolver::{
     Module, SearchPath, SearchPathSettings, list_modules, resolve_module_confident,
 };
 use ty_python_core::platform::PythonPlatform;
-use ty_python_core::program::{FallibleStrategy, Program, ProgramSettings};
+use ty_python_core::program::{
+    FallibleStrategy, Program, ProgramSettings, SemanticPluginEnvironment,
+};
 use ty_python_semantic::pull_types::pull_types;
 use ty_python_semantic::types::UNDEFINED_REVEAL;
 use ty_python_semantic::{
@@ -308,12 +310,14 @@ fn run_test(
         search_paths: SearchPathSettings {
             src_roots: vec![src_path],
             extra_paths,
+            plugin_stub_overlay_paths: vec![],
             custom_typeshed: custom_typeshed_path.map(SystemPath::to_path_buf),
             site_packages_paths,
             real_stdlib_path: None,
         }
         .to_search_paths(db.system(), db.vendored(), &FallibleStrategy)
         .expect("Failed to resolve search path settings"),
+        semantic_plugins: SemanticPluginEnvironment::default(),
     };
 
     Program::init_or_update(db, settings);

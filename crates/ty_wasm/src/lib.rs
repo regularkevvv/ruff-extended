@@ -1627,6 +1627,10 @@ impl System for WasmSystem {
         self.fs.read_to_string(path)
     }
 
+    fn read_to_bytes(&self, path: &SystemPath) -> ruff_db::system::Result<Vec<u8>> {
+        self.fs.read_to_bytes(path)
+    }
+
     fn read_to_notebook(
         &self,
         path: &SystemPath,

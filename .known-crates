@@ -31,6 +31,8 @@ ruff_wasm
 ruff_workspace
 ty_combine
 ty_module_resolver
+ty_plugin_protocol
+ty_plugin_sdk
 ty_python_core
 ty_python_semantic
 ty_site_packages
