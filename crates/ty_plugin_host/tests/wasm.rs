@@ -1,10 +1,11 @@
 //! End-to-end tests for the wasmtime plugin backend.
 //!
-//! These run only under the `plugins-wasm` feature. The happy-path tests drive a real SDK plugin
-//! compiled to `wasm32-unknown-unknown` by the crate's `build.rs`; the failure-path tests use tiny
-//! hand-written modules so the runner's trap/timeout/limit handling is exercised deterministically.
+//! These run only when the production WASM runtime and test fixture are both enabled. The happy-path
+//! tests drive a real SDK plugin compiled to `wasm32-unknown-unknown` by the crate's `build.rs`; the
+//! failure-path tests use tiny hand-written modules so the runner's trap/timeout/limit handling is
+//! exercised deterministically.
 
-#![cfg(feature = "plugins-wasm")]
+#![cfg(all(feature = "plugins-wasm", feature = "test-wasm-fixture"))]
 
 use ty_plugin_examples::{MiniDjangoPlugin, minidjango};
 use ty_plugin_host::{

@@ -47,8 +47,6 @@ impl ProjectWatcher {
             .project()
             .metadata(db)
             .extra_configuration_paths()
-            .iter()
-            .map(SystemPathBuf::as_path)
             .chain(
                 db.project()
                     .settings(db)

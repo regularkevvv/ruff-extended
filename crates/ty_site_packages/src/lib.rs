@@ -49,7 +49,7 @@ type StdlibDiscoveryResult<T> = Result<T, StdlibDiscoveryError>;
 /// were the case, the system environment's `site-packages` directory
 /// *might* be added to the `SitePackagesPaths` twice, but we wouldn't
 /// want duplicates to appear in this set.
-#[derive(Debug, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SitePackagesPaths(IndexSet<SitePackagesPath>);
 
 #[derive(Debug, Clone)]

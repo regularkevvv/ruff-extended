@@ -1,16 +1,15 @@
-//! Builds the WASM plugin test fixture when the `plugins-wasm` feature is enabled.
+//! Builds the WASM plugin test fixture only when the `test-wasm-fixture` feature is enabled.
 //!
-//! Under `plugins-wasm`, this compiles `ty_plugin_wasm_fixture` for `wasm32-unknown-unknown` into a
-//! private target directory and exposes the artifact path to the integration tests through the
-//! `TY_PLUGIN_WASM_FIXTURE` environment variable. When the feature is off (the default), it does
-//! nothing, so ordinary builds neither need the wasm target nor pay for the fixture build.
+//! This compiles `ty_plugin_wasm_fixture` for `wasm32-unknown-unknown` into a private target
+//! directory and exposes the artifact path to the integration tests through the
+//! `TY_PLUGIN_WASM_FIXTURE` environment variable. Production builds only need `plugins-wasm` and
+//! therefore do not need the extra Rust target or pay for the fixture build.
 
 use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    // Only the WASM backend needs the fixture; skip it entirely otherwise.
-    if std::env::var_os("CARGO_FEATURE_PLUGINS_WASM").is_none() {
+    if std::env::var_os("CARGO_FEATURE_TEST_WASM_FIXTURE").is_none() {
         return;
     }
 

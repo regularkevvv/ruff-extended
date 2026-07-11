@@ -38,7 +38,9 @@ use ty_module_resolver::{
     ModuleGlobSet, ModuleGlobSetBuilder, SearchPathSettings, SearchPathSettingsError, SearchPaths,
 };
 use ty_plugin_host::{HostError, PluginEnvironment};
-use ty_plugin_protocol::{AttributeScope, ClassClaimKind, MethodClaimKind, PluginManifest};
+use ty_plugin_protocol::{
+    AttributeScope, ClassClaimKind, MethodClaimKind, PluginManifest, RuntimeSpec,
+};
 use ty_python_core::platform::PythonPlatform;
 use ty_python_core::program::{
     MisconfigurationStrategy, ProgramSettings, SemanticPlugin, SemanticPluginEnvironment,
@@ -274,6 +276,8 @@ impl Options {
             .and_then(|resolution| resolution.into_program_version(&mut diagnostics))
             .unwrap_or_default();
 
+        let plugin_site_packages = site_packages_paths.clone().into_vec();
+
         // Safe mode is handled inside this function, so we just assume this can't fail
         let search_paths = strategy.to_anyhow(self.to_search_paths(
             project_root,
@@ -290,12 +294,12 @@ impl Options {
             python_version = python_version.version
         );
 
-        let semantic_plugins = self
-            .plugins
-            .as_ref()
-            .map_or_else(SemanticPluginEnvironment::default, |plugins| {
-                plugins.semantic_environment_for_program_settings(project_root, system)
-            });
+        let plugins = self.plugins.or_default();
+        let semantic_plugins = plugins.semantic_environment_for_program_settings(
+            project_root,
+            system,
+            &plugin_site_packages,
+        );
 
         Ok((
             ProgramSettings {
@@ -421,10 +425,15 @@ impl Options {
             }
         }
 
+        let plugin_site_packages = site_packages_paths.clone().into_vec();
         let plugin_stub_overlay_paths = self
             .plugins
             .or_default()
-            .active_stub_overlay_paths_for_program_settings(project_root, system);
+            .active_stub_overlay_paths_for_program_settings(
+                project_root,
+                system,
+                &plugin_site_packages,
+            );
 
         let settings = SearchPathSettings {
             extra_paths,
@@ -517,10 +526,14 @@ impl Options {
             };
         let analysis = strategy.fallback(analysis_result, |_| AnalysisSettings::default())?;
 
-        let plugins =
-            self.plugins
-                .or_default()
-                .to_settings(db, project_root, db.system(), &mut diagnostics);
+        let plugin_site_packages = self.plugin_site_packages(project_root, db.system());
+        let plugins = self.plugins.or_default().to_settings(
+            db,
+            project_root,
+            db.system(),
+            &plugin_site_packages,
+            &mut diagnostics,
+        );
 
         let overrides = self
             .to_overrides_settings(db, project_root, &mut diagnostics)
@@ -541,6 +554,33 @@ impl Options {
         };
 
         Ok((settings, diagnostics))
+    }
+
+    fn plugin_site_packages(
+        &self,
+        project_root: &SystemPath,
+        system: &dyn System,
+    ) -> Vec<SystemPathBuf> {
+        let environment = self.environment.or_default();
+        let python_environment = if let Some(python_path) = environment.python.as_ref() {
+            let origin = match python_path.source() {
+                ValueSource::Cli => SysPrefixPathOrigin::PythonCliFlag,
+                ValueSource::File(path) => {
+                    SysPrefixPathOrigin::ConfigFileSetting(path.clone(), python_path.range())
+                }
+                ValueSource::Editor => SysPrefixPathOrigin::Editor,
+            };
+            PythonEnvironment::new(python_path.absolute(project_root, system), origin, system).ok()
+        } else {
+            PythonEnvironment::discover(project_root, system)
+                .ok()
+                .flatten()
+        };
+
+        python_environment
+            .and_then(|environment| environment.site_packages_paths(system).ok())
+            .map(SitePackagesPaths::into_vec)
+            .unwrap_or_default()
     }
 
     #[must_use]
@@ -1750,6 +1790,22 @@ pub struct PluginsOptions {
     )]
     pub enabled: Option<bool>,
 
+    /// Whether to load trusted plugin packages installed into the project's Python environment.
+    ///
+    /// Installed plugin packages expose a `ty-plugin.json` manifest next to their artifact. This
+    /// is disabled by default. Set this to `true` to activate installed-package plugins for a
+    /// project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[option(
+        default = "false",
+        value_type = "bool",
+        example = r#"
+            [tool.ty.plugins]
+            auto-discover = true
+        "#
+    )]
+    pub auto_discover: Option<bool>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     #[option_group]
     pub plugin: Option<PluginEntriesOptions>,
@@ -1760,42 +1816,19 @@ impl PluginsOptions {
         &self,
         project_root: &SystemPath,
         system: &dyn System,
+        site_packages: &[SystemPathBuf],
     ) -> Vec<ProgramSettingsPluginManifest> {
-        if !self.enabled.unwrap_or(false) {
-            return Vec::new();
-        }
-
         let mut loaded_manifests = Vec::new();
 
-        for entry in self.plugin.as_deref().unwrap_or_default() {
-            let settings = entry.to_settings(project_root, system);
-
-            if !system.is_file(settings.path())
-                || settings.runtime().requires_trust() && !settings.trusted()
-                || !settings.runtime().is_supported()
-            {
-                continue;
+        if self.enabled.unwrap_or(false) {
+            for entry in self.plugin.as_deref().unwrap_or_default() {
+                let settings = entry.to_settings(project_root, system);
+                push_program_settings_plugin_manifest(system, &settings, &mut loaded_manifests);
             }
+        }
 
-            if let Some(stub_overlay_path) = settings.stub_overlay_path()
-                && !system.is_directory(stub_overlay_path)
-            {
-                continue;
-            }
-
-            let Some(loaded_manifest) =
-                load_plugin_manifest_for_program_settings(system, &settings)
-            else {
-                continue;
-            };
-
-            if loaded_manifest.stub_overlay_path.is_some()
-                && !loaded_manifest.manifest.capabilities.stub_overlays
-            {
-                continue;
-            }
-
-            loaded_manifests.push(loaded_manifest);
+        for settings in self.auto_discovered_plugins(site_packages, system) {
+            push_program_settings_plugin_manifest(system, &settings, &mut loaded_manifests);
         }
 
         loaded_manifests
@@ -1805,8 +1838,9 @@ impl PluginsOptions {
         &self,
         project_root: &SystemPath,
         system: &dyn System,
+        site_packages: &[SystemPathBuf],
     ) -> Vec<SystemPathBuf> {
-        let loaded_manifests = self.program_settings_manifests(project_root, system);
+        let loaded_manifests = self.program_settings_manifests(project_root, system, site_packages);
 
         let manifests = loaded_manifests
             .iter()
@@ -1838,8 +1872,9 @@ impl PluginsOptions {
         &self,
         project_root: &SystemPath,
         system: &dyn System,
+        site_packages: &[SystemPathBuf],
     ) -> SemanticPluginEnvironment {
-        let loaded_manifests = self.program_settings_manifests(project_root, system);
+        let loaded_manifests = self.program_settings_manifests(project_root, system, site_packages);
         if loaded_manifests.is_empty() {
             return SemanticPluginEnvironment::default();
         }
@@ -2019,6 +2054,7 @@ impl PluginsOptions {
         db: &dyn Db,
         project_root: &SystemPath,
         system: &dyn System,
+        site_packages: &[SystemPathBuf],
         diagnostics: &mut Vec<OptionDiagnostic>,
     ) -> PluginSettings {
         let enabled = self.enabled.unwrap_or(false);
@@ -2154,16 +2190,69 @@ impl PluginsOptions {
             plugins.push(settings);
         }
 
+        let mut auto_discovered_plugin_loaded = false;
+        for settings in self.auto_discovered_plugins(site_packages, system) {
+            push_plugin_reload_paths(&settings, &mut reload_paths);
+
+            if !settings.runtime().is_supported() {
+                tracing::warn!(
+                    "Skipping installed plugin `{}` because runtime `{}` is unavailable in this ty build",
+                    settings.id(),
+                    settings.runtime().as_str()
+                );
+                continue;
+            }
+
+            let Some(loaded) = load_plugin_manifest_for_program_settings(system, &settings) else {
+                tracing::warn!("Skipping invalid installed plugin `{}`", settings.id());
+                continue;
+            };
+
+            if loaded.stub_overlay_path.is_some() && !loaded.manifest.capabilities.stub_overlays {
+                tracing::warn!(
+                    "Skipping installed plugin `{}` because its stub overlay is not declared by its manifest",
+                    settings.id()
+                );
+                continue;
+            }
+
+            auto_discovered_plugin_loaded = true;
+            loaded_manifests.push(loaded.into());
+            plugins.push(settings);
+        }
+
         let (environment_fingerprint, active_stub_overlay_paths) =
             build_plugin_environment(db, &loaded_manifests, diagnostics);
 
         PluginSettings::new(
-            enabled,
+            enabled || auto_discovered_plugin_loaded,
             plugins,
             environment_fingerprint,
             reload_paths,
             active_stub_overlay_paths,
         )
+    }
+
+    fn auto_discovered_plugins(
+        &self,
+        site_packages: &[SystemPathBuf],
+        system: &dyn System,
+    ) -> Vec<PluginEntrySettings> {
+        if self.auto_discover.unwrap_or(false) {
+            let configured_ids = self
+                .plugin
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|entry| entry.id.to_string())
+                .collect::<Vec<_>>();
+            discover_installed_plugins(site_packages, system)
+                .into_iter()
+                .filter(|plugin| !configured_ids.iter().any(|id| id == plugin.id()))
+                .collect()
+        } else {
+            Vec::new()
+        }
     }
 }
 
@@ -2436,6 +2525,145 @@ struct LoadedPluginManifest {
     artifact_content_hash: u64,
     config_hash: u64,
     stub_overlay_path: Option<SystemPathBuf>,
+}
+
+impl From<ProgramSettingsPluginManifest> for LoadedPluginManifest {
+    fn from(value: ProgramSettingsPluginManifest) -> Self {
+        Self {
+            configured_id: value.configured_id,
+            manifest: value.manifest,
+            manifest_path: value.manifest_path,
+            manifest_content_hash: value.manifest_content_hash,
+            artifact_path: value.artifact_path,
+            artifact_content_hash: value.artifact_content_hash,
+            config_hash: value.config_hash,
+            stub_overlay_path: value.stub_overlay_path,
+        }
+    }
+}
+
+const INSTALLED_PLUGIN_MANIFEST: &str = "ty-plugin.json";
+
+fn discover_installed_plugins(
+    site_packages: &[SystemPathBuf],
+    system: &dyn System,
+) -> Vec<PluginEntrySettings> {
+    let mut plugins = Vec::new();
+
+    for site_packages_dir in site_packages {
+        let Ok(entries) = system.read_directory(site_packages_dir) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            if !entry.file_type().is_directory() {
+                continue;
+            }
+
+            let package_dir = entry.into_path();
+            let manifest_path = package_dir.join(INSTALLED_PLUGIN_MANIFEST);
+            let Ok(content) = system.read_to_string(&manifest_path) else {
+                continue;
+            };
+            let Ok(manifest) = serde_json::from_str::<PluginManifest>(&content) else {
+                tracing::warn!("Skipping invalid installed plugin manifest at `{manifest_path}`");
+                continue;
+            };
+            if manifest.id.is_empty() {
+                tracing::warn!(
+                    "Skipping installed plugin manifest at `{manifest_path}` without an id"
+                );
+                continue;
+            }
+            let stub_overlay_path =
+                (!manifest.stub_overlays.is_empty()).then(|| package_dir.join("stubs"));
+            if let Some(stub_overlay_path) = stub_overlay_path.as_ref()
+                && !system.is_directory(stub_overlay_path)
+            {
+                tracing::warn!(
+                    "Skipping installed plugin `{}` because stub overlay `{stub_overlay_path}` is missing",
+                    manifest.id
+                );
+                continue;
+            }
+
+            let (runtime, artifact_path) = match manifest.runtime {
+                RuntimeSpec::Mock => (PluginRuntimeSettings::Mock, manifest_path.clone()),
+                RuntimeSpec::Wasm(wasm) => {
+                    let artifact_path = package_dir.join(wasm.artifact);
+                    if !system.is_file(&artifact_path) {
+                        tracing::warn!(
+                            "Skipping installed plugin `{}` because artifact `{artifact_path}` is missing",
+                            manifest.id
+                        );
+                        continue;
+                    }
+                    (PluginRuntimeSettings::Wasm, artifact_path)
+                }
+                RuntimeSpec::Subprocess(_) => continue,
+            };
+
+            if plugins
+                .iter()
+                .any(|plugin: &PluginEntrySettings| plugin.id() == manifest.id)
+            {
+                continue;
+            }
+
+            plugins.push(PluginEntrySettings::new(
+                manifest.id,
+                runtime,
+                artifact_path,
+                Some(manifest_path),
+                PluginConfig::default(),
+                stub_overlay_path,
+                true,
+            ));
+        }
+    }
+
+    plugins
+}
+
+fn push_plugin_reload_paths(settings: &PluginEntrySettings, reload_paths: &mut Vec<SystemPathBuf>) {
+    push_unique_path(reload_paths, settings.path());
+    if let Some(manifest_path) = settings.manifest_path() {
+        push_unique_path(reload_paths, manifest_path);
+    }
+    if let Some(stub_overlay_path) = settings.stub_overlay_path() {
+        push_unique_path(reload_paths, stub_overlay_path);
+    }
+}
+
+fn push_program_settings_plugin_manifest(
+    system: &dyn System,
+    settings: &PluginEntrySettings,
+    loaded_manifests: &mut Vec<ProgramSettingsPluginManifest>,
+) {
+    if !system.is_file(settings.path())
+        || settings.runtime().requires_trust() && !settings.trusted()
+        || !settings.runtime().is_supported()
+    {
+        return;
+    }
+
+    if let Some(stub_overlay_path) = settings.stub_overlay_path()
+        && !system.is_directory(stub_overlay_path)
+    {
+        return;
+    }
+
+    let Some(loaded_manifest) = load_plugin_manifest_for_program_settings(system, settings) else {
+        return;
+    };
+
+    if loaded_manifest.stub_overlay_path.is_some()
+        && !loaded_manifest.manifest.capabilities.stub_overlays
+    {
+        return;
+    }
+
+    loaded_manifests.push(loaded_manifest);
 }
 
 fn load_plugin_manifest_for_program_settings(
@@ -3492,6 +3720,8 @@ mod plugin_tests {
     const CONFIG_PATH: &str = "/project/ty.toml";
     const ARTIFACT_PATH: &str = "/project/.ty/plugins/pydantic.mock";
     const MANIFEST_PATH: &str = "/project/.ty/plugins/pydantic.plugin.json";
+    const AUTO_PLUGIN_MANIFEST_PATH: &str =
+        "/project/.venv/lib/python3.13/site-packages/django_ty/ty-plugin.json";
     #[cfg(feature = "plugins-wasm")]
     const WASM_ARTIFACT_PATH: &str = "/project/.ty/plugins/toy-field.wasm";
     #[cfg(feature = "plugins-wasm")]
@@ -3562,6 +3792,157 @@ mod plugin_tests {
         );
         assert!(plugin.trusted());
         assert_eq!(plugin.config().as_value()["init-typed"], json!(true));
+    }
+
+    #[test]
+    fn discovers_installed_plugin_packages_when_enabled() {
+        let db = project_database(
+            r#"
+            [environment]
+            python = ".venv"
+
+            [plugins]
+            auto-discover = true
+            "#,
+            [
+                (
+                    "/project/.venv/pyvenv.cfg",
+                    "home = /python\nversion = 3.13.0",
+                ),
+                ("/python/bin/python3", ""),
+                (AUTO_PLUGIN_MANIFEST_PATH, &installed_plugin_manifest_json()),
+            ],
+        );
+
+        assert_plugin_diagnostics(&db, []);
+
+        let plugins = db.project().settings(&db).plugins();
+        assert!(plugins.enabled());
+        let [plugin] = plugins.plugins() else {
+            panic!("expected one discovered plugin");
+        };
+        assert_eq!(plugin.id(), "django-ty");
+        assert_eq!(plugin.runtime(), PluginRuntimeSettings::Mock);
+        assert_eq!(
+            plugin.path(),
+            &SystemPathBuf::from(AUTO_PLUGIN_MANIFEST_PATH)
+        );
+        assert_eq!(
+            plugin.manifest_path(),
+            Some(&SystemPathBuf::from(AUTO_PLUGIN_MANIFEST_PATH))
+        );
+        assert!(plugin.trusted());
+
+        let semantic_plugins = Program::get(&db).semantic_plugins(&db);
+        let [plugin] = semantic_plugins.plugins() else {
+            panic!("expected one discovered semantic plugin");
+        };
+        assert_eq!(plugin.id(), "django-ty");
+        assert_eq!(plugin.runtime(), SemanticPluginRuntime::Mock);
+        assert_eq!(plugin.class_transform_claims(), ["django.db.models.Model"]);
+    }
+
+    #[test]
+    fn installed_plugin_discovery_is_disabled_by_default() {
+        let db = project_database(
+            r#"
+            [environment]
+            python = ".venv"
+            "#,
+            [
+                (
+                    "/project/.venv/pyvenv.cfg",
+                    "home = /python\nversion = 3.13.0",
+                ),
+                ("/python/bin/python3", ""),
+                (AUTO_PLUGIN_MANIFEST_PATH, &installed_plugin_manifest_json()),
+            ],
+        );
+
+        assert_plugin_diagnostics(&db, []);
+        assert!(!db.project().settings(&db).plugins().enabled());
+        assert!(Program::get(&db).semantic_plugins(&db).plugins().is_empty());
+    }
+
+    #[test]
+    fn installed_plugin_discovery_activates_packaged_stub_overlays() {
+        let db = project_database(
+            r#"
+            [environment]
+            python = ".venv"
+
+            [plugins]
+            auto-discover = true
+            "#,
+            [
+                (
+                    "/project/.venv/pyvenv.cfg",
+                    "home = /python\nversion = 3.13.0",
+                ),
+                ("/python/bin/python3", ""),
+                (
+                    AUTO_PLUGIN_MANIFEST_PATH,
+                    &installed_plugin_manifest_with_stub_json(),
+                ),
+                (
+                    "/project/.venv/lib/python3.13/site-packages/django_ty/stubs/django/__init__.pyi",
+                    "",
+                ),
+            ],
+        );
+
+        assert_plugin_diagnostics(&db, []);
+        assert_eq!(
+            db.project()
+                .settings(&db)
+                .plugins()
+                .active_stub_overlay_paths(),
+            &[SystemPathBuf::from(
+                "/project/.venv/lib/python3.13/site-packages/django_ty/stubs"
+            )]
+        );
+    }
+
+    #[test]
+    fn explicit_plugin_configuration_overrides_an_installed_plugin() {
+        let db = project_database(
+            r#"
+            [environment]
+            python = ".venv"
+
+            [plugins]
+            enabled = true
+            auto-discover = true
+
+            [[plugins.plugin]]
+            id = "django-ty"
+            path = ".ty/plugins/django-ty.mock"
+            runtime = "mock"
+            manifest-path = ".ty/plugins/django-ty.plugin.json"
+            "#,
+            [
+                (
+                    "/project/.venv/pyvenv.cfg",
+                    "home = /python\nversion = 3.13.0",
+                ),
+                ("/python/bin/python3", ""),
+                (AUTO_PLUGIN_MANIFEST_PATH, &installed_plugin_manifest_json()),
+                ("/project/.ty/plugins/django-ty.mock", "plugin artifact"),
+                (
+                    "/project/.ty/plugins/django-ty.plugin.json",
+                    &manifest_json("django-ty", 0),
+                ),
+            ],
+        );
+
+        assert_plugin_diagnostics(&db, []);
+        let [plugin] = db.project().settings(&db).plugins().plugins() else {
+            panic!("expected one explicitly configured plugin");
+        };
+        assert_eq!(
+            plugin.path(),
+            &SystemPathBuf::from("/project/.ty/plugins/django-ty.mock")
+        );
     }
 
     #[test]
@@ -4026,6 +4407,43 @@ mod plugin_tests {
                 "capabilities": {{ "stub-overlays": true }}
             }}"#
         )
+    }
+
+    fn installed_plugin_manifest_json() -> String {
+        r#"{
+            "id": "django-ty",
+            "name": "Django ty plugin",
+            "version": "0.1.0",
+            "protocol-version": { "major": 0, "minor": 1 },
+            "ty-compatibility": { "requirement": ">=0.0.0" },
+            "runtime": { "kind": "mock" },
+            "capabilities": { "class-transform": true },
+            "claims": {
+                "classes": [
+                    { "kind": "subclass-of", "base-qualified-name": "django.db.models.Model" }
+                ]
+            }
+        }"#
+        .to_string()
+    }
+
+    fn installed_plugin_manifest_with_stub_json() -> String {
+        r#"{
+            "id": "django-ty",
+            "name": "Django ty plugin",
+            "version": "0.1.0",
+            "protocol-version": { "major": 0, "minor": 1 },
+            "ty-compatibility": { "requirement": ">=0.0.0" },
+            "runtime": { "kind": "mock" },
+            "capabilities": { "stub-overlays": true },
+            "stub-overlays": [
+                {
+                    "module": "django.db.models.manager",
+                    "path": "stubs/django/db/models/manager.pyi"
+                }
+            ]
+        }"#
+        .to_string()
     }
 
     fn manifest_json_without_capabilities(id: &str, protocol_major: u16) -> String {

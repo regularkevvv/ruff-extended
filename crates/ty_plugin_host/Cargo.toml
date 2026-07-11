@@ -36,6 +36,9 @@ mock = []
 # Non-default production backend: embeds wasmtime to execute real `.wasm` plugin artifacts. Enabled
 # for native builds that want to run WASM plugins; never enabled for the `wasm32` `ty_wasm` build.
 plugins-wasm = ["dep:wasmtime", "dep:serde_json"]
+# Test-only fixture support. Keeping this separate means release builds embed the Wasmtime runtime
+# without requiring a Rust `wasm32-unknown-unknown` target merely to package the checker.
+test-wasm-fixture = []
 
 [lints]
 workspace = true

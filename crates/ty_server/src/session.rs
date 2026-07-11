@@ -1088,19 +1088,14 @@ impl Session {
             // one another. Then listen to everything.
             let roots = self.project_dbs().map(|db| db.project().root(db));
             let project_configuration_paths = self.project_dbs().flat_map(|db| {
-                db.project()
-                    .metadata(db)
-                    .extra_configuration_paths()
-                    .iter()
-                    .map(SystemPathBuf::as_path)
-                    .chain(
-                        db.project()
-                            .settings(db)
-                            .plugins()
-                            .reload_paths()
-                            .iter()
-                            .map(SystemPathBuf::as_path),
-                    )
+                db.project().metadata(db).extra_configuration_paths().chain(
+                    db.project()
+                        .settings(db)
+                        .plugins()
+                        .reload_paths()
+                        .iter()
+                        .map(SystemPathBuf::as_path),
+                )
             });
             let paths = self
                 .project_dbs()
