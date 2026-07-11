@@ -3583,20 +3583,37 @@ impl<'db> Type<'db> {
     /// Descriptor uncertainty only propagates through outer unions, intersections, and aliases;
     /// type arguments do not affect the runtime descriptor class.
     pub(crate) fn is_definitely_non_data_descriptor(self, db: &'db dyn Db) -> bool {
+        self.is_definitely_non_data_descriptor_impl(db, ())
+    }
+
+    // Recursive aliases use `true`, the identity for the all-of classifications above.
+    #[salsa::tracked(
+        cycle_initial=|_, _, _, ()| true,
+        heap_size=ruff_memory_usage::heap_size
+    )]
+    fn is_definitely_non_data_descriptor_impl(self, db: &'db dyn Db, (): ()) -> bool {
         match self {
             Type::Dynamic(_) | Type::Divergent(_) | Type::TypeVar(_) => false,
             Type::Union(union) => union
                 .elements(db)
                 .iter()
-                .all(|ty| ty.is_definitely_non_data_descriptor(db)),
+                .all(|ty| ty.is_definitely_non_data_descriptor_impl(db, ())),
             Type::Intersection(intersection) => intersection
                 .iter_positive(db)
-                .all(|ty| ty.is_definitely_non_data_descriptor(db)),
-            Type::TypeAlias(alias) => alias.value_type(db).is_definitely_non_data_descriptor(db),
+                .all(|ty| ty.is_definitely_non_data_descriptor_impl(db, ())),
+            Type::TypeAlias(alias) => alias
+                .value_type(db)
+                .is_definitely_non_data_descriptor_impl(db, ()),
             _ => !self.may_be_data_descriptor(db),
         }
     }
 
+    // Definite data descriptors use an all-of union fold; possible data descriptors use any-of.
+    // Seed recursive aliases with the corresponding identity value.
+    #[salsa::tracked(
+        cycle_initial=|_, _, _, any_of_union: bool| !any_of_union,
+        heap_size=ruff_memory_usage::heap_size
+    )]
     fn is_data_descriptor_impl(self, db: &'db dyn Db, any_of_union: bool) -> bool {
         match self {
             Type::Dynamic(_) => !any_of_union,
@@ -3613,6 +3630,9 @@ impl<'db> Type<'db> {
             Type::Intersection(intersection) => intersection
                 .iter_positive(db)
                 .any(|ty| ty.is_data_descriptor_impl(db, any_of_union)),
+            Type::TypeAlias(alias) => alias
+                .value_type(db)
+                .is_data_descriptor_impl(db, any_of_union),
             _ => {
                 !self
                     .class_member_with_policy(
@@ -4179,14 +4199,18 @@ impl<'db> Type<'db> {
                     .value_type(db)
                     .member_lookup_with_policy_and_receiver(db, name, policy, receiver),
 
-                _ if policy.no_instance_fallback() => this.invoke_descriptor_protocol(
-                    db,
-                    receiver.unwrap_or(this),
-                    name_str,
-                    Place::Undefined.into(),
-                    InstanceFallbackShadowsNonDataDescriptor::No,
-                    policy,
-                ),
+                _ if policy.no_instance_fallback() => {
+                    let receiver = receiver.unwrap_or(this);
+                    this.invoke_descriptor_protocol(
+                        db,
+                        receiver,
+                        name_str,
+                        Place::Undefined.into(),
+                        InstanceFallbackShadowsNonDataDescriptor::No,
+                        policy,
+                    )
+                    .map_type(|ty| ty.bind_self_typevars(db, receiver))
+                }
 
                 Type::LiteralValue(literal)
                     if matches!(name_str, "name" | "_name_" | "value" | "_value_")
@@ -4599,9 +4623,28 @@ impl<'db> Type<'db> {
 
             Type::BoundMethod(bound_method) => {
                 let signature = bound_method.function(db).signature(db);
-                CallableBinding::from_overloads(self, signature.overloads.iter().cloned())
-                    .with_bound_type(bound_method.self_instance(db))
-                    .into()
+                let self_instance = bound_method.self_instance(db);
+                // Class-based protocol member lookup has already specialized the method for this
+                // receiver. Bake an implicit positional receiver into the signature instead of
+                // checking it structurally again during call inference.
+                if self_instance
+                    .as_protocol_instance()
+                    .is_some_and(|protocol| protocol.to_nominal_instance().is_some())
+                    && signature
+                        .overloads
+                        .iter()
+                        .all(Signature::has_implicit_positional_receiver_annotation)
+                {
+                    let mut binding =
+                        CallableBinding::from_overloads(self, signature.overloads.iter().cloned())
+                            .with_bound_type(bound_method.typing_self_type(db));
+                    binding.bake_bound_type_into_overloads(db);
+                    binding.into()
+                } else {
+                    CallableBinding::from_overloads(self, signature.overloads.iter().cloned())
+                        .with_bound_type(self_instance)
+                        .into()
+                }
             }
 
             Type::KnownBoundMethod(method) => {

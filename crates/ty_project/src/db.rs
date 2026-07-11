@@ -349,10 +349,11 @@ impl ProjectDatabase {
         // cache key before loading the DB. Because of that, access to the `db` (other than system and vendored) is
         // strictly forbidden before resolving the `program_settings`.
 
+        let merged_options = project_metadata.to_merged_options();
+
         // Initialize the `Program` singleton
-        let (program_settings, program_settings_diagnostics) = strategy.to_anyhow(
-            project_metadata.to_program_settings(db.system(), db.vendored(), strategy),
-        )?;
+        let (program_settings, program_settings_diagnostics) = strategy
+            .to_anyhow(merged_options.to_program_settings(db.system(), db.vendored(), strategy))?;
 
         // This must be called before `from_settings`, or the `SearchPath` root
         // will take precedence over the `Project` root, resulting in
@@ -361,12 +362,10 @@ impl ProjectDatabase {
 
         Program::from_settings(&db, program_settings);
 
-        let (settings, settings_diagnostics) = strategy.map_err(
-            project_metadata
-                .options()
-                .to_settings(&db, project_metadata.root(), strategy),
-            |error| anyhow::anyhow!("{}", error.pretty(&db)),
-        )?;
+        let (settings, settings_diagnostics) = strategy
+            .map_err(merged_options.to_settings(&db, strategy), |error| {
+                anyhow::anyhow!("{}", error.pretty(&db))
+            })?;
         db.semantic_plugin_runtime =
             SemanticPluginRuntimeState::from_settings(&settings, db.system());
 

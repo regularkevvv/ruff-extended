@@ -398,6 +398,12 @@ impl<'db> CallableSignature<'db> {
         }
     }
 
+    pub(crate) fn has_parameters(&self) -> bool {
+        self.overloads
+            .iter()
+            .any(|signature| !signature.parameters().as_slice().is_empty())
+    }
+
     /// Replaces any occurrences of `typing.Self` in the parameter and return annotations with the
     /// given type. (Does not bind the `self` parameter; to do that, use
     /// [`bind_self`][Self::bind_self].)
@@ -1044,6 +1050,12 @@ impl<'db> Signature<'db> {
         self.parameters
             .get(0)
             .is_some_and(|parameter| parameter.is_positional() && !parameter.inferred_annotation)
+    }
+
+    pub(crate) fn has_implicit_positional_receiver_annotation(&self) -> bool {
+        self.parameters
+            .get(0)
+            .is_some_and(|parameter| parameter.is_positional() && parameter.inferred_annotation)
     }
 
     pub(crate) fn apply_self(&self, db: &'db dyn Db, self_type: Type<'db>) -> Self {

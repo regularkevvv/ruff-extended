@@ -1498,6 +1498,70 @@ pub struct TerminalOptions {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct AnalysisOptions {
+    /// Whether equality-based checks should preserve broad builtin types rather than narrow them to
+    /// literal types.
+    ///
+    /// By default, ty narrows `value` from `str` to `Literal["a"]` in the positive branch of
+    /// `value == "a"`. When this option is enabled, `value` remains `str`. This also applies to
+    /// membership tests and literal match patterns, which use equality comparisons.
+    ///
+    /// ```python
+    /// from typing import Literal
+    ///
+    /// def parse(value: str) -> Literal["a"] | None:
+    ///     if value == "a":
+    ///         return value  # Accepted by default; `value` remains `str` in strict mode.
+    ///     return None
+    /// ```
+    ///
+    /// Broad builtin types include subclasses, but literal types distinguish values by both their
+    /// runtime type and value. This makes the narrowing unsound even for subclasses that inherit
+    /// builtin equality. For example:
+    ///
+    /// ```python
+    /// class StringSubclass(str): ...
+    ///
+    /// result = parse(StringSubclass("a"))
+    /// # Statically `Literal["a"] | None`, but `result` has runtime type `StringSubclass`.
+    /// ```
+    ///
+    /// The standard library's `StrEnum` and `IntEnum` types are also subclasses of `str` and `int`,
+    /// respectively. This means enum members can encounter the same unsoundness:
+    ///
+    /// ```python
+    /// from enum import StrEnum
+    ///
+    /// class Choice(StrEnum):
+    ///     A = "a"
+    ///
+    /// result = parse(Choice.A)
+    /// # Statically `Literal["a"] | None`, but `result` has runtime type `Choice`.
+    /// ```
+    ///
+    /// A subclass can also override `__eq__` to compare equal to a literal with a different value:
+    ///
+    /// ```python
+    /// class MisleadingStr(str):
+    ///     def __eq__(self, other: object) -> bool:
+    ///         return True
+    ///
+    /// result = parse(MisleadingStr("b"))
+    /// # Statically `Literal["a"] | None`, but `result` contains `"b"` at runtime.
+    /// ```
+    ///
+    /// Enable this option to preserve the broader builtin type instead.
+    ///
+    /// Defaults to `false`.
+    #[option(
+        default = r#"false"#,
+        value_type = "bool",
+        example = r#"
+        # Preserve broad builtin types instead of narrowing them to literals
+        strict-literal-narrowing = true
+        "#
+    )]
+    pub strict_literal_narrowing: Option<bool>,
+
     /// Whether ty should respect `type: ignore` comments.
     ///
     /// When set to `false`, `type: ignore` comments are treated like any other normal
@@ -1574,12 +1638,14 @@ impl AnalysisOptions {
         diagnostics: &mut Vec<OptionDiagnostic>,
     ) -> AnalysisSettings {
         let Self {
+            strict_literal_narrowing,
             respect_type_ignore_comments,
             allowed_unresolved_imports,
             replace_imports_with_any,
         } = self;
 
         let AnalysisSettings {
+            strict_literal_narrowing: strict_literal_narrowing_default,
             respect_type_ignore_comments: respect_type_ignore_default,
             allowed_unresolved_imports: allowed_unresolved_imports_default,
             replace_imports_with_any: replace_imports_with_any_default,
@@ -1608,6 +1674,8 @@ impl AnalysisOptions {
             };
 
         AnalysisSettings {
+            strict_literal_narrowing: strict_literal_narrowing
+                .unwrap_or(strict_literal_narrowing_default),
             respect_type_ignore_comments: respect_type_ignore_comments
                 .unwrap_or(respect_type_ignore_default),
             allowed_unresolved_imports,
@@ -3380,40 +3448,6 @@ impl OptionDiagnostic {
         }
 
         diag
-    }
-}
-
-/// This is a wrapper for options that actually get loaded from configuration files
-/// and the CLI, which also includes a `config_file_override` option that overrides
-/// default configuration discovery with an explicitly-provided path to a configuration file
-#[derive(Debug, Default, PartialEq, Eq, Clone)]
-pub struct ProjectOptionsOverrides {
-    pub config_file_override: Option<SystemPathBuf>,
-    pub fallback_python_version: Option<RangedValue<SupportedPythonVersion>>,
-    pub fallback_python: Option<RelativePathBuf>,
-    pub options: Options,
-}
-
-impl ProjectOptionsOverrides {
-    pub fn new(config_file_override: Option<SystemPathBuf>, options: Options) -> Self {
-        Self {
-            config_file_override,
-            options,
-            ..Self::default()
-        }
-    }
-
-    pub fn apply_to(&self, options: Options) -> Options {
-        let mut combined = self.options.clone().combine(options);
-
-        // Set the fallback python version and path if set
-        combined.environment.combine_with(Some(EnvironmentOptions {
-            python_version: self.fallback_python_version.clone(),
-            python: self.fallback_python.clone(),
-            ..EnvironmentOptions::default()
-        }));
-
-        combined
     }
 }
 
