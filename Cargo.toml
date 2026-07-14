@@ -52,8 +52,8 @@ ty_ide = { path = "crates/ty_ide" }
 ty_module_resolver = { version = "0.0.4", path = "crates/ty_module_resolver" }
 ty_plugin_examples = { path = "crates/ty_plugin_examples" }
 ty_plugin_host = { path = "crates/ty_plugin_host" }
-ty_plugin_protocol = { version = "0.0.2", path = "crates/ty_plugin_protocol" }
-ty_plugin_sdk = { version = "0.0.2", path = "crates/ty_plugin_sdk" }
+ty_plugin_protocol = { version = "0.0.3", path = "crates/ty_plugin_protocol" }
+ty_plugin_sdk = { version = "0.0.3", path = "crates/ty_plugin_sdk" }
 ty_plugin_wasm_fixture = { path = "crates/ty_plugin_wasm_fixture" }
 ty_project = { path = "crates/ty_project", default-features = false }
 ty_python_semantic = { version = "0.0.4", path = "crates/ty_python_semantic" }

@@ -1,8 +1,4 @@
-//! Stable data protocol for `ty` semantic extensions.
-//!
-//! This crate intentionally contains only serialized protocol types. It must
-//! not depend on `ty_python_semantic`, Salsa, AST ids, file ids, or any other
-//! checker internals.
+#![doc = include_str!("../README.md")]
 
 use std::collections::BTreeMap;
 

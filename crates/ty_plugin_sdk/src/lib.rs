@@ -1,21 +1,4 @@
-//! Authoring SDK for `ty` semantic extensions.
-//!
-//! This crate is the ergonomic front door for extension authors. It depends only on
-//! [`ty_plugin_protocol`] — never on the checker internals (`ty_python_semantic`, Salsa, the AST,
-//! or `ty_plugin_host`) — so an extension built against it stays decoupled from `ty`'s implementation
-//! and can eventually target the WASM runtime unchanged.
-//!
-//! It provides three things:
-//!
-//! - [`ManifestBuilder`], a fluent builder that fills in protocol defaults and keeps an extension's
-//!   declared capabilities in sync with its claims.
-//! - The [`Plugin`] trait, which turns a set of typed hook methods into a single
-//!   [`Plugin::handle`] request dispatcher (and a [`Plugin::handle_json`] wire entry point that a
-//!   host transport can call).
-//! - The [`dsl`] module of small constructors for parameters, fields, signatures, and responses.
-//!
-//! The raw protocol types remain available through the re-exported [`protocol`] module for
-//! anything the helpers do not cover.
+#![doc = include_str!("../README.md")]
 
 pub use serde_json;
 pub use ty_plugin_protocol as protocol;
@@ -139,7 +122,7 @@ pub enum DispatchError {
 ///
 /// Invoke this once at the root of a `cdylib` crate, passing an expression that evaluates to a
 /// [`Plugin`]. On `wasm32` targets it generates the two C-ABI exports the host's WASM runtime
-/// calls — `ty_plugin_alloc` and `ty_plugin_handle` — wired to [`wasm::alloc`] and [`wasm::handle`].
+/// calls — `ty_plugin_alloc` and `ty_plugin_handle` — wired to `wasm::alloc` and `wasm::handle`.
 /// On every other target it expands to nothing, so the extension crate still builds for the host.
 ///
 /// ```ignore

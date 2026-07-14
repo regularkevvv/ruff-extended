@@ -1,6 +1,6 @@
 [package]
 name = "ty_plugin_protocol"
-version = "0.0.2"
+version = "0.0.3"
 edition.workspace = true
 rust-version.workspace = true
 homepage = "https://github.com/regularkevvv/ty-extended"
@@ -12,9 +12,6 @@ description = "Stable serialized protocol types for ty semantic extensions."
 readme = "README.md"
 keywords = ["ty", "typing", "extensions"]
 categories = ["development-tools"]
-
-[lib]
-doctest = false
 
 [dependencies]
 serde = { workspace = true }
