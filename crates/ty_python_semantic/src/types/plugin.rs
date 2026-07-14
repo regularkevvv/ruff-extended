@@ -279,7 +279,7 @@ pub(crate) fn plugin_type_expr_to_type_in_class_with_virtual_types<'db>(
     )
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, salsa::Update, get_size2::GetSize)]
+#[derive(Clone, Debug, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
 pub(crate) struct PluginVirtualTypePatch<'db> {
     name: String,
     ty: Type<'db>,

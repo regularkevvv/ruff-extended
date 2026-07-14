@@ -1,6 +1,27 @@
 use insta_cmd::assert_cmd_snapshot;
 
+#[cfg(feature = "plugins-wasm")]
+use ty_plugin_protocol::{
+    CallableSignature, ClassPatch, FieldPatch, MemberAccessPatch, MemberPatch, MemberPatchMode,
+    Parameter, ParameterKind, PluginResponse, TypeExpr,
+};
+
 use crate::CliTest;
+
+#[cfg(feature = "plugins-wasm")]
+fn wasm_plugin_returning(response: &PluginResponse) -> anyhow::Result<String> {
+    let response = serde_json::to_string(response)?;
+    let response_data = serde_json::to_string(&response)?;
+
+    Ok(format!(
+        r#"(module
+          (memory (export "memory") 1)
+          (data (i32.const 0) {response_data})
+          (func (export "ty_plugin_alloc") (param i32) (result i32) i32.const 1024)
+          (func (export "ty_plugin_handle") (param i32 i32) (result i64) i64.const {response_len}))"#,
+        response_len = response.len(),
+    ))
+}
 
 #[test]
 fn cli_config_args_toml_string_basic() -> anyhow::Result<()> {
@@ -820,13 +841,30 @@ missing_widget = Widget()
 #[cfg(feature = "plugins-wasm")]
 #[test]
 fn config_file_wasm_plugin_class_transform_affects_type_checking() -> anyhow::Result<()> {
-    const WASM_MODEL_PLUGIN: &str = r#"
-        (module
-          (memory (export "memory") 1)
-          (data (i32.const 0) "{\"kind\":\"class-patch\",\"fields\":[{\"name\":\"name\",\"type-expr\":{\"expression\":\"str\",\"mode\":\"annotation\"},\"init-parameter\":true}],\"constructor\":{\"parameters\":[{\"name\":\"name\",\"kind\":\"keyword-only\",\"type-expr\":{\"expression\":\"str\",\"mode\":\"annotation\"},\"required\":true}],\"return-type\":{\"expression\":\"object\",\"mode\":\"annotation\"}}}")
-          (func (export "ty_plugin_alloc") (param i32) (result i32) i32.const 1024)
-          (func (export "ty_plugin_handle") (param i32 i32) (result i64) i64.const 320))
-    "#;
+    let constructor_parameter = Parameter {
+        name: Some("name".to_string()),
+        kind: ParameterKind::KeywordOnly,
+        type_expr: Some(TypeExpr::annotation("str")),
+        required: true,
+    };
+    let wasm_model_plugin = wasm_plugin_returning(&PluginResponse::ClassPatch(ClassPatch {
+        fields: vec![FieldPatch {
+            name: "name".to_string(),
+            mode: MemberPatchMode::FillOnMiss,
+            descriptor: None,
+            instance_get_type: TypeExpr::annotation("str"),
+            instance_set_type: None,
+            constructor_parameter: Some(constructor_parameter.clone()),
+            has_default: false,
+        }],
+        class_members: Vec::new(),
+        instance_members: Vec::new(),
+        constructor: Some(CallableSignature {
+            parameters: vec![constructor_parameter],
+            return_type: TypeExpr::annotation("object"),
+        }),
+        diagnostics: Vec::new(),
+    }))?;
 
     let case = CliTest::with_files([
         (
@@ -843,7 +881,6 @@ fn config_file_wasm_plugin_class_transform_affects_type_checking() -> anyhow::Re
             trusted = true
             "#,
         ),
-        (".ty/plugins/toy-model.wasm", WASM_MODEL_PLUGIN),
         (
             ".ty/plugins/toy-model.plugin.json",
             r#"{
@@ -875,6 +912,7 @@ bad_name: int = user.name
 "#,
         ),
     ])?;
+    case.write_file(".ty/plugins/toy-model.wasm", &wasm_model_plugin)?;
 
     assert_cmd_snapshot!(case.command(), @r#"
     success: false
@@ -907,13 +945,13 @@ bad_name: int = user.name
 #[cfg(feature = "plugins-wasm")]
 #[test]
 fn config_file_wasm_plugin_member_hooks_affect_type_checking() -> anyhow::Result<()> {
-    const WASM_MEMBER_PLUGIN: &str = r#"
-        (module
-          (memory (export "memory") 1)
-          (data (i32.const 0) "{\"kind\":\"member-patch\",\"name\":\"dynamic\",\"type-expr\":{\"expression\":\"str\",\"mode\":\"annotation\"}}")
-          (func (export "ty_plugin_alloc") (param i32) (result i32) i32.const 1024)
-          (func (export "ty_plugin_handle") (param i32 i32) (result i64) i64.const 93))
-    "#;
+    let wasm_member_plugin = wasm_plugin_returning(&PluginResponse::MemberPatch(MemberPatch {
+        name: "dynamic".to_string(),
+        mode: MemberPatchMode::FillOnMiss,
+        access: MemberAccessPatch::value(TypeExpr::annotation("str")),
+        read_only: false,
+        diagnostics: Vec::new(),
+    }))?;
 
     let case = CliTest::with_files([
         (
@@ -930,7 +968,6 @@ fn config_file_wasm_plugin_member_hooks_affect_type_checking() -> anyhow::Result
             trusted = true
             "#,
         ),
-        (".ty/plugins/toy-members.wasm", WASM_MEMBER_PLUGIN),
         (
             ".ty/plugins/toy-members.plugin.json",
             r#"{
@@ -965,6 +1002,7 @@ bad_dynamic: int = model.dynamic
 "#,
         ),
     ])?;
+    case.write_file(".ty/plugins/toy-members.wasm", &wasm_member_plugin)?;
 
     assert_cmd_snapshot!(case.command(), @r#"
     success: false

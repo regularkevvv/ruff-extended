@@ -121,7 +121,7 @@ pub(super) fn synthesize_namedtuple_class_member<'db>(
     }
 }
 
-#[derive(Debug, salsa::Update, get_size2::GetSize, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, get_size2::GetSize, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub struct NamedTupleField<'db> {
     pub(crate) name: Name,
     pub(crate) ty: Type<'db>,
@@ -448,6 +448,7 @@ impl<'db> DynamicNamedTupleLiteral<'db> {
 
     fn spec(self, db: &'db dyn Db) -> NamedTupleSpec<'db> {
         #[salsa::tracked(
+            returns(copy),
             cycle_initial=|db, _, _| NamedTupleSpec::unknown(db),
             heap_size=ruff_memory_usage::heap_size
         )]
@@ -492,7 +493,7 @@ impl<'db> DynamicNamedTupleLiteral<'db> {
 /// This enum provides stable identity for `DynamicNamedTupleLiteral` instances:
 /// - For assigned calls, the `Definition` uniquely identifies the class.
 /// - For dangling calls, a relative offset provides stable identity.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, salsa::Update, get_size2::GetSize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, get_size2::GetSize, salsa::SalsaValue)]
 pub enum DynamicNamedTupleAnchor<'db> {
     /// We're dealing with a `collections.namedtuple()` call
     /// that's assigned to a variable.
@@ -597,6 +598,7 @@ pub struct NamedTupleSpec<'db> {
     #[returns(deref)]
     pub(crate) fields: Box<[NamedTupleField<'db>]>,
 
+    #[returns(copy)]
     pub(crate) has_known_fields: bool,
 }
 

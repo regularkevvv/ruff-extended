@@ -131,7 +131,7 @@ pub struct ProgramSettings {
     pub semantic_plugins: SemanticPluginEnvironment,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, salsa::Update, get_size2::GetSize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, get_size2::GetSize)]
 pub struct SemanticPluginEnvironment {
     fingerprint: u64,
     plugins: Box<[SemanticPlugin]>,
@@ -158,7 +158,7 @@ impl SemanticPluginEnvironment {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, salsa::Update, get_size2::GetSize)]
+#[derive(Clone, Debug, Eq, PartialEq, get_size2::GetSize)]
 pub struct SemanticPlugin {
     id: String,
     runtime: SemanticPluginRuntime,
@@ -328,7 +328,7 @@ impl SemanticPlugin {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, salsa::Update, get_size2::GetSize)]
+#[derive(Clone, Debug, Eq, PartialEq, get_size2::GetSize)]
 pub struct SemanticPluginMemberClaim {
     owner_qualified_name: String,
     member_name: String,
@@ -351,7 +351,7 @@ impl SemanticPluginMemberClaim {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, salsa::Update, get_size2::GetSize)]
+#[derive(Clone, Debug, Eq, PartialEq, get_size2::GetSize)]
 pub struct SemanticPluginMethodClaim {
     base_qualified_name: String,
     method_name: String,
@@ -377,7 +377,7 @@ impl SemanticPluginMethodClaim {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, salsa::Update, get_size2::GetSize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, get_size2::GetSize)]
 pub enum SemanticPluginRuntime {
     Mock,
     InProcess,

@@ -402,7 +402,7 @@ pub(crate) struct VisitSpecialization;
 /// Similarly, there is `Bottom[list[Any]]`.
 /// This type is harder to make sense of in a set-theoretic framework, but
 /// it is a subtype of all materializations of `list[Any]`.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, salsa::Update, get_size2::GetSize)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, get_size2::GetSize)]
 pub enum MaterializationKind {
     Top,
     Bottom,
@@ -423,7 +423,7 @@ impl MaterializationKind {
 /// define a `__get__` method, while data descriptors additionally define a `__set__`
 /// method or a `__delete__` method. This enum is used to categorize attributes into two
 /// groups: (1) data descriptors and (2) normal attributes or non-data descriptors.
-#[derive(Clone, Debug, Copy, PartialEq, Eq, Hash, salsa::Update, get_size2::GetSize)]
+#[derive(Clone, Debug, Copy, PartialEq, Eq, Hash, get_size2::GetSize, salsa::SalsaValue)]
 pub(crate) enum AttributeKind {
     DataDescriptor,
     NormalOrNonDataDescriptor,
@@ -622,9 +622,13 @@ pub enum PropertyAccessorRole {
 /// Represents an instance of `builtins.property` or `enum.property`.
 #[salsa::interned(debug, constructor=new_internal, heap_size=ruff_memory_usage::heap_size)]
 pub struct PropertyInstanceType<'db> {
+    #[returns(copy)]
     pub getter: Option<Type<'db>>,
+    #[returns(copy)]
     pub setter: Option<Type<'db>>,
+    #[returns(copy)]
     pub deleter: Option<Type<'db>>,
+    #[returns(copy)]
     instance_class: KnownClass,
 }
 
@@ -853,6 +857,7 @@ impl From<DataclassTransformerFlags> for DataclassFlags {
 /// dataclass-transformer decorator calls.
 #[salsa::interned(debug, heap_size=ruff_memory_usage::heap_size)]
 pub struct DataclassParams<'db> {
+    #[returns(copy)]
     flags: DataclassFlags,
 
     #[returns(deref)]
@@ -904,7 +909,7 @@ impl<'db> DataclassParams<'db> {
 
 /// Representation of a type: a set of possible values at runtime.
 ///
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, salsa::Update, get_size2::GetSize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, get_size2::GetSize, salsa::SalsaValue)]
 pub enum Type<'db> {
     /// The dynamic type: a statically unknown set of values
     Dynamic(DynamicType<'db>),
@@ -1129,8 +1134,14 @@ impl<'db> Type<'db> {
     }
 
     /// Returns `true` if this type contains a `Self` type variable.
-    pub(crate) fn contains_self(&self, db: &'db dyn Db) -> bool {
-        any_over_type(db, *self, false, |ty| {
+    pub(crate) fn contains_self(self, db: &'db dyn Db) -> bool {
+        if let Type::NominalInstance(instance) = self
+            && !instance.is_definition_generic(db)
+        {
+            return false;
+        }
+
+        any_over_type(db, self, false, |ty| {
             ty.as_typevar().is_some_and(|tv| tv.typevar(db).is_self(db))
         })
     }
@@ -1460,6 +1471,7 @@ impl<'db> Type<'db> {
     }
 
     #[salsa::tracked(
+        returns(copy),
         cycle_initial=|_, id, _, materialization_kind| {
             Type::Divergent(DivergentType::new(id).materialized(materialization_kind))
         },
@@ -2698,7 +2710,7 @@ impl<'db> Type<'db> {
     }
 
     fn lookup_dunder_new(self, db: &'db dyn Db) -> Option<PlaceAndQualifiers<'db>> {
-        #[salsa::tracked(cycle_initial=|_, _, _, ()| None, heap_size=ruff_memory_usage::heap_size)]
+        #[salsa::tracked(returns(copy), cycle_initial=|_, _, _, ()| None, heap_size=ruff_memory_usage::heap_size)]
         fn lookup_dunder_new_inner<'db>(
             db: &'db dyn Db,
             ty: Type<'db>,
@@ -2724,6 +2736,7 @@ impl<'db> Type<'db> {
     }
 
     #[salsa::tracked(
+        returns(copy),
         cycle_initial=|_, id, _, _, _| Place::bound(Type::divergent(id)).into(),
         cycle_fn=|db, cycle, previous: &PlaceAndQualifiers<'db>, member: PlaceAndQualifiers<'db>, _, _, _| {
             member.cycle_normalized(db, *previous, cycle)
@@ -3297,7 +3310,7 @@ impl<'db> Type<'db> {
         instance: Option<Type<'db>>,
         owner: Type<'db>,
     ) -> Option<(Type<'db>, AttributeKind)> {
-        #[salsa::tracked(cycle_initial=|_, _, _, _, _| None, heap_size=ruff_memory_usage::heap_size)]
+        #[salsa::tracked(returns(copy), cycle_initial=|_, _, _, _, _| None, heap_size=ruff_memory_usage::heap_size)]
         fn try_call_dunder_get_inner<'db>(
             db: &'db dyn Db,
             ty: Type<'db>,
@@ -3611,6 +3624,7 @@ impl<'db> Type<'db> {
 
     // Recursive aliases use `true`, the identity for the all-of classifications above.
     #[salsa::tracked(
+        returns(copy),
         cycle_initial=|_, _, _, ()| true,
         heap_size=ruff_memory_usage::heap_size
     )]
@@ -3634,6 +3648,7 @@ impl<'db> Type<'db> {
     // Definite data descriptors use an all-of union fold; possible data descriptors use any-of.
     // Seed recursive aliases with the corresponding identity value.
     #[salsa::tracked(
+        returns(copy),
         cycle_initial=|_, _, _, any_of_union: bool| !any_of_union,
         heap_size=ruff_memory_usage::heap_size
     )]
@@ -3852,6 +3867,7 @@ impl<'db> Type<'db> {
         receiver: Option<Type<'db>>,
     ) -> PlaceAndQualifiers<'db> {
         #[salsa::tracked(
+            returns(copy),
             cycle_initial=|_, id, _, _, _, _| Place::bound(Type::divergent(id)).into(),
             cycle_fn=|db, cycle, previous: &PlaceAndQualifiers<'db>, member: PlaceAndQualifiers<'db>, _, _, _, _| {
                 member.cycle_normalized(db, *previous, cycle)
@@ -6489,6 +6505,7 @@ impl<'db> Type<'db> {
     }
 
     #[salsa::tracked(
+        returns(copy),
         cycle_initial=|_, id, _, _| Type::divergent(id),
         cycle_fn=|db, cycle, previous: &Type<'db>, value: Type<'db>, _, _| {
             value.cycle_normalized(db, *previous, cycle)
@@ -7156,6 +7173,7 @@ impl<'db> Type<'db> {
 
     #[allow(clippy::used_underscore_binding)]
     #[salsa::tracked(
+        returns(copy),
         cycle_initial=|_, id, _, ()| Type::divergent(id),
         cycle_fn=|db, cycle, previous: &Type<'db>, value: Type<'db>, _, ()| {
             value.cycle_normalized(db, *previous, cycle)
@@ -7990,7 +8008,7 @@ impl<'db> TypeMapping<'_, 'db> {
 /// (e.g. `Divergent` is assignable to `@Todo`, but `@Todo | Divergent` must not be reduced to `@Todo`).
 /// Otherwise, type inference cannot converge properly.
 /// For detailed properties of this type, see the unit test at the end of the file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DivergentType {
     /// The query ID that caused the cycle.
     id: salsa::Id,
@@ -8026,7 +8044,7 @@ impl DivergentType {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq, salsa::Update, get_size2::GetSize)]
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq, get_size2::GetSize, salsa::SalsaValue)]
 pub enum DynamicType<'db> {
     /// An explicitly annotated `typing.Any`
     Any,
@@ -8103,7 +8121,7 @@ impl std::fmt::Display for DynamicType<'_> {
 
 bitflags! {
     /// Type qualifiers that appear in an annotation expression.
-    #[derive(Copy, Clone, Debug, Eq, PartialEq, Default, salsa::Update, Hash)]
+    #[derive(Copy, Clone, Debug, Eq, PartialEq, Default, Hash)]
     pub struct TypeQualifiers: u8 {
         /// `typing.ClassVar`
         const CLASS_VAR = 1 << 0;
@@ -8169,7 +8187,7 @@ impl TypeQualifiers {
 ///
 /// Example: `Annotated[ClassVar[tuple[int]], "metadata"]` would have type `tuple[int]` and the
 /// qualifier `ClassVar`.
-#[derive(Clone, Debug, Copy, Eq, PartialEq, salsa::Update, get_size2::GetSize)]
+#[derive(Clone, Debug, Copy, Eq, PartialEq, get_size2::GetSize, salsa::SalsaValue)]
 pub(crate) struct TypeAndQualifiers<'db> {
     inner: Type<'db>,
     origin: TypeOrigin,
@@ -8241,7 +8259,7 @@ impl<'db> TypeAndQualifiers<'db> {
 /// Error struct providing information on type(s) that were deemed to be invalid
 /// in a type expression context, and the type we should therefore fallback to
 /// for the problematic type expression.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, get_size2::GetSize, salsa::Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, get_size2::GetSize, salsa::SalsaValue)]
 pub struct InvalidTypeExpressionError<'db> {
     fallback_type: Type<'db>,
     invalid_expressions: smallvec::SmallVec<[InvalidTypeExpression<'db>; 1]>,
@@ -8270,7 +8288,7 @@ impl<'db> InvalidTypeExpressionError<'db> {
 }
 
 /// Enumeration of various types that are invalid in type-expression contexts
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, get_size2::GetSize, salsa::Update)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, get_size2::GetSize, salsa::SalsaValue)]
 enum InvalidTypeExpression<'db> {
     /// Some types always require exactly one argument when used in a type expression
     RequiresOneArgument(SpecialFormType),
@@ -8624,6 +8642,7 @@ impl<'db> AwaitError<'db> {
 #[salsa::interned(debug, heap_size=ruff_memory_usage::heap_size)]
 pub struct ModuleLiteralType<'db> {
     /// The imported module.
+    #[returns(copy)]
     pub module: Module<'db>,
 
     /// The file in which this module was imported.
@@ -8636,6 +8655,7 @@ pub struct ModuleLiteralType<'db> {
     /// single-file modules), and ensures that two module-literal types that both refer to
     /// the same underlying single-file module are understood by ty as being equivalent types
     /// in all situations.
+    #[returns(copy)]
     _importing_file: Option<File>,
 }
 
@@ -8802,14 +8822,14 @@ impl<'db> ModuleLiteralType<'db> {
 }
 
 /// Either the explicit `metaclass=` keyword of the class, or the inferred metaclass of one of its base classes.
-#[derive(Debug, Clone, PartialEq, Eq, salsa::Update, get_size2::GetSize)]
+#[derive(Debug, Clone, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
 pub(super) struct MetaclassCandidate<'db> {
     metaclass: ClassType<'db>,
     explicit_metaclass_of: StaticClassLiteral<'db>,
 }
 
 /// Information about a `@dataclass_transform`-decorated metaclass.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, salsa::Update, get_size2::GetSize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, get_size2::GetSize, salsa::SalsaValue)]
 pub(super) struct MetaclassTransformInfo<'db> {
     pub(super) params: DataclassTransformerParams<'db>,
 
@@ -8820,9 +8840,11 @@ pub(super) struct MetaclassTransformInfo<'db> {
 
 #[salsa::interned(debug, heap_size=ruff_memory_usage::heap_size)]
 pub struct TypeIsType<'db> {
+    #[returns(copy)]
     type_argument: Type<'db>,
     /// The ID of the scope to which the place belongs
     /// and the ID of the place itself within that scope.
+    #[returns(copy)]
     place_info: Option<(ScopeId<'db>, ScopedPlaceId)>,
 }
 
@@ -8901,9 +8923,11 @@ impl<'db> VarianceInferable<'db> for TypeIsType<'db> {
 
 #[salsa::interned(debug, heap_size=ruff_memory_usage::heap_size)]
 pub struct TypeGuardType<'db> {
+    #[returns(copy)]
     return_type: Type<'db>,
     /// The ID of the scope to which the place belongs
     /// and the ID of the place itself within that scope.
+    #[returns(copy)]
     place_info: Option<(ScopeId<'db>, ScopedPlaceId)>,
 }
 

@@ -690,6 +690,20 @@ AliasAndName(name=1)
 AliasAndName(name=None)  # error: [invalid-argument-type]
 ```
 
+The older `populate_by_name=True` setting has the same behavior:
+
+```py
+class PopulatedByName(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    name: int = Field(alias="alias")
+
+PopulatedByName(alias=1)
+PopulatedByName(name=1)
+PopulatedByName(alias=None)  # error: [invalid-argument-type]
+PopulatedByName(name=None)  # error: [invalid-argument-type]
+```
+
 Passing none of these should be an error:
 
 ```py
@@ -739,7 +753,8 @@ ValidationAlias(alias=1)  # error: [missing-argument]
 
 ## Extra fields
 
-By default, Pydantic allows arbitrary extra data which is simply ignored:
+By default, Pydantic allows arbitrary extra data which is simply ignored. This often indicates a
+mistake though, so ty emits a warning by default:
 
 ```py
 from pydantic import BaseModel, ConfigDict
@@ -747,10 +762,34 @@ from pydantic import BaseModel, ConfigDict
 class Person(BaseModel):
     name: str
 
-Person(name="Alice", something_else=7)
+Person(name="Alice", something_else=7)  # error: [pydantic-discarded-extra-argument]
 ```
 
-By setting `extra="forbid"`, this can be disallowed:
+The same thing happens when explicitly setting `extra="ignore"`:
+
+```py
+class PersonIgnoringExtras(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+
+PersonIgnoringExtras(name="Alice", something_else=7)  # error: [pydantic-discarded-extra-argument]
+```
+
+When `extra="allow"` is set, extra arguments are explicitly allowed (and stored in the model at
+runtime), so we do not emit a warning in this case:
+
+```py
+class PersonAllowingExtras(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    name: str
+
+PersonAllowingExtras(name="Alice", something_else=7)
+```
+
+Conversely, when setting `extra="forbid"`, a hard `unknown-argument` error is emitted, since the
+construction would fail at runtime:
 
 ```py
 class PersonWithoutExtras(BaseModel):
@@ -761,20 +800,6 @@ class PersonWithoutExtras(BaseModel):
 # revealed: (self: PersonWithoutExtras, *, name: LaxStr) -> None
 reveal_type(PersonWithoutExtras.__init__)
 PersonWithoutExtras(name="Alice", something_else=7)  # error: [unknown-argument]
-
-class PersonIgnoringExtras(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    name: str
-
-PersonIgnoringExtras(name="Alice", something_else=7)
-
-class PersonAllowingExtras(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    name: str
-
-PersonAllowingExtras(name="Alice", something_else=7)
 ```
 
 ## Custom initializers and extra fields
@@ -805,6 +830,9 @@ class RestrictiveBase(BaseModel):
     def __init__(self, name: str) -> None:
         super().__init__(name=name)
 
+RestrictiveBase(name="Alice")
+RestrictiveBase(name="Alice", city="Berlin")  # error: [unknown-argument]
+
 class RestrictiveUser(RestrictiveBase):
     name: str
 
@@ -818,9 +846,11 @@ The variadic keyword parameter uses a collision-free name when the model already
 `extra`:
 
 ```py
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 class PersonWithExtraField(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     extra: int
 
 # revealed: (self: PersonWithExtraField, *, extra: LaxInt, **extra_: Any) -> None
@@ -1083,7 +1113,7 @@ class InheritsForbidExtras(ForbidExtras):
 InheritsForbidExtras(name="Alice", something_else=7)  # error: [unknown-argument]
 
 class OverridesForbidExtras(ForbidExtras):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="allow")
 
     name: str
 
@@ -1280,6 +1310,8 @@ reveal_type(User.__init__)  # revealed: (self: User, *, name: LaxStr, age: LaxIn
 
 User(name="alice")
 User(name="alice", age=1)
+
+# error: [pydantic-discarded-extra-argument]
 User(name="alice", extra=1)
 
 # error: [missing-argument]
