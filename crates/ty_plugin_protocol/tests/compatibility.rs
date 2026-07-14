@@ -2,7 +2,7 @@
 
 use ty_plugin_protocol::{
     CURRENT_PROTOCOL_VERSION, PluginManifest, PluginResponse, ProtocolCompatibility,
-    ProtocolVersion,
+    ProtocolVersion, TypeExpr,
 };
 
 fn host() -> ProtocolVersion {
@@ -88,4 +88,13 @@ fn response_tolerates_unknown_forward_compatible_fields() {
         panic!("expected a call-return patch");
     };
     assert_eq!(patch.return_type.expression, "int");
+}
+
+#[test]
+fn type_expression_without_snapshot_remains_compatible() {
+    let type_expr: TypeExpr =
+        serde_json::from_str(r#"{"expression":"tuple[str, int]","mode":"annotation"}"#)
+            .expect("protocol-v1 type expression");
+
+    assert!(type_expr.snapshot.is_none());
 }

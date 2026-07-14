@@ -140,6 +140,7 @@ fn host_executes_example_class_transform_hook() {
                 has_default: false,
                 source: SymbolSource::default(),
             }],
+            methods: Vec::new(),
             nested_classes: Vec::new(),
             class_constants: Vec::new(),
             source: SymbolSource::default(),

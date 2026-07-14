@@ -1,10 +1,12 @@
 use ty_plugin_protocol::{
     AnalyzeClassRequest, ArgumentKind, ArgumentSummary, AssignedValueSummary,
     BuildProjectIndexRequest, CallRequest, CallValueSummary, CallableSignature, ClassClaim,
-    ClassPatch, ClassSummary, FieldPatch, FieldSummary, LiteralValue, MemberAccessPatch, Parameter,
+    ClassPatch, ClassSummary, FieldPatch, FieldSummary, LiteralValue, MemberAccessPatch,
+    MemberPatchMode, MutationOperation, MutationRequest, MutationResponse, Parameter,
     ParameterKind, PluginCapabilities, PluginClaims, PluginManifest, PluginRequest, PluginResponse,
     ProjectContext, ProjectIndexResponse, ProtocolVersion, ReceiverSummary, RuntimeSpec,
-    SemanticContext, SettingsModuleSummary, SymbolRef, SymbolSource, TypeExpr, VersionReq,
+    SemanticContext, SettingsModuleSummary, SymbolRef, SymbolSource, TypeExpr, TypeSnapshot,
+    TypeSnapshotField, VersionReq,
 };
 
 #[test]
@@ -28,6 +30,7 @@ fn serializes_manifest() {
             classes: vec![ClassClaim::subclass_of("example.Model")],
             settings: vec![ty_plugin_protocol::SettingsClaim {
                 module: "app.settings".to_string(),
+                config_key: None,
             }],
             ..PluginClaims::default()
         },
@@ -62,7 +65,8 @@ fn serializes_manifest() {
         "project-index": true,
         "cross-symbol-contributions": false,
         "settings-data": true,
-        "virtual-types": false
+        "virtual-types": false,
+        "mutation-validation": false
       },
       "claims": {
         "classes": [
@@ -97,6 +101,7 @@ fn serializes_class_transform_request() {
                     callee: SymbolRef {
                         qualified_name: "minidjango.CharField".to_string(),
                     },
+                    receiver: None,
                     arguments: vec![ArgumentSummary {
                         name: Some("max_length".to_string()),
                         kind: ArgumentKind::Keyword,
@@ -110,6 +115,7 @@ fn serializes_class_transform_request() {
                 has_default: false,
                 source: SymbolSource::default(),
             }],
+            methods: Vec::new(),
             nested_classes: Vec::new(),
             class_constants: Vec::new(),
             source: SymbolSource::default(),
@@ -183,6 +189,7 @@ fn serializes_class_patch_response() {
     let response = PluginResponse::ClassPatch(ClassPatch {
         fields: vec![FieldPatch {
             name: "name".to_string(),
+            mode: MemberPatchMode::FillOnMiss,
             descriptor: Some(MemberAccessPatch::Descriptor {
                 class_type: Some(TypeExpr::annotation("minidjango.CharField[str]")),
                 instance_get_type: TypeExpr::annotation("str"),
@@ -218,6 +225,7 @@ fn serializes_class_patch_response() {
       "fields": [
         {
           "name": "name",
+          "mode": "fill-on-miss",
           "descriptor": {
             "kind": "descriptor",
             "class-type": {
@@ -295,6 +303,7 @@ fn serializes_project_index_request_and_response() {
                     callee: SymbolRef {
                         qualified_name: "minidjango.ForeignKey".to_string(),
                     },
+                    receiver: None,
                     arguments: vec![ArgumentSummary {
                         name: None,
                         kind: ArgumentKind::Positional,
@@ -310,6 +319,7 @@ fn serializes_project_index_request_and_response() {
                 has_default: false,
                 source: SymbolSource::default(),
             }],
+            methods: Vec::new(),
             nested_classes: Vec::new(),
             class_constants: Vec::new(),
             source: SymbolSource::default(),
@@ -321,6 +331,7 @@ fn serializes_project_index_request_and_response() {
             diagnostics: Vec::new(),
             source: SymbolSource::default(),
         }],
+        assignments: Vec::new(),
         previous_index_fingerprint: None,
     });
 
@@ -479,6 +490,74 @@ fn serializes_receiver_aware_call_request() {
       }
     }
     "#);
+}
+
+#[test]
+fn structural_type_snapshot_round_trips() {
+    let snapshot = TypeSnapshot::Nominal {
+        qualified_name: "django.db.models.query.QuerySet".to_string(),
+        arguments: vec![
+            TypeSnapshot::expression(&TypeExpr::annotation("app.Book")),
+            TypeSnapshot::TypedDict {
+                fields: vec![TypeSnapshotField {
+                    name: "title".to_string(),
+                    type_snapshot: TypeSnapshot::expression(&TypeExpr::annotation("str")),
+                    required: true,
+                    read_only: false,
+                }],
+                extra_items: None,
+                closed: true,
+            },
+        ],
+    };
+    let type_expr =
+        TypeExpr::annotation("QuerySet[Book, TypedDict(...)]").with_snapshot(snapshot.clone());
+
+    let json = serde_json::to_string(&type_expr).expect("serialize type snapshot");
+    let restored: TypeExpr = serde_json::from_str(&json).expect("deserialize type snapshot");
+
+    assert_eq!(restored.snapshot.as_deref(), Some(&snapshot));
+}
+
+#[test]
+fn mutation_request_and_response_round_trip() {
+    let request = PluginRequest::ValidateMutation(MutationRequest {
+        context: context(),
+        operation: MutationOperation::ItemSet,
+        receiver: TypeExpr::annotation("django.http.request.QueryDict"),
+        key: Some(ArgumentSummary {
+            name: None,
+            kind: ArgumentKind::Positional,
+            type_expr: Some(TypeExpr::annotation("str")),
+            value: LiteralValue::Str {
+                value: "name".to_string(),
+            },
+            source: None,
+        }),
+        value: Some(ArgumentSummary {
+            name: None,
+            kind: ArgumentKind::Positional,
+            type_expr: Some(TypeExpr::annotation("str")),
+            value: LiteralValue::Str {
+                value: "Ada".to_string(),
+            },
+            source: None,
+        }),
+        source: SymbolSource::default(),
+        project_index: None,
+    });
+    let request_json = serde_json::to_string(&request).expect("serialize mutation request");
+    let restored_request: PluginRequest =
+        serde_json::from_str(&request_json).expect("deserialize mutation request");
+    assert_eq!(restored_request, request);
+
+    let response = PluginResponse::MutationDiagnostics(MutationResponse {
+        diagnostics: Vec::new(),
+    });
+    let response_json = serde_json::to_string(&response).expect("serialize mutation response");
+    let restored_response: PluginResponse =
+        serde_json::from_str(&response_json).expect("deserialize mutation response");
+    assert_eq!(restored_response, response);
 }
 
 fn context() -> SemanticContext {

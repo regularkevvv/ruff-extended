@@ -37,6 +37,14 @@ fn builds_capability_routes_from_manifest_claims() {
         expected.as_slice()
     );
     assert_eq!(routes.settings_plugins("app.settings"), expected.as_slice());
+    assert_eq!(
+        routes.mutation_class_plugins("example.Immutable"),
+        expected.as_slice()
+    );
+    assert_eq!(
+        routes.mutation_subclass_plugins("django.QueryDict"),
+        expected.as_slice()
+    );
     assert_eq!(routes.project_index_plugins(), expected.as_slice());
     assert!(routes.class_transform_plugins("other.Model").is_empty());
     assert!(
@@ -52,6 +60,7 @@ fn mock_runner_returns_registered_response() {
     let response = PluginResponse::ClassPatch(ClassPatch {
         fields: vec![FieldPatch {
             name: "name".to_string(),
+            mode: ty_plugin_protocol::MemberPatchMode::FillOnMiss,
             descriptor: None,
             instance_get_type: TypeExpr::expression("str"),
             instance_set_type: Some(TypeExpr::expression("str")),
@@ -96,6 +105,7 @@ fn mock_runner_returns_registered_response() {
                     decorators: Vec::new(),
                     metaclass: None,
                     fields: Vec::new(),
+                    methods: Vec::new(),
                     nested_classes: Vec::new(),
                     class_constants: Vec::new(),
                     source: SymbolSource::default(),
@@ -154,6 +164,20 @@ fn rejects_contribution_target_claim_without_cross_symbol_capability() {
     );
 }
 
+#[test]
+fn rejects_mutation_claim_without_mutation_validation_capability() {
+    let mut manifest = manifest();
+    manifest.capabilities.mutation_validation = false;
+
+    let error = PluginEnvironment::from_manifests(vec![manifest]).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("mutation claims without the mutation-validation capability")
+    );
+}
+
 fn manifest() -> PluginManifest {
     PluginManifest {
         id: "plugin.model".to_string(),
@@ -171,6 +195,7 @@ fn manifest() -> PluginManifest {
             project_index: true,
             cross_symbol_contributions: true,
             settings_data: true,
+            mutation_validation: true,
             ..PluginCapabilities::default()
         },
         claims: PluginClaims {
@@ -188,7 +213,12 @@ fn manifest() -> PluginManifest {
             methods: vec![MethodClaim::on_subclass_of("django.Manager", "filter")],
             settings: vec![SettingsClaim {
                 module: "app.settings".to_string(),
+                config_key: None,
             }],
+            mutations: vec![
+                ClassClaim::exact("example.Immutable"),
+                ClassClaim::subclass_of("django.QueryDict"),
+            ],
             ..PluginClaims::default()
         },
         config_schema: None,

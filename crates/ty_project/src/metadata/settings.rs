@@ -209,6 +209,11 @@ impl PluginEntrySettings {
         &self.config
     }
 
+    pub fn with_config(mut self, config: PluginConfig) -> Self {
+        self.config = config;
+        self
+    }
+
     pub fn stub_overlay_path(&self) -> Option<&SystemPathBuf> {
         self.stub_overlay_path.as_ref()
     }

@@ -2139,7 +2139,19 @@ impl<'db> Bindings<'db> {
 
                         Some(KnownFunction::Cast) => {
                             if let [Some(casted_ty), Some(_)] = overload.parameter_types() {
-                                overload.set_return_type(casted_ty.project_type_form(db));
+                                overload.set_return_type(match casted_ty {
+                                    Type::KnownInstance(KnownInstanceType::Annotated(
+                                        annotated,
+                                    )) => Type::KnownInstance(KnownInstanceType::Annotated(
+                                        crate::types::AnnotatedType::new(
+                                            db,
+                                            annotated.base(db).project_type_form(db),
+                                            annotated.metadata(db).clone(),
+                                            true,
+                                        ),
+                                    )),
+                                    _ => casted_ty.project_type_form(db),
+                                });
                             }
                         }
 

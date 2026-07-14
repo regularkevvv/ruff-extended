@@ -11,9 +11,9 @@ use ty_plugin_sdk::protocol::{
     AnalyzeClassRequest, ArgumentKind, ArgumentSummary, AssignedValueSummary,
     BuildProjectIndexRequest, CallRequest, CallReturnPatch, CallValueSummary, Contribution,
     ContributionPatch, ContributionTarget, DiagnosticLocation, DiagnosticSeverity, FieldPatch,
-    LiteralValue, MemberAccessPatch, PluginDiagnostic, PluginManifest, PluginResponse,
-    ProjectIndexResponse, SymbolSource, TypeExpr, VirtualTypeDefinition, VirtualTypeField,
-    VirtualTypeShape,
+    LiteralValue, MemberAccessPatch, MemberPatchMode, PluginDiagnostic, PluginManifest,
+    PluginResponse, ProjectIndexResponse, SymbolSource, TypeExpr, VirtualTypeDefinition,
+    VirtualTypeField, VirtualTypeShape,
 };
 use ty_plugin_sdk::serde_json::{self, Value, json};
 use ty_plugin_sdk::{ManifestBuilder, Plugin};
@@ -133,6 +133,7 @@ impl Plugin for MiniDjangoPlugin {
                         qualified_name: target.expression.clone(),
                     },
                     patch: ContributionPatch::Field(FieldPatch {
+                        mode: MemberPatchMode::FillOnMiss,
                         name: reverse_name.clone(),
                         descriptor: None,
                         instance_get_type: TypeExpr::annotation(model_manager_virtual_type_name(
@@ -965,6 +966,7 @@ fn field_patch_from_call(
     };
 
     Some(FieldPatch {
+        mode: MemberPatchMode::ReplaceExisting,
         name: field_name.to_string(),
         descriptor: Some(MemberAccessPatch::Descriptor {
             class_type: None,
@@ -1000,6 +1002,7 @@ fn field_type_from_call(
 
 fn non_init_field(name: impl Into<String>, ty: TypeExpr) -> FieldPatch {
     FieldPatch {
+        mode: MemberPatchMode::FillOnMiss,
         name: name.into(),
         descriptor: None,
         instance_get_type: ty.clone(),

@@ -162,6 +162,13 @@ pub struct DynamicNamedTupleLiteral<'db> {
 impl get_size2::GetSize for DynamicNamedTupleLiteral<'_> {}
 
 impl<'db> DynamicNamedTupleLiteral<'db> {
+    pub(crate) fn plugin_virtual_identity(self, db: &'db dyn Db) -> Option<&'db str> {
+        match self.anchor(db) {
+            DynamicNamedTupleAnchor::PluginVirtual { identity, .. } => Some(identity.as_str()),
+            _ => None,
+        }
+    }
+
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,

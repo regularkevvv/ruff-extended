@@ -87,6 +87,28 @@ impl ManifestBuilder {
         self
     }
 
+    /// Claim mutation validation for a class and enable the capability.
+    #[must_use]
+    pub fn claim_mutations(mut self, qualified_name: impl Into<String>) -> Self {
+        self.manifest.capabilities.mutation_validation = true;
+        self.manifest
+            .claims
+            .mutations
+            .push(ClassClaim::exact(qualified_name));
+        self
+    }
+
+    /// Claim mutation validation for every subclass of a base class.
+    #[must_use]
+    pub fn claim_mutations_on_subclass(mut self, base_qualified_name: impl Into<String>) -> Self {
+        self.manifest.capabilities.mutation_validation = true;
+        self.manifest
+            .claims
+            .mutations
+            .push(ClassClaim::subclass_of(base_qualified_name));
+        self
+    }
+
     /// Claim a class-scope attribute for the `class-member` hook and enable the capability.
     #[must_use]
     pub fn claim_class_member(
@@ -116,6 +138,23 @@ impl ManifestBuilder {
             attribute_name,
             AttributeScope::Instance,
         ));
+        self
+    }
+
+    /// Claim instance-member resolution for arbitrary members on subclasses of a base.
+    #[must_use]
+    pub fn claim_instance_members_on_subclass(
+        mut self,
+        owner_base_qualified_name: impl Into<String>,
+    ) -> Self {
+        self.manifest.capabilities.instance_member = true;
+        self.manifest
+            .claims
+            .attributes
+            .push(AttributeClaim::on_subclass_of(
+                owner_base_qualified_name,
+                AttributeScope::Instance,
+            ));
         self
     }
 
@@ -254,6 +293,18 @@ impl ManifestBuilder {
         self.manifest.capabilities.settings_data = true;
         self.manifest.claims.settings.push(SettingsClaim {
             module: module.into(),
+            config_key: None,
+        });
+        self
+    }
+
+    /// Declare a settings module selected by a plugin configuration key.
+    #[must_use]
+    pub fn settings_module_from_config(mut self, key: impl Into<String>) -> Self {
+        self.manifest.capabilities.settings_data = true;
+        self.manifest.claims.settings.push(SettingsClaim {
+            module: String::new(),
+            config_key: Some(key.into()),
         });
         self
     }

@@ -33,6 +33,7 @@ pub(crate) use self::infer::{
     infer_same_file_expression_type, infer_scope_types, is_discarded_dict_key_assignment,
 };
 pub(crate) use self::iteration::extract_fixed_length_iterable_element_types;
+pub(crate) use self::known_instance::AnnotatedType;
 pub use self::known_instance::KnownInstanceType;
 pub(crate) use self::match_pattern::{
     ClassPatternPositionalSource, callable_pattern_type, class_pattern_positional_sources,
@@ -3173,23 +3174,45 @@ impl<'db> Type<'db> {
         }
     }
 
-    fn plugin_class_transform_instance_member(
+    fn plugin_replacement_instance_member(
         self,
         db: &'db dyn Db,
         name: &str,
+        existing_ty: Option<Type<'db>>,
     ) -> Option<PlaceAndQualifiers<'db>> {
         match self {
             Type::NominalInstance(instance) => instance
                 .class(db)
-                .plugin_class_transform_instance_member(db, name),
+                .plugin_replacement_instance_member(db, name, existing_ty),
             Type::NewTypeInstance(newtype) => newtype
                 .concrete_base_type(db)
-                .plugin_class_transform_instance_member(db, name),
-            Type::TypeAlias(alias) => alias
-                .value_type(db)
-                .plugin_class_transform_instance_member(db, name),
+                .plugin_replacement_instance_member(db, name, existing_ty),
+            Type::TypeAlias(alias) => {
+                alias
+                    .value_type(db)
+                    .plugin_replacement_instance_member(db, name, existing_ty)
+            }
+            Type::LiteralValue(literal) => literal.as_enum().and_then(|enum_literal| {
+                enum_literal
+                    .enum_class_instance(db)
+                    .plugin_replacement_instance_member(db, name, existing_ty)
+            }),
             _ => None,
         }
+    }
+
+    fn plugin_annotated_instance_member(
+        self,
+        db: &'db dyn Db,
+        name: &str,
+    ) -> Option<PlaceAndQualifiers<'db>> {
+        let Type::KnownInstance(KnownInstanceType::Annotated(annotated)) = self else {
+            return None;
+        };
+        annotated
+            .base(db)
+            .nominal_class(db)?
+            .plugin_annotated_instance_member(db, name, self)
     }
 
     fn plugin_instance_assignment_member(
@@ -3892,11 +3915,20 @@ impl<'db> Type<'db> {
 
                 let fallback = this.instance_member(db, name_str);
 
-                if let Some(plugin_field) =
-                    this.plugin_class_transform_instance_member(db, name_str)
-                {
+                if let Some(plugin_field) = this.plugin_replacement_instance_member(
+                    db,
+                    name_str,
+                    fallback.ignore_possibly_undefined(),
+                ) {
                     let result = this.fallback_to_getattr(db, name, plugin_field, policy);
                     let result = result.map_type(|ty| ty.bind_self_typevars(db, receiver));
+                    return promote_inferred_attribute_class_literals(db, result);
+                }
+
+                if fallback.is_undefined()
+                    && let Some(plugin_member) = this.plugin_annotated_instance_member(db, name_str)
+                {
+                    let result = this.fallback_to_getattr(db, name, plugin_member, policy);
                     return promote_inferred_attribute_class_literals(db, result);
                 }
 
@@ -4198,6 +4230,18 @@ impl<'db> Type<'db> {
                 Type::TypeAlias(alias) => alias
                     .value_type(db)
                     .member_lookup_with_policy_and_receiver(db, name, policy, receiver),
+
+                Type::KnownInstance(KnownInstanceType::Annotated(annotated)) => {
+                    if let Some(plugin_member) = this.plugin_annotated_instance_member(db, name_str)
+                    {
+                        return promote_inferred_attribute_class_literals(
+                            db,
+                            this.fallback_to_getattr(db, &name, plugin_member, policy),
+                        );
+                    }
+                    let base = annotated.base(db);
+                    base.member_lookup_with_policy_and_receiver(db, name, policy, Some(base))
+                }
 
                 _ if policy.no_instance_fallback() => {
                     let receiver = receiver.unwrap_or(this);
@@ -6164,7 +6208,7 @@ impl<'db> Type<'db> {
                     instance.union_type(db).clone()
                 }
                 KnownInstanceType::Literal(ty) => Ok(ty.inner(db)),
-                KnownInstanceType::Annotated(ty) => Ok(ty.inner(db)),
+                KnownInstanceType::Annotated(annotated) => Ok(annotated.base(db)),
                 KnownInstanceType::TypeGenericAlias(instance) => {
                     // When `type[…]` appears in a value position (e.g. in an implicit type alias),
                     // we infer its argument as a type expression. This ensures that we can emit
@@ -7007,8 +7051,11 @@ impl<'db> Type<'db> {
                     }
                 }
                 KnownInstanceType::Annotated(ty) => {
-                    ty.inner(db)
+                    ty.base(db)
                         .find_legacy_typevars_impl(db, binding_context, typevars, visitor);
+                    for metadata in ty.metadata(db) {
+                        metadata.find_legacy_typevars_impl(db, binding_context, typevars, visitor);
+                    }
                 }
                 KnownInstanceType::Callable(callable_type) => {
                     callable_type.find_legacy_typevars_impl(db, binding_context, typevars, visitor);

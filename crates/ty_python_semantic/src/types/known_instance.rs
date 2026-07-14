@@ -112,7 +112,7 @@ pub enum KnownInstanceType<'db> {
     Literal(InternedType<'db>),
 
     /// A single instance of `typing.Annotated`
-    Annotated(InternedType<'db>),
+    Annotated(AnnotatedType<'db>),
 
     /// An instance of `typing.GenericAlias` representing a `type[...]` expression.
     TypeGenericAlias(InternedType<'db>),
@@ -182,10 +182,15 @@ pub(super) fn walk_known_instance_type<'db, V: visitor::TypeVisitor<'db> + ?Size
             }
         }
         KnownInstanceType::Literal(ty)
-        | KnownInstanceType::Annotated(ty)
         | KnownInstanceType::TypeGenericAlias(ty)
         | KnownInstanceType::LiteralStringAlias(ty) => {
             visitor.visit_type(db, ty.inner(db));
+        }
+        KnownInstanceType::Annotated(annotated) => {
+            visitor.visit_type(db, annotated.base(db));
+            for metadata in annotated.metadata(db) {
+                visitor.visit_type(db, *metadata);
+            }
         }
         KnownInstanceType::Callable(callable) => {
             visitor.visit_callable_type(db, callable);
@@ -328,9 +333,8 @@ impl<'db> KnownInstanceType<'db> {
         match self {
             Self::TypeAliasType(alias) => Some(Type::TypeAlias(alias)),
             Self::UnionType(instance) => instance.union_type(db).as_ref().ok().copied(),
-            Self::Literal(ty) | Self::Annotated(ty) | Self::LiteralStringAlias(ty) => {
-                Some(ty.inner(db))
-            }
+            Self::Literal(ty) | Self::LiteralStringAlias(ty) => Some(ty.inner(db)),
+            Self::Annotated(annotated) => Some(annotated.base(db)),
             Self::TypeGenericAlias(instance) => Some(instance.inner(db).to_meta_type(db)),
             Self::Callable(callable) => Some(Type::Callable(callable)),
             Self::NewType(newtype) => Some(Type::NewTypeInstance(newtype)),
@@ -402,10 +406,18 @@ impl<'db> KnownInstanceType<'db> {
                 ))
             }
             KnownInstanceType::Annotated(ty) => {
-                Type::KnownInstance(KnownInstanceType::Annotated(InternedType::new(
+                Type::KnownInstance(KnownInstanceType::Annotated(AnnotatedType::new(
                     db,
-                    ty.inner(db)
+                    ty.base(db)
                         .apply_type_mapping_impl(db, type_mapping, tcx, visitor),
+                    ty.metadata(db)
+                        .iter()
+                        .map(|metadata| {
+                            metadata.apply_type_mapping_impl(db, type_mapping, tcx, visitor)
+                        })
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                    ty.transparent(db),
                 )))
             }
             KnownInstanceType::Callable(callable_type) => {
@@ -764,6 +776,42 @@ pub struct InternedType<'db> {
 }
 
 impl get_size2::GetSize for InternedType<'_> {}
+
+/// The base type and runtime metadata carried by `typing.Annotated`.
+#[salsa::interned(debug, heap_size=ruff_memory_usage::heap_size)]
+pub struct AnnotatedType<'db> {
+    pub(crate) base: Type<'db>,
+    #[returns(ref)]
+    pub(crate) metadata: Box<[Type<'db>]>,
+    pub(crate) transparent: bool,
+}
+
+impl get_size2::GetSize for AnnotatedType<'_> {}
+
+impl<'db> AnnotatedType<'db> {
+    fn recursive_type_normalized_impl(
+        self,
+        db: &'db dyn Db,
+        div: Type<'db>,
+        nested: bool,
+    ) -> Option<Self> {
+        let base = self
+            .base(db)
+            .recursive_type_normalized_impl(db, div, nested)
+            .unwrap_or(div);
+        let metadata = self
+            .metadata(db)
+            .iter()
+            .map(|metadata| {
+                metadata
+                    .recursive_type_normalized_impl(db, div, true)
+                    .unwrap_or(div)
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Some(Self::new(db, base, metadata, self.transparent(db)))
+    }
+}
 
 impl<'db> InternedType<'db> {
     fn recursive_type_normalized_impl(

@@ -3218,13 +3218,17 @@ impl<'db> FmtDetailed<'db> for DisplayKnownInstanceRepr<'db> {
                 f.write_str("'>")
             }
             KnownInstanceType::Annotated(inner) => {
-                f.set_invalid_type_annotation();
-                f.write_str("<special-form '")?;
-                f.with_type(Type::SpecialForm(SpecialFormType::Annotated))
-                    .write_str("typing.Annotated")?;
-                f.write_char('[')?;
-                inner.inner(self.db).display(self.db).fmt_detailed(f)?;
-                f.write_str(", <metadata>]'>")
+                if inner.transparent(self.db) {
+                    inner.base(self.db).display(self.db).fmt_detailed(f)
+                } else {
+                    f.set_invalid_type_annotation();
+                    f.write_str("<special-form '")?;
+                    f.with_type(Type::SpecialForm(SpecialFormType::Annotated))
+                        .write_str("typing.Annotated")?;
+                    f.write_char('[')?;
+                    inner.base(self.db).display(self.db).fmt_detailed(f)?;
+                    f.write_str(", <metadata>]'>")
+                }
             }
             KnownInstanceType::Callable(callable) => {
                 f.set_invalid_type_annotation();

@@ -7667,7 +7667,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
     fn report_plugin_runtime_error(
         &self,
-        call_expression: &ast::ExprCall,
+        expression: &impl Ranged,
         runtime_diagnostic: &crate::types::plugin::PluginRuntimeDiagnostic,
     ) {
         let Some(builder) = self
@@ -7682,7 +7682,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             runtime_diagnostic.plugin_id()
         ));
         diagnostic.annotate(
-            Annotation::primary(self.context.span(call_expression))
+            Annotation::primary(self.context.span(expression))
                 .message(runtime_diagnostic.message().to_string()),
         );
         diagnostic.info(runtime_diagnostic.hint());
@@ -7690,7 +7690,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
     fn report_plugin_diagnostics(
         &self,
-        call_expression: &ast::ExprCall,
+        expression: &impl Ranged,
         diagnostics: &[protocol::PluginDiagnostic],
     ) {
         for plugin_diagnostic in diagnostics {
@@ -7703,7 +7703,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
             let mut diagnostic = builder.into_diagnostic(plugin_diagnostic.message.as_str());
             diagnostic.annotate(
-                Annotation::primary(self.context.span(call_expression))
+                Annotation::primary(self.context.span(expression))
                     .message(plugin_diagnostic.id.as_str()),
             );
         }

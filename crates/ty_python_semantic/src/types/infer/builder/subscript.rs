@@ -25,8 +25,8 @@ use crate::types::subscript::{LegacyGenericOrigin, SubscriptError, SubscriptErro
 use crate::types::tuple::{Tuple, TupleType};
 use crate::types::typed_dict::{TypedDictAssignmentKind, TypedDictKeyAssignment};
 use crate::types::{
-    BoundTypeVarInstance, CallArguments, CallDunderError, CallableBinding, CycleDetector,
-    DynamicType, InternedType, KnownClass, KnownInstanceType, LintDiagnosticGuard,
+    AnnotatedType, BoundTypeVarInstance, CallArguments, CallDunderError, CallableBinding,
+    CycleDetector, DynamicType, InternedType, KnownClass, KnownInstanceType, LintDiagnosticGuard,
     MemberLookupPolicy, Parameter, Parameters, SpecialFormType, StaticClassLiteral, Type,
     TypeAliasType, TypeAndQualifiers, TypeContext, TypeVarBoundOrConstraints, UnionType,
     UnionTypeInstance, any_over_type, todo_type,
@@ -1242,6 +1242,19 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         let db = self.db();
 
         let object_ty = self.infer_expression(object, TypeContext::default());
+        match crate::types::plugin::plugin_mutation_diagnostics(
+            db,
+            self.file(),
+            object_ty,
+            ty_plugin_protocol::MutationOperation::ItemSet,
+            Some(slice),
+            Some(rhs_value),
+            target.range(),
+            self.context.diagnostics_suppressed(),
+        ) {
+            Ok(diagnostics) => self.report_plugin_diagnostics(target, &diagnostics),
+            Err(diagnostic) => self.report_plugin_runtime_error(target, &diagnostic),
+        }
         self.store_typed_dict_key_expected_type(slice, object_ty);
         let mut infer_slice_ty = |builder: &mut Self, tcx| builder.infer_expression(slice, tcx);
 
@@ -1995,7 +2008,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         }) = slice
         else {
             report_invalid_arguments_to_annotated(&self.context, subscript);
-            return subscript_context.infer(self, slice);
+            return subscript_context.infer(self, slice, Vec::new());
         };
 
         if arguments.len() < 2 {
@@ -2011,14 +2024,15 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             .context
             .inference_flags
             .replace(InferenceFlags::IN_TYPE_ALIAS, false);
-        for metadata_element in &arguments[1..] {
-            self.infer_expression(metadata_element, TypeContext::default());
-        }
+        let metadata = arguments[1..]
+            .iter()
+            .map(|metadata_element| self.infer_expression(metadata_element, TypeContext::default()))
+            .collect::<Vec<_>>();
         self.context
             .inference_flags
             .set(InferenceFlags::IN_TYPE_ALIAS, previous_in_type_alias);
 
-        subscript_context.infer(self, first_argument)
+        subscript_context.infer(self, first_argument, metadata)
     }
 }
 
@@ -2155,22 +2169,27 @@ impl AnnotatedExprContext {
         self,
         builder: &mut TypeInferenceBuilder<'db, '_>,
         argument: &ast::Expr,
+        metadata: Vec<Type<'db>>,
     ) -> TypeAndQualifiers<'db> {
         match self {
             AnnotatedExprContext::TypeExpression => {
                 let inner = builder.infer_type_expression(argument);
-                let outer = Type::KnownInstance(KnownInstanceType::Annotated(InternedType::new(
+                let outer = Type::KnownInstance(KnownInstanceType::Annotated(AnnotatedType::new(
                     builder.db(),
                     inner,
+                    metadata.into_boxed_slice(),
+                    false,
                 )));
                 TypeAndQualifiers::declared(outer)
             }
             AnnotatedExprContext::AnnotationExpression => {
                 let inner =
                     builder.infer_annotation_expression_impl(argument, PEP613Policy::Disallowed);
-                let outer = Type::KnownInstance(KnownInstanceType::Annotated(InternedType::new(
+                let outer = Type::KnownInstance(KnownInstanceType::Annotated(AnnotatedType::new(
                     builder.db(),
                     inner.inner_type(),
+                    metadata.into_boxed_slice(),
+                    false,
                 )));
                 TypeAndQualifiers::declared(outer).with_qualifier(inner.qualifiers())
             }

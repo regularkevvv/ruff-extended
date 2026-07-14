@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 1 };
+pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 3 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -129,6 +129,7 @@ pub struct PluginCapabilities {
     pub cross_symbol_contributions: bool,
     pub settings_data: bool,
     pub virtual_types: bool,
+    pub mutation_validation: bool,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,6 +149,8 @@ pub struct PluginClaims {
     pub attributes: Vec<AttributeClaim>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub settings: Vec<SettingsClaim>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mutations: Vec<ClassClaim>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -307,6 +310,19 @@ impl AttributeClaim {
     }
 
     #[must_use]
+    pub fn on_subclass_of(
+        owner_base_qualified_name: impl Into<String>,
+        scope: AttributeScope,
+    ) -> Self {
+        Self {
+            kind: AttributeClaimKind::OnSubclassOf {
+                owner_base_qualified_name: owner_base_qualified_name.into(),
+                scope,
+            },
+        }
+    }
+
+    #[must_use]
     pub fn exact_attribute(&self) -> Option<(&str, &str, AttributeScope)> {
         match &self.kind {
             AttributeClaimKind::Exact {
@@ -314,7 +330,8 @@ impl AttributeClaim {
                 attribute_name,
                 scope,
             } => Some((owner_qualified_name, attribute_name, *scope)),
-            AttributeClaimKind::ContributionTarget { .. } => None,
+            AttributeClaimKind::ContributionTarget { .. }
+            | AttributeClaimKind::OnSubclassOf { .. } => None,
         }
     }
 
@@ -322,7 +339,8 @@ impl AttributeClaim {
     pub fn scope(&self) -> AttributeScope {
         match &self.kind {
             AttributeClaimKind::Exact { scope, .. }
-            | AttributeClaimKind::ContributionTarget { scope, .. } => *scope,
+            | AttributeClaimKind::ContributionTarget { scope, .. }
+            | AttributeClaimKind::OnSubclassOf { scope, .. } => *scope,
         }
     }
 }
@@ -343,6 +361,10 @@ pub enum AttributeClaimKind {
         owner_base_qualified_name: String,
         scope: AttributeScope,
     },
+    OnSubclassOf {
+        owner_base_qualified_name: String,
+        scope: AttributeScope,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -355,7 +377,10 @@ pub enum AttributeScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct SettingsClaim {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub module: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -378,6 +403,7 @@ pub enum PluginRequest {
     AdjustCallSignature(CallRequest),
     AdjustCallReturn(CallRequest),
     AdditionalDependencies(DependencyRequest),
+    ValidateMutation(MutationRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -398,6 +424,8 @@ pub struct BuildProjectIndexRequest {
     pub classes: Vec<ClassSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub settings: Vec<SettingsModuleSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assignments: Vec<AssignmentSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_index_fingerprint: Option<String>,
 }
@@ -446,6 +474,33 @@ pub struct DependencyRequest {
     pub config: serde_json::Value,
 }
 
+/// A syntax-level write or delete operation offered to a semantic plugin for validation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct MutationRequest {
+    pub context: SemanticContext,
+    pub operation: MutationOperation,
+    /// The inferred receiver, including its lossless structural snapshot when available.
+    pub receiver: TypeExpr,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<ArgumentSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<ArgumentSummary>,
+    #[serde(default, skip_serializing_if = "SymbolSource::is_unknown")]
+    pub source: SymbolSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_index: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MutationOperation {
+    AttributeSet,
+    ItemSet,
+    AttributeDelete,
+    ItemDelete,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct SemanticContext {
@@ -469,6 +524,8 @@ pub struct ClassSummary {
     pub metaclass: Option<TypeExpr>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<FieldSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub methods: Vec<MethodSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nested_classes: Vec<NestedClassSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -510,6 +567,34 @@ pub struct FieldSummary {
     pub inferred_type: Option<TypeExpr>,
     #[serde(default)]
     pub has_default: bool,
+    #[serde(default, skip_serializing_if = "SymbolSource::is_unknown")]
+    pub source: SymbolSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct MethodSummary {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decorators: Vec<CallOrSymbolSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameters: Vec<Parameter>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_type: Option<TypeExpr>,
+    #[serde(default)]
+    pub is_public: bool,
+    #[serde(default, skip_serializing_if = "SymbolSource::is_unknown")]
+    pub source: SymbolSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AssignmentSummary {
+    pub name: String,
+    pub qualified_name: String,
+    pub assigned_value: AssignedValueSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inferred_type: Option<TypeExpr>,
     #[serde(default, skip_serializing_if = "SymbolSource::is_unknown")]
     pub source: SymbolSource,
 }
@@ -561,10 +646,21 @@ pub enum AssignedValueSummary {
 #[serde(rename_all = "kebab-case")]
 pub struct CallValueSummary {
     pub callee: SymbolRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receiver: Option<ValueSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub arguments: Vec<ArgumentSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_type: Option<TypeExpr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ValueSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<SymbolRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_expr: Option<TypeExpr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -688,8 +784,16 @@ pub enum PluginResponse {
     CallSignaturePatch(CallSignaturePatch),
     CallReturnPatch(CallReturnPatch),
     Dependencies(Vec<PluginDependency>),
+    MutationDiagnostics(MutationResponse),
     NoChange,
     Error(PluginError),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct MutationResponse {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<PluginDiagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -726,6 +830,8 @@ pub struct ClassPatch {
 #[serde(rename_all = "kebab-case")]
 pub struct FieldPatch {
     pub name: String,
+    #[serde(default)]
+    pub mode: MemberPatchMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub descriptor: Option<MemberAccessPatch>,
     pub instance_get_type: TypeExpr,
@@ -741,6 +847,8 @@ pub struct FieldPatch {
 #[serde(rename_all = "kebab-case")]
 pub struct MemberPatch {
     pub name: String,
+    #[serde(default)]
+    pub mode: MemberPatchMode,
     pub access: MemberAccessPatch,
     #[serde(default)]
     pub read_only: bool,
@@ -765,6 +873,11 @@ pub enum MemberAccessPatch {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         instance_set_type: Option<TypeExpr>,
     },
+    Callable {
+        signature: CallableSignature,
+        /// Protocol-v1 fallback for hosts that do not understand callable member patches.
+        fallback_type: TypeExpr,
+    },
 }
 
 impl MemberAccessPatch {
@@ -780,9 +893,21 @@ impl MemberAccessPatch {
             | Self::Descriptor {
                 instance_get_type: type_expr,
                 ..
+            }
+            | Self::Callable {
+                fallback_type: type_expr,
+                ..
             } => type_expr,
         }
     }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MemberPatchMode {
+    #[default]
+    FillOnMiss,
+    ReplaceExisting,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -876,6 +1001,13 @@ pub struct TypeExpr {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub imports: Vec<ImportBinding>,
     pub mode: TypeExprMode,
+    /// A lossless structural representation of this type when the host can provide one.
+    ///
+    /// The display expression remains the protocol-v1 fallback. Keeping the snapshot optional
+    /// lets older plugins ignore it and lets newer plugins return an unchanged host type without
+    /// reparsing a lossy display string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<Box<TypeSnapshot>>,
 }
 
 impl TypeExpr {
@@ -899,8 +1031,117 @@ impl TypeExpr {
             expression: expression.into(),
             imports: Vec::new(),
             mode,
+            snapshot: None,
         }
     }
+
+    #[must_use]
+    pub fn with_snapshot(mut self, snapshot: TypeSnapshot) -> Self {
+        self.snapshot = Some(Box::new(snapshot));
+        self
+    }
+}
+
+/// Structural type data that survives a complete host -> plugin -> host round trip.
+///
+/// This intentionally models Python type shapes rather than checker internals. Unsupported
+/// internal types use [`TypeSnapshot::Expression`], which preserves the existing TypeExpr
+/// behavior while still retaining imports at the exact nested position where they are needed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "kebab-case",
+    rename_all_fields = "kebab-case"
+)]
+pub enum TypeSnapshot {
+    Expression(TypeSnapshotExpression),
+    Nominal {
+        qualified_name: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        arguments: Vec<TypeSnapshot>,
+    },
+    Tuple {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        prefix: Vec<TypeSnapshot>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        variadic: Option<Box<TypeSnapshot>>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        suffix: Vec<TypeSnapshot>,
+    },
+    TypedDict {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        fields: Vec<TypeSnapshotField>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extra_items: Option<Box<TypeSnapshotField>>,
+        #[serde(default)]
+        closed: bool,
+    },
+    Union {
+        elements: Vec<TypeSnapshot>,
+    },
+    PluginClass {
+        identity: String,
+    },
+    SelfType {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bound: Option<Box<TypeSnapshot>>,
+    },
+    Annotated {
+        base: Box<TypeSnapshot>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        metadata: Vec<TypeSnapshotMetadata>,
+    },
+}
+
+impl TypeSnapshot {
+    #[must_use]
+    pub fn expression(type_expr: &TypeExpr) -> Self {
+        Self::Expression(TypeSnapshotExpression {
+            expression: type_expr.expression.clone(),
+            imports: type_expr.imports.clone(),
+            mode: type_expr.mode,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct TypeSnapshotExpression {
+    pub expression: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imports: Vec<ImportBinding>,
+    pub mode: TypeExprMode,
+}
+
+impl TypeSnapshotExpression {
+    #[must_use]
+    pub fn to_type_expr(&self) -> TypeExpr {
+        TypeExpr {
+            expression: self.expression.clone(),
+            imports: self.imports.clone(),
+            mode: self.mode,
+            snapshot: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct TypeSnapshotField {
+    pub name: String,
+    pub type_snapshot: TypeSnapshot,
+    #[serde(default = "default_true")]
+    pub required: bool,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct TypeSnapshotMetadata {
+    pub qualified_name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arguments: Vec<TypeSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

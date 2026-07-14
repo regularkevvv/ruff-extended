@@ -6,8 +6,8 @@
 
 use ty_plugin_protocol::{
     CallReturnPatch, CallSignaturePatch, CallableSignature, ClassPatch, FieldPatch,
-    MemberAccessPatch, MemberPatch, Parameter, ParameterKind, PluginDiagnostic, PluginResponse,
-    TypeExpr,
+    MemberAccessPatch, MemberPatch, MemberPatchMode, Parameter, ParameterKind, PluginDiagnostic,
+    PluginResponse, TypeExpr,
 };
 
 /// A required positional-or-keyword parameter with an annotated type.
@@ -71,6 +71,7 @@ pub fn init_field(name: impl Into<String>, ty: TypeExpr) -> FieldPatch {
     let name = name.into();
     FieldPatch {
         name: name.clone(),
+        mode: MemberPatchMode::FillOnMiss,
         descriptor: None,
         instance_get_type: ty.clone(),
         instance_set_type: Some(ty.clone()),
@@ -89,6 +90,7 @@ pub fn field_with_parameter(
 ) -> FieldPatch {
     FieldPatch {
         name: name.into(),
+        mode: MemberPatchMode::FillOnMiss,
         descriptor: None,
         instance_get_type: get_type,
         instance_set_type: set_type,
@@ -102,6 +104,7 @@ pub fn field_with_parameter(
 pub fn member(name: impl Into<String>, ty: TypeExpr) -> MemberPatch {
     MemberPatch {
         name: name.into(),
+        mode: MemberPatchMode::FillOnMiss,
         access: MemberAccessPatch::value(ty),
         read_only: false,
         diagnostics: Vec::new(),
@@ -118,6 +121,7 @@ pub fn descriptor_member(
 ) -> MemberPatch {
     MemberPatch {
         name: name.into(),
+        mode: MemberPatchMode::FillOnMiss,
         access: MemberAccessPatch::Descriptor {
             class_type,
             instance_get_type: get_type,
@@ -126,6 +130,39 @@ pub fn descriptor_member(
         read_only: false,
         diagnostics: Vec::new(),
     }
+}
+
+/// A callable generated instance member with a bound-call signature.
+#[must_use]
+pub fn callable_member(
+    name: impl Into<String>,
+    signature: CallableSignature,
+    fallback_type: TypeExpr,
+) -> MemberPatch {
+    MemberPatch {
+        name: name.into(),
+        mode: MemberPatchMode::FillOnMiss,
+        access: MemberAccessPatch::Callable {
+            signature,
+            fallback_type,
+        },
+        read_only: true,
+        diagnostics: Vec::new(),
+    }
+}
+
+/// Explicitly allow a field patch to replace an ordinary or inherited member.
+#[must_use]
+pub fn replace_existing_field(mut field: FieldPatch) -> FieldPatch {
+    field.mode = MemberPatchMode::ReplaceExisting;
+    field
+}
+
+/// Explicitly allow a member patch to replace an ordinary or inherited member.
+#[must_use]
+pub fn replace_existing_member(mut member: MemberPatch) -> MemberPatch {
+    member.mode = MemberPatchMode::ReplaceExisting;
+    member
 }
 
 /// A [`PluginResponse::CallReturnPatch`] overriding a call's return type (no diagnostics).

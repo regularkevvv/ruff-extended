@@ -165,12 +165,16 @@ pub struct SemanticPlugin {
     class_transform_claims: Box<[String]>,
     class_member_claims: Box<[SemanticPluginMemberClaim]>,
     instance_member_claims: Box<[SemanticPluginMemberClaim]>,
+    instance_member_on_subclass_claims: Box<[String]>,
+    mutation_class_claims: Box<[String]>,
+    mutation_subclass_claims: Box<[String]>,
     /// Qualified names of callees (functions, methods, or constructors keyed by class name)
     /// whose call signature this plugin adjusts.
     call_signature_claims: Box<[String]>,
     /// Qualified names of callees whose call return type this plugin adjusts.
     call_return_claims: Box<[String]>,
     project_index_enabled: bool,
+    config_json: String,
     strict_settings: bool,
     settings_module_claims: Box<[String]>,
     call_signature_method_on_subclass_claims: Box<[SemanticPluginMethodClaim]>,
@@ -193,9 +197,13 @@ impl SemanticPlugin {
             class_transform_claims: class_transform_claims.into(),
             class_member_claims: class_member_claims.into(),
             instance_member_claims: instance_member_claims.into(),
+            instance_member_on_subclass_claims: Box::new([]),
+            mutation_class_claims: Box::new([]),
+            mutation_subclass_claims: Box::new([]),
             call_signature_claims: call_signature_claims.into(),
             call_return_claims: call_return_claims.into(),
             project_index_enabled: false,
+            config_json: "{}".to_string(),
             strict_settings: false,
             settings_module_claims: Box::new([]),
             call_signature_method_on_subclass_claims: Box::new([]),
@@ -214,6 +222,24 @@ impl SemanticPlugin {
         self
     }
 
+    pub fn with_instance_member_on_subclass_claims(
+        mut self,
+        claims: impl Into<Box<[String]>>,
+    ) -> Self {
+        self.instance_member_on_subclass_claims = claims.into();
+        self
+    }
+
+    pub fn with_mutation_claims(
+        mut self,
+        exact: impl Into<Box<[String]>>,
+        subclasses: impl Into<Box<[String]>>,
+    ) -> Self {
+        self.mutation_class_claims = exact.into();
+        self.mutation_subclass_claims = subclasses.into();
+        self
+    }
+
     pub fn with_settings_module_claims(
         mut self,
         settings_module_claims: impl Into<Box<[String]>>,
@@ -224,6 +250,11 @@ impl SemanticPlugin {
 
     pub const fn with_project_index_enabled(mut self, project_index_enabled: bool) -> Self {
         self.project_index_enabled = project_index_enabled;
+        self
+    }
+
+    pub fn with_config_json(mut self, config_json: impl Into<String>) -> Self {
+        self.config_json = config_json.into();
         self
     }
 
@@ -252,6 +283,18 @@ impl SemanticPlugin {
         &self.instance_member_claims
     }
 
+    pub fn instance_member_on_subclass_claims(&self) -> &[String] {
+        &self.instance_member_on_subclass_claims
+    }
+
+    pub fn mutation_class_claims(&self) -> &[String] {
+        &self.mutation_class_claims
+    }
+
+    pub fn mutation_subclass_claims(&self) -> &[String] {
+        &self.mutation_subclass_claims
+    }
+
     pub fn call_signature_claims(&self) -> &[String] {
         &self.call_signature_claims
     }
@@ -266,6 +309,10 @@ impl SemanticPlugin {
 
     pub const fn strict_settings(&self) -> bool {
         self.strict_settings
+    }
+
+    pub fn config_json(&self) -> &str {
+        &self.config_json
     }
 
     pub fn settings_module_claims(&self) -> &[String] {

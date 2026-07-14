@@ -28,8 +28,8 @@ pub mod wasm;
 pub use manifest::ManifestBuilder;
 
 use ty_plugin_protocol::{
-    AnalyzeClassRequest, BuildProjectIndexRequest, CallRequest, DependencyRequest, PluginManifest,
-    PluginRequest, PluginResponse, ResolveMemberRequest,
+    AnalyzeClassRequest, BuildProjectIndexRequest, CallRequest, DependencyRequest, MutationRequest,
+    PluginManifest, PluginRequest, PluginResponse, ResolveMemberRequest,
 };
 
 /// A semantic extension: a manifest plus the hooks it chooses to implement.
@@ -89,6 +89,12 @@ pub trait Plugin {
         PluginResponse::NoChange
     }
 
+    /// Hook for the `mutation-validation` capability: diagnose a claimed write or delete.
+    fn validate_mutation(&self, request: &MutationRequest) -> PluginResponse {
+        let _ = request;
+        PluginResponse::NoChange
+    }
+
     /// Route a decoded [`PluginRequest`] to the matching hook.
     ///
     /// A [`PluginRequest::Manifest`] request is answered from [`Plugin::manifest`]; every other
@@ -103,6 +109,7 @@ pub trait Plugin {
             PluginRequest::AdjustCallSignature(request) => self.adjust_call_signature(request),
             PluginRequest::AdjustCallReturn(request) => self.adjust_call_return(request),
             PluginRequest::AdditionalDependencies(request) => self.additional_dependencies(request),
+            PluginRequest::ValidateMutation(request) => self.validate_mutation(request),
         }
     }
 

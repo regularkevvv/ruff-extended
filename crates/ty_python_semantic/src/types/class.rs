@@ -2004,20 +2004,49 @@ impl<'db> ClassType<'db> {
         }
     }
 
-    pub(super) fn plugin_class_transform_instance_member(
+    pub(super) fn plugin_replacement_instance_member(
         self,
         db: &'db dyn Db,
         name: &str,
+        existing_ty: Option<Type<'db>>,
     ) -> Option<PlaceAndQualifiers<'db>> {
         match self {
             Self::NonGeneric(ClassLiteral::Static(class)) => {
-                class.plugin_class_transform_instance_member(db, None, name)
+                class.plugin_replacement_instance_member(db, None, name, existing_ty)
             }
-            Self::Generic(generic) => generic.origin(db).plugin_class_transform_instance_member(
+            Self::Generic(generic) => generic.origin(db).plugin_replacement_instance_member(
                 db,
                 Some(generic.specialization(db)),
                 name,
+                existing_ty,
             ),
+            Self::NonGeneric(
+                ClassLiteral::Dynamic(_)
+                | ClassLiteral::DynamicNamedTuple(_)
+                | ClassLiteral::DynamicTypedDict(_)
+                | ClassLiteral::DynamicEnum(_),
+            ) => None,
+        }
+    }
+
+    pub(super) fn plugin_annotated_instance_member(
+        self,
+        db: &'db dyn Db,
+        name: &str,
+        owner: Type<'db>,
+    ) -> Option<PlaceAndQualifiers<'db>> {
+        match self {
+            Self::NonGeneric(ClassLiteral::Static(class)) => {
+                class.plugin_annotated_instance_member(db, name, owner)
+            }
+            Self::Generic(generic) => generic
+                .origin(db)
+                .plugin_annotated_instance_member(db, name, owner)
+                .map(|member| {
+                    member.map_type(|ty| {
+                        ty.apply_optional_specialization(db, Some(generic.specialization(db)))
+                    })
+                }),
             Self::NonGeneric(
                 ClassLiteral::Dynamic(_)
                 | ClassLiteral::DynamicNamedTuple(_)

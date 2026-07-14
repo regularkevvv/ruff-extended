@@ -58,6 +58,10 @@ pub enum HostError {
         "plugin `{plugin_id}` declares cross-symbol contributions without the project-index capability"
     )]
     ProjectIndexCapabilityMissing { plugin_id: String },
+    #[error(
+        "plugin `{plugin_id}` declares mutation claims without the mutation-validation capability"
+    )]
+    MutationValidationCapabilityMissing { plugin_id: String },
     #[error("unknown plugin id `{0}`")]
     UnknownPlugin(String),
     #[error("plugin `{plugin_id}` runtime failed: {source}")]
@@ -184,6 +188,8 @@ pub struct RouteTable {
     project_index_plugins: Vec<String>,
     settings_plugins: BTreeMap<String, Vec<String>>,
     stub_overlay_plugins: BTreeMap<String, Vec<String>>,
+    mutation_classes: BTreeMap<String, Vec<String>>,
+    mutation_subclasses: BTreeMap<String, Vec<String>>,
 }
 
 impl RouteTable {
@@ -276,7 +282,8 @@ impl RouteTable {
                                 .or_default()
                                 .push(plugin_id.clone());
                         }
-                        AttributeClaimKind::Exact { .. } => {}
+                        AttributeClaimKind::Exact { .. }
+                        | AttributeClaimKind::OnSubclassOf { .. } => {}
                     }
                 }
             }
@@ -376,6 +383,29 @@ impl RouteTable {
                         .push(plugin_id.clone());
                 }
             }
+
+            if capabilities.mutation_validation {
+                for claim in &claims.mutations {
+                    match &claim.kind {
+                        ClassClaimKind::Exact { qualified_name } => {
+                            routes
+                                .mutation_classes
+                                .entry(qualified_name.clone())
+                                .or_default()
+                                .push(plugin_id.clone());
+                        }
+                        ClassClaimKind::SubclassOf {
+                            base_qualified_name,
+                        } => {
+                            routes
+                                .mutation_subclasses
+                                .entry(base_qualified_name.clone())
+                                .or_default()
+                                .push(plugin_id.clone());
+                        }
+                    }
+                }
+            }
         }
 
         routes
@@ -471,6 +501,18 @@ impl RouteTable {
     pub fn stub_overlay_plugins(&self, module: &str) -> &[String] {
         self.stub_overlay_plugins
             .get(module)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    pub fn mutation_class_plugins(&self, qualified_name: &str) -> &[String] {
+        self.mutation_classes
+            .get(qualified_name)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    pub fn mutation_subclass_plugins(&self, base_qualified_name: &str) -> &[String] {
+        self.mutation_subclasses
+            .get(base_qualified_name)
             .map_or(&[], Vec::as_slice)
     }
 }
@@ -597,6 +639,7 @@ pub enum HookKind {
     AdjustCallReturn,
     AdditionalDependencies,
     BuildProjectIndex,
+    ValidateMutation,
 }
 
 impl From<&PluginRequest> for HookKind {
@@ -610,6 +653,7 @@ impl From<&PluginRequest> for HookKind {
             PluginRequest::AdjustCallSignature(_) => Self::AdjustCallSignature,
             PluginRequest::AdjustCallReturn(_) => Self::AdjustCallReturn,
             PluginRequest::AdditionalDependencies(_) => Self::AdditionalDependencies,
+            PluginRequest::ValidateMutation(_) => Self::ValidateMutation,
         }
     }
 }
@@ -700,6 +744,12 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<(), HostError> {
         && !manifest.capabilities.project_index
     {
         return Err(HostError::ProjectIndexCapabilityMissing {
+            plugin_id: manifest.id.clone(),
+        });
+    }
+
+    if !manifest.claims.mutations.is_empty() && !manifest.capabilities.mutation_validation {
+        return Err(HostError::MutationValidationCapabilityMissing {
             plugin_id: manifest.id.clone(),
         });
     }

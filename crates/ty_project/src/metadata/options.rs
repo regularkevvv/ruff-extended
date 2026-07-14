@@ -27,6 +27,7 @@ use rustc_hash::FxHasher;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::fmt::{self, Debug, Display};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::ops::Deref;
@@ -39,7 +40,8 @@ use ty_module_resolver::{
 };
 use ty_plugin_host::{HostError, PluginEnvironment};
 use ty_plugin_protocol::{
-    AttributeScope, ClassClaimKind, MethodClaimKind, PluginManifest, RuntimeSpec,
+    AttributeClaimKind, AttributeScope, ClassClaimKind, MethodClaimKind, PluginManifest,
+    RuntimeSpec,
 };
 use ty_python_core::platform::PythonPlatform;
 use ty_python_core::program::{
@@ -1806,6 +1808,10 @@ pub struct PluginsOptions {
     )]
     pub auto_discover: Option<bool>,
 
+    /// Plugin-specific configuration keyed by installed plugin id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<HashMap<String, PluginConfig>>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     #[option_group]
     pub plugin: Option<PluginEntriesOptions>,
@@ -1967,17 +1973,64 @@ impl PluginsOptions {
             } else {
                 Vec::new()
             };
+            let instance_member_on_subclass_claims = if manifest.capabilities.instance_member {
+                manifest
+                    .claims
+                    .attributes
+                    .iter()
+                    .filter_map(|claim| match &claim.kind {
+                        AttributeClaimKind::OnSubclassOf {
+                            owner_base_qualified_name,
+                            scope: AttributeScope::Instance,
+                        } => Some(owner_base_qualified_name.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            let (mutation_class_claims, mutation_subclass_claims) =
+                if manifest.capabilities.mutation_validation {
+                    manifest.claims.mutations.iter().fold(
+                        (Vec::new(), Vec::new()),
+                        |(mut exact, mut subclasses), claim| {
+                            match &claim.kind {
+                                ClassClaimKind::Exact { qualified_name } => {
+                                    exact.push(qualified_name.clone());
+                                }
+                                ClassClaimKind::SubclassOf {
+                                    base_qualified_name,
+                                } => subclasses.push(base_qualified_name.clone()),
+                            }
+                            (exact, subclasses)
+                        },
+                    )
+                } else {
+                    (Vec::new(), Vec::new())
+                };
 
             let project_index_participates = manifest.capabilities.project_index
                 || manifest.capabilities.cross_symbol_contributions
                 || manifest.capabilities.settings_data
                 || manifest.capabilities.virtual_types;
             let settings_module_claims = if manifest.capabilities.settings_data {
+                let config = serde_json::from_str::<serde_json::Value>(&loaded.config_json)
+                    .unwrap_or_default();
                 manifest
                     .claims
                     .settings
                     .iter()
-                    .map(|claim| claim.module.clone())
+                    .filter_map(|claim| {
+                        claim.config_key.as_ref().map_or_else(
+                            || (!claim.module.is_empty()).then(|| claim.module.clone()),
+                            |key| {
+                                config
+                                    .get(key)
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_string)
+                            },
+                        )
+                    })
                     .collect::<Vec<_>>()
             } else {
                 Vec::new()
@@ -2013,6 +2066,9 @@ impl PluginsOptions {
             if class_transform_claims.is_empty()
                 && class_member_claims.is_empty()
                 && instance_member_claims.is_empty()
+                && instance_member_on_subclass_claims.is_empty()
+                && mutation_class_claims.is_empty()
+                && mutation_subclass_claims.is_empty()
                 && call_signature_claims.is_empty()
                 && call_return_claims.is_empty()
                 && call_signature_method_on_subclass_claims.is_empty()
@@ -2040,7 +2096,10 @@ impl PluginsOptions {
                     call_signature_method_on_subclass_claims,
                     call_return_method_on_subclass_claims,
                 )
+                .with_instance_member_on_subclass_claims(instance_member_on_subclass_claims)
+                .with_mutation_claims(mutation_class_claims, mutation_subclass_claims)
                 .with_settings_module_claims(settings_module_claims)
+                .with_config_json(loaded.config_json.clone())
                 .with_strict_settings(loaded.strict_settings)
                 .with_project_index_enabled(project_index_participates),
             );
@@ -2249,6 +2308,17 @@ impl PluginsOptions {
             discover_installed_plugins(site_packages, system)
                 .into_iter()
                 .filter(|plugin| !configured_ids.iter().any(|id| id == plugin.id()))
+                .map(|plugin| {
+                    if let Some(config) = self
+                        .config
+                        .as_ref()
+                        .and_then(|config| config.get(plugin.id()))
+                    {
+                        plugin.with_config(config.clone())
+                    } else {
+                        plugin
+                    }
+                })
                 .collect()
         } else {
             Vec::new()
@@ -2469,6 +2539,7 @@ struct ProgramSettingsPluginManifest {
     artifact_path: SystemPathBuf,
     artifact_content_hash: u64,
     config_hash: u64,
+    config_json: String,
     strict_settings: bool,
     stub_overlay_path: Option<SystemPathBuf>,
 }
@@ -2701,6 +2772,8 @@ fn load_plugin_manifest_for_program_settings(
         artifact_path: settings.path().clone(),
         artifact_content_hash,
         config_hash: json_hash(settings.config().as_value()),
+        config_json: serde_json::to_string(settings.config().as_value())
+            .unwrap_or_else(|_| "{}".to_string()),
         strict_settings: plugin_strict_settings(settings.config().as_value()),
         stub_overlay_path: settings.stub_overlay_path().cloned(),
     })
@@ -2964,6 +3037,17 @@ fn plugin_host_error_diagnostic(
                 &plugin_id,
                 format!(
                     "Plugin `{plugin_id}` declares cross-symbol contributions without the project-index capability"
+                ),
+                Severity::Error,
+            )
+        }
+        HostError::MutationValidationCapabilityMissing { plugin_id } => {
+            plugin_diagnostic_at_loaded_manifest(
+                db,
+                loaded_manifests,
+                &plugin_id,
+                format!(
+                    "Plugin `{plugin_id}` declares mutation claims without the mutation-validation capability"
                 ),
                 Severity::Error,
             )
@@ -4142,7 +4226,7 @@ mod plugin_tests {
             &db,
             [(
                 Severity::Error,
-                "Plugin `pydantic` uses unsupported protocol version 99.1; ty supports 0.1",
+                "Plugin `pydantic` uses unsupported protocol version 99.1; ty supports 0.3",
             )],
         );
     }

@@ -5132,7 +5132,7 @@ dependencies = [
 
 [[package]]
 name = "ty_plugin_protocol"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "insta",
  "serde",
@@ -5141,7 +5141,7 @@ dependencies = [
 
 [[package]]
 name = "ty_plugin_sdk"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "serde_json",
  "thiserror 2.0.18",

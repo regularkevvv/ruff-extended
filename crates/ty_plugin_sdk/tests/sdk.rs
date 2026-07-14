@@ -1,8 +1,9 @@
 //! Tests for the plugin authoring SDK: manifest building and request dispatch.
 
 use ty_plugin_sdk::protocol::{
-    CallRequest, ClassClaimKind, MethodClaimKind, PluginManifest, PluginRequest, PluginResponse,
-    ProtocolVersion, RuntimeSpec, SemanticContext, TypeExpr,
+    CallRequest, ClassClaimKind, MethodClaimKind, MutationOperation, MutationRequest,
+    MutationResponse, PluginManifest, PluginRequest, PluginResponse, ProtocolVersion, RuntimeSpec,
+    SemanticContext, SymbolSource, TypeExpr,
 };
 use ty_plugin_sdk::{ManifestBuilder, Plugin, dsl};
 
@@ -12,6 +13,7 @@ fn manifest_builder_syncs_capabilities_with_claims() {
         .claim_call_return("toy.Field")
         .claim_subclass_transform("toy.Model")
         .claim_call_return_method_on_subclass("toy.Manager", "filter")
+        .claim_mutations("toy.Immutable")
         .settings_module("toy.settings")
         .virtual_types()
         .stub_overlay("toy", ".ty/plugins/toy.pyi")
@@ -27,6 +29,7 @@ fn manifest_builder_syncs_capabilities_with_claims() {
     assert!(manifest.capabilities.settings_data);
     assert!(manifest.capabilities.virtual_types);
     assert!(manifest.capabilities.stub_overlays);
+    assert!(manifest.capabilities.mutation_validation);
 
     assert_eq!(manifest.claims.functions.len(), 1);
     assert_eq!(manifest.claims.functions[0].qualified_name, "toy.Field");
@@ -43,6 +46,10 @@ fn manifest_builder_syncs_capabilities_with_claims() {
             method_name
         } if base_qualified_name == "toy.Manager" && method_name == "filter"
     )));
+    assert!(manifest.claims.mutations.iter().any(|claim| matches!(
+        &claim.kind,
+        ClassClaimKind::Exact { qualified_name } if qualified_name == "toy.Immutable"
+    )));
     assert_eq!(manifest.stub_overlays.len(), 1);
 }
 
@@ -57,6 +64,12 @@ impl Plugin for FieldPlugin {
 
     fn adjust_call_return(&self, _request: &CallRequest) -> PluginResponse {
         dsl::call_return(TypeExpr::annotation("str"))
+    }
+
+    fn validate_mutation(&self, _request: &MutationRequest) -> PluginResponse {
+        PluginResponse::MutationDiagnostics(MutationResponse {
+            diagnostics: Vec::new(),
+        })
     }
 }
 
@@ -74,6 +87,18 @@ fn call_request() -> CallRequest {
         arguments: Vec::new(),
         existing_signature: None,
         default_return_type: None,
+        project_index: None,
+    }
+}
+
+fn mutation_request() -> MutationRequest {
+    MutationRequest {
+        context: call_request().context,
+        operation: MutationOperation::ItemSet,
+        receiver: TypeExpr::annotation("toy.Immutable"),
+        key: None,
+        value: None,
+        source: SymbolSource::default(),
         project_index: None,
     }
 }
@@ -96,6 +121,12 @@ fn handle_dispatches_to_overridden_hook() {
         panic!("expected a call-return patch");
     };
     assert_eq!(patch.return_type.expression, "str");
+}
+
+#[test]
+fn handle_dispatches_mutation_validation() {
+    let response = FieldPlugin.handle(&PluginRequest::ValidateMutation(mutation_request()));
+    assert!(matches!(response, PluginResponse::MutationDiagnostics(_)));
 }
 
 #[test]

@@ -2,7 +2,9 @@ use ruff_python_ast::{self as ast};
 
 use super::TypeInferenceBuilder;
 use crate::types::diagnostic::INVALID_TYPE_FORM;
-use crate::types::{CycleDetector, DynamicType, KnownClass, Type, TypeContext, TypeFormType};
+use crate::types::{
+    CycleDetector, DynamicType, KnownClass, KnownInstanceType, Type, TypeContext, TypeFormType,
+};
 
 impl<'db> TypeInferenceBuilder<'db, '_> {
     /// In a `TypeForm` context, keep the ordinary value interpretation if it is
@@ -65,9 +67,17 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             }
         }
 
+        let type_expression = if matches!(
+            value_ty,
+            Type::KnownInstance(KnownInstanceType::Annotated(_))
+        ) {
+            value_ty
+        } else {
+            self.infer_type_expression_no_store(expression)
+        };
         Some(TypeFormType::from_type_expression(
             self.db(),
-            self.infer_type_expression_no_store(expression),
+            type_expression,
         ))
     }
 

@@ -252,7 +252,7 @@ impl<'db> ClassBase<'db> {
                     Self::try_from_type(db, KnownClass::Type.to_class_literal(db), subclass)
                 }
                 KnownInstanceType::Annotated(ty) => {
-                    match ty.inner(db) {
+                    match ty.base(db) {
                         Type::Dynamic(dynamic) => Some(Self::Dynamic(dynamic)),
                         Type::NominalInstance(instance) => {
                             Some(Self::Class(instance.class(db)))

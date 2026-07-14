@@ -27,10 +27,11 @@ use crate::types::class::{
     plugin_project_index_virtual_types,
 };
 use crate::types::signatures::ParametersKind;
+use crate::types::tuple::{Tuple, TupleType};
 use crate::types::typed_dict::{TypedDictFieldBuilder, TypedDictOpenness, TypedDictSchema};
 use crate::types::{
-    ClassBase, ClassLiteral, ClassType, FunctionType, KnownClass, Parameter, Parameters, Signature,
-    Type, TypedDictType, UnionType,
+    ClassBase, ClassLiteral, ClassType, FunctionType, KnownClass, KnownInstanceType, Parameter,
+    Parameters, Signature, SubclassOfType, Type, TypedDictType, UnionType,
 };
 use crate::{Db, Program, SemanticPluginRuntimeError};
 
@@ -49,6 +50,7 @@ pub(crate) fn plugin_type_expr_from_type<'db>(
             expression: class.qualified_name(db).to_string(),
             imports: Vec::new(),
             mode: protocol::TypeExprMode::Annotation,
+            snapshot: Some(Box::new(plugin_type_snapshot_from_type(db, ty))),
         };
     }
 
@@ -56,6 +58,179 @@ pub(crate) fn plugin_type_expr_from_type<'db>(
         expression: ty.display(db).to_string(),
         imports: Vec::new(),
         mode: protocol::TypeExprMode::Annotation,
+        snapshot: Some(Box::new(plugin_type_snapshot_from_type(db, ty))),
+    }
+}
+
+fn plugin_type_snapshot_from_type<'db>(db: &'db dyn Db, ty: Type<'db>) -> protocol::TypeSnapshot {
+    if let Some(class) = ty.nominal_class(db)
+        && let ClassLiteral::DynamicNamedTuple(named_tuple) = class.class_literal(db)
+        && let Some(identity) = named_tuple.plugin_virtual_identity(db)
+    {
+        return protocol::TypeSnapshot::PluginClass {
+            identity: identity.to_string(),
+        };
+    }
+
+    if let Some(tuple) = ty.tuple_instance_spec(db) {
+        let (prefix, variadic, suffix) = match tuple.as_ref() {
+            Tuple::Fixed(tuple) => (
+                tuple
+                    .elements_slice()
+                    .iter()
+                    .map(|element| plugin_type_snapshot_from_type(db, *element))
+                    .collect(),
+                None,
+                Vec::new(),
+            ),
+            Tuple::Variable(tuple) => (
+                tuple
+                    .prefix_elements()
+                    .iter()
+                    .map(|element| plugin_type_snapshot_from_type(db, *element))
+                    .collect(),
+                Some(Box::new(plugin_type_snapshot_from_type(
+                    db,
+                    tuple.variable(),
+                ))),
+                tuple
+                    .suffix_elements()
+                    .iter()
+                    .map(|element| plugin_type_snapshot_from_type(db, *element))
+                    .collect(),
+            ),
+        };
+        return protocol::TypeSnapshot::Tuple {
+            prefix,
+            variadic,
+            suffix,
+        };
+    }
+
+    match ty {
+        Type::TypedDict(typed_dict) => {
+            let fields = typed_dict
+                .items(db)
+                .iter()
+                .map(|(name, field)| protocol::TypeSnapshotField {
+                    name: name.to_string(),
+                    type_snapshot: plugin_type_snapshot_from_type(db, field.declared_ty),
+                    required: field.is_required(),
+                    read_only: field.is_read_only(),
+                })
+                .collect();
+            let (extra_items, closed) = match typed_dict.openness(db) {
+                TypedDictOpenness::ImplicitlyOpen => (None, false),
+                TypedDictOpenness::Closed => (None, true),
+                TypedDictOpenness::Extra(extra) => (
+                    Some(Box::new(protocol::TypeSnapshotField {
+                        name: String::new(),
+                        type_snapshot: plugin_type_snapshot_from_type(db, extra.declared_ty),
+                        required: false,
+                        read_only: extra.is_read_only(),
+                    })),
+                    false,
+                ),
+            };
+            protocol::TypeSnapshot::TypedDict {
+                fields,
+                extra_items,
+                closed,
+            }
+        }
+        Type::Union(union) => protocol::TypeSnapshot::Union {
+            elements: union
+                .elements(db)
+                .iter()
+                .map(|element| plugin_type_snapshot_from_type(db, *element))
+                .collect(),
+        },
+        Type::TypeVar(typevar) if typevar.typevar(db).is_self(db) => {
+            protocol::TypeSnapshot::SelfType {
+                bound: typevar
+                    .typevar(db)
+                    .upper_bound(db)
+                    .map(|bound| Box::new(plugin_type_snapshot_from_type(db, bound))),
+            }
+        }
+        Type::KnownInstance(KnownInstanceType::Annotated(annotated)) => {
+            protocol::TypeSnapshot::Annotated {
+                base: Box::new(plugin_type_snapshot_from_type(db, annotated.base(db))),
+                metadata: annotated
+                    .metadata(db)
+                    .iter()
+                    .map(|metadata| plugin_type_snapshot_metadata_from_type(db, *metadata))
+                    .collect(),
+            }
+        }
+        _ => {
+            if let Some(class) = ty.nominal_class(db) {
+                if let ClassLiteral::Dynamic(dynamic_class) = class.class_literal(db)
+                    && let Some(identity) = dynamic_class.plugin_virtual_identity(db)
+                {
+                    return protocol::TypeSnapshot::PluginClass {
+                        identity: identity.to_string(),
+                    };
+                }
+                let arguments = match class {
+                    ClassType::Generic(generic) => generic
+                        .specialization(db)
+                        .types(db)
+                        .iter()
+                        .map(|argument| plugin_type_snapshot_from_type(db, *argument))
+                        .collect(),
+                    ClassType::NonGeneric(_) => Vec::new(),
+                };
+                return protocol::TypeSnapshot::Nominal {
+                    qualified_name: class.qualified_name(db).to_string(),
+                    arguments,
+                };
+            }
+
+            let fallback = protocol::TypeExpr {
+                expression: ty.display(db).to_string(),
+                imports: Vec::new(),
+                mode: protocol::TypeExprMode::Annotation,
+                snapshot: None,
+            };
+            protocol::TypeSnapshot::expression(&fallback)
+        }
+    }
+}
+
+fn plugin_type_snapshot_metadata_from_type(
+    db: &dyn Db,
+    ty: Type<'_>,
+) -> protocol::TypeSnapshotMetadata {
+    if let Type::GenericAlias(alias) = ty {
+        return protocol::TypeSnapshotMetadata {
+            qualified_name: ClassLiteral::Static(alias.origin(db))
+                .qualified_name(db)
+                .to_string(),
+            arguments: alias
+                .specialization(db)
+                .types(db)
+                .iter()
+                .map(|argument| plugin_type_snapshot_from_type(db, *argument))
+                .collect(),
+        };
+    }
+    match plugin_type_snapshot_from_type(db, ty) {
+        protocol::TypeSnapshot::Nominal {
+            qualified_name,
+            arguments,
+        } => protocol::TypeSnapshotMetadata {
+            qualified_name,
+            arguments,
+        },
+        protocol::TypeSnapshot::Expression(expression) => protocol::TypeSnapshotMetadata {
+            qualified_name: expression.expression,
+            arguments: Vec::new(),
+        },
+        snapshot => protocol::TypeSnapshotMetadata {
+            qualified_name: ty.display(db).to_string(),
+            arguments: vec![snapshot],
+        },
     }
 }
 
@@ -257,6 +432,12 @@ fn plugin_virtual_class_members<'db>(
                     plugin_type_expr_to_type_with_context(db, instance_get_type, context),
                 ));
             }
+            protocol::MemberAccessPatch::Callable { signature, .. } => {
+                instance_members.push((
+                    name,
+                    plugin_callable_type_from_protocol_signature(db, signature, context),
+                ));
+            }
         }
     }
     (
@@ -323,6 +504,7 @@ fn plugin_virtual_type_scope<'db>(db: &'db dyn Db) -> Option<ScopeId<'db>> {
 #[derive(Clone, Copy)]
 struct PluginTypeExprContext<'db, 'ctx> {
     self_class: Option<StaticClassLiteral<'db>>,
+    self_type: Option<Type<'db>>,
     scope: Option<ScopeId<'db>>,
     virtual_types: &'ctx [PluginVirtualTypePatch<'db>],
     imports: &'ctx [protocol::ImportBinding],
@@ -332,6 +514,7 @@ impl<'db, 'ctx> Default for PluginTypeExprContext<'db, 'ctx> {
     fn default() -> Self {
         Self {
             self_class: None,
+            self_type: None,
             scope: None,
             virtual_types: &[],
             imports: &[],
@@ -379,11 +562,148 @@ fn plugin_type_expr_to_type_with_context<'db>(
     type_expr: &protocol::TypeExpr,
     context: PluginTypeExprContext<'db, '_>,
 ) -> Type<'db> {
+    if let Some(snapshot) = type_expr.snapshot.as_deref()
+        && let Some(ty) = plugin_type_snapshot_to_type(db, snapshot, context)
+    {
+        return ty;
+    }
     let context = PluginTypeExprContext {
         imports: &type_expr.imports,
         ..context
     };
     parse_plugin_type_expr(db, type_expr.expression.trim(), context).unwrap_or_else(Type::unknown)
+}
+
+fn plugin_type_snapshot_to_type<'db>(
+    db: &'db dyn Db,
+    snapshot: &protocol::TypeSnapshot,
+    context: PluginTypeExprContext<'db, '_>,
+) -> Option<Type<'db>> {
+    match snapshot {
+        protocol::TypeSnapshot::Expression(expression) => {
+            let type_expr = expression.to_type_expr();
+            Some(plugin_type_expr_to_type_with_context(
+                db, &type_expr, context,
+            ))
+        }
+        protocol::TypeSnapshot::Nominal {
+            qualified_name,
+            arguments,
+        } => {
+            let Type::ClassLiteral(class) =
+                resolve_plugin_qualified_type_expr_value(db, qualified_name)?
+            else {
+                return None;
+            };
+            if arguments.is_empty() {
+                return Some(Type::instance(db, class.default_specialization(db)));
+            }
+            let generic_context = class.generic_context(db)?;
+            if generic_context.len(db) != arguments.len() {
+                return None;
+            }
+            let arguments = arguments
+                .iter()
+                .map(|argument| {
+                    Some(
+                        plugin_type_snapshot_to_type(db, argument, context)
+                            .unwrap_or_else(Type::unknown),
+                    )
+                })
+                .collect::<Vec<_>>();
+            Some(Type::instance(
+                db,
+                class.apply_specialization(db, |generic_context| {
+                    generic_context.specialize_recursive(db, arguments)
+                }),
+            ))
+        }
+        protocol::TypeSnapshot::Tuple {
+            prefix,
+            variadic,
+            suffix,
+        } => {
+            let prefix = prefix
+                .iter()
+                .map(|element| {
+                    plugin_type_snapshot_to_type(db, element, context).unwrap_or_else(Type::unknown)
+                })
+                .collect::<Vec<_>>();
+            let suffix = suffix
+                .iter()
+                .map(|element| {
+                    plugin_type_snapshot_to_type(db, element, context).unwrap_or_else(Type::unknown)
+                })
+                .collect::<Vec<_>>();
+            if let Some(variadic) = variadic {
+                let variadic = plugin_type_snapshot_to_type(db, variadic, context)
+                    .unwrap_or_else(Type::unknown);
+                Some(Type::tuple(TupleType::mixed(db, prefix, variadic, suffix)))
+            } else {
+                Some(Type::heterogeneous_tuple(
+                    db,
+                    prefix.into_iter().chain(suffix),
+                ))
+            }
+        }
+        protocol::TypeSnapshot::TypedDict {
+            fields,
+            extra_items,
+            closed,
+        } => {
+            let schema = fields
+                .iter()
+                .map(|field| {
+                    let declared_ty =
+                        plugin_type_snapshot_to_type(db, &field.type_snapshot, context)
+                            .unwrap_or_else(Type::unknown);
+                    (
+                        Name::new(&field.name),
+                        TypedDictFieldBuilder::new(declared_ty)
+                            .required(field.required)
+                            .read_only(field.read_only)
+                            .build(),
+                    )
+                })
+                .collect::<TypedDictSchema<'db>>();
+            let openness = if let Some(extra_items) = extra_items {
+                let ty = plugin_type_snapshot_to_type(db, &extra_items.type_snapshot, context)
+                    .unwrap_or_else(Type::unknown);
+                TypedDictOpenness::extra(db, ty, extra_items.read_only)
+            } else if *closed {
+                TypedDictOpenness::Closed
+            } else {
+                TypedDictOpenness::ImplicitlyOpen
+            };
+            Some(Type::TypedDict(
+                TypedDictType::from_schema_items_with_openness(db, schema, openness),
+            ))
+        }
+        protocol::TypeSnapshot::Union { elements } => Some(UnionType::from_elements(
+            db,
+            elements.iter().map(|element| {
+                plugin_type_snapshot_to_type(db, element, context).unwrap_or_else(Type::unknown)
+            }),
+        )),
+        protocol::TypeSnapshot::PluginClass { identity } => {
+            resolve_plugin_virtual_type_expr(identity, context)
+                .or_else(|| parse_plugin_type_expr(db, identity, context))
+        }
+        protocol::TypeSnapshot::SelfType { bound } => {
+            if let Some(self_type) = context.self_type {
+                Some(self_type)
+            } else if let Some(class) = context.self_class {
+                Some(Type::instance(db, class.default_specialization(db)))
+            } else {
+                bound
+                    .as_deref()
+                    .and_then(|bound| plugin_type_snapshot_to_type(db, bound, context))
+            }
+        }
+        protocol::TypeSnapshot::Annotated { base, .. } => {
+            plugin_type_snapshot_to_type(db, base, context)
+        }
+    }
 }
 
 fn parse_plugin_type_expr<'db>(
@@ -463,6 +783,10 @@ fn parse_plugin_generic_type_expr<'db>(
     context: PluginTypeExprContext<'db, '_>,
 ) -> Option<Type<'db>> {
     match origin {
+        "type" | "builtins.type" | "typing.Type" if args.len() == 1 => {
+            let instance = parse_plugin_type_expr(db, args[0], context)?;
+            SubclassOfType::try_from_instance(db, instance)
+        }
         "Optional" | "typing.Optional" | "typing_extensions.Optional" if args.len() == 1 => {
             Some(UnionType::from_elements(
                 db,
@@ -707,6 +1031,7 @@ fn parse_plugin_class_type_expr<'db>(
         expression: base_expression.trim().to_string(),
         mode: protocol::TypeExprMode::Expression,
         imports: context.imports.to_vec(),
+        snapshot: None,
     };
     let explicit_bases = Box::from(
         [plugin_class_base_type_expr_to_type(db, &base_expr, context)
@@ -990,7 +1315,7 @@ enum PluginCallee<'db> {
     },
 }
 
-impl PluginCallee<'_> {
+impl<'db> PluginCallee<'db> {
     fn qualified_name(&self) -> &str {
         match self {
             PluginCallee::Callable { qualified_name, .. }
@@ -998,7 +1323,7 @@ impl PluginCallee<'_> {
         }
     }
 
-    fn receiver_ty(&self) -> Option<Type<'_>> {
+    fn receiver_ty(&self) -> Option<Type<'db>> {
         match self {
             PluginCallee::Callable { receiver_ty, .. } => *receiver_ty,
             PluginCallee::Constructor { .. } => None,
@@ -1270,22 +1595,98 @@ pub(crate) fn plugin_adjusted_call_return<'db>(
         CallHook::Return,
         speculative,
     );
-    let protocol::PluginResponse::CallReturnPatch(patch) =
-        execute_call_plugin(db, plugin, &request, CallHook::Return)?
-    else {
+    tracing::trace!(
+        plugin_id = plugin.id(),
+        ?request,
+        "built call-return plugin request"
+    );
+    let response = execute_call_plugin(db, plugin, &request, CallHook::Return)?;
+    let protocol::PluginResponse::CallReturnPatch(patch) = response else {
         return Ok(None);
     };
     let virtual_types = plugin_project_index_virtual_types(db, plugin);
 
     Ok(Some(PluginCallReturnAdjustment::new(
-        plugin_type_expr_to_type_in_file_with_virtual_types(
+        plugin_type_expr_to_type_with_context(
             db,
             &patch.return_type,
-            file,
-            virtual_types,
+            PluginTypeExprContext {
+                self_type: callee.receiver_ty(),
+                scope: Some(global_scope(db, file)),
+                virtual_types,
+                ..PluginTypeExprContext::default()
+            },
         ),
         patch.diagnostics,
     )))
+}
+
+/// Run the first semantic plugin claiming mutation validation for `receiver_ty`.
+pub(crate) fn plugin_mutation_diagnostics<'db>(
+    db: &'db dyn Db,
+    file: File,
+    receiver_ty: Type<'db>,
+    operation: protocol::MutationOperation,
+    key: Option<&ast::Expr>,
+    value: Option<&ast::Expr>,
+    source_range: TextRange,
+    speculative: bool,
+) -> Result<Vec<protocol::PluginDiagnostic>, PluginRuntimeDiagnostic> {
+    let semantic_plugins = Program::get(db).semantic_plugins(db);
+    let Some(receiver_class) = receiver_ty.nominal_class(db) else {
+        return Ok(Vec::new());
+    };
+    let receiver_qualified_name = receiver_class.qualified_name(db).to_string();
+
+    let plugin = semantic_plugins.plugins().iter().find(|plugin| {
+        if plugin
+            .mutation_class_claims()
+            .iter()
+            .any(|claim| claim == &receiver_qualified_name)
+        {
+            return true;
+        }
+
+        plugin.mutation_subclass_claims().iter().any(|claim| {
+            let Some(Type::ClassLiteral(base_class)) =
+                resolve_plugin_qualified_type_expr_value(db, claim)
+            else {
+                return false;
+            };
+            receiver_class.is_subtype_of_class_literal(db, base_class)
+        })
+    });
+    let Some(plugin) = plugin else {
+        return Ok(Vec::new());
+    };
+
+    let argument = |expression: &ast::Expr| protocol::ArgumentSummary {
+        name: None,
+        kind: protocol::ArgumentKind::Positional,
+        type_expr: None,
+        value: plugin_literal_value_from_expr(expression),
+        source: Some(plugin_symbol_source(db, file, expression.range(), None)),
+    };
+    let request = protocol::PluginRequest::ValidateMutation(protocol::MutationRequest {
+        context: plugin_semantic_context(db, file, speculative),
+        operation,
+        receiver: plugin_qualified_type_expr_from_type(db, receiver_ty),
+        key: key.map(argument),
+        value: value.map(argument),
+        source: plugin_symbol_source(db, file, source_range, None),
+        project_index: plugin_project_index_json(db, plugin),
+    });
+
+    let response = match plugin.runtime() {
+        SemanticPluginRuntime::Mock => protocol::PluginResponse::NoChange,
+        SemanticPluginRuntime::InProcess | SemanticPluginRuntime::Wasm => db
+            .execute_semantic_plugin(plugin.id(), &request)
+            .map_err(|error| PluginRuntimeDiagnostic::new(plugin.id(), error))?,
+    };
+    let protocol::PluginResponse::MutationDiagnostics(response) = response else {
+        return Ok(Vec::new());
+    };
+    Ok(response.diagnostics)
 }
 
 fn plugin_call_request<'db>(
@@ -1369,7 +1770,8 @@ fn plugin_qualified_type_expr_from_type<'db>(db: &'db dyn Db, ty: Type<'db>) -> 
         if let ClassLiteral::Dynamic(dynamic_class) = class.class_literal(db)
             && let Some(identity) = dynamic_class.plugin_virtual_identity(db)
         {
-            return protocol::TypeExpr::annotation(identity.to_string());
+            return protocol::TypeExpr::annotation(identity.to_string())
+                .with_snapshot(plugin_type_snapshot_from_type(db, ty));
         }
 
         let mut expression = class.qualified_name(db).to_string();
@@ -1386,7 +1788,8 @@ fn plugin_qualified_type_expr_from_type<'db>(db: &'db dyn Db, ty: Type<'db>) -> 
                 expression.push(']');
             }
         }
-        return protocol::TypeExpr::annotation(expression);
+        return protocol::TypeExpr::annotation(expression)
+            .with_snapshot(plugin_type_snapshot_from_type(db, ty));
     }
 
     plugin_type_expr_from_type(db, ty)
@@ -1558,12 +1961,27 @@ fn plugin_protocol_parameter<'db>(
     parameter: &protocol::Parameter,
     virtual_types: &[PluginVirtualTypePatch<'db>],
 ) -> Option<Parameter<'db>> {
+    plugin_protocol_parameter_with_context(
+        db,
+        parameter,
+        PluginTypeExprContext {
+            virtual_types,
+            ..PluginTypeExprContext::default()
+        },
+    )
+}
+
+fn plugin_protocol_parameter_with_context<'db>(
+    db: &'db dyn Db,
+    parameter: &protocol::Parameter,
+    context: PluginTypeExprContext<'db, '_>,
+) -> Option<Parameter<'db>> {
     let name = parameter.name.as_ref().map(Name::new);
     let ty = parameter
         .type_expr
         .as_ref()
         .map_or_else(Type::unknown, |type_expr| {
-            plugin_type_expr_to_type_with_virtual_types(db, type_expr, virtual_types)
+            plugin_type_expr_to_type_with_context(db, type_expr, context)
         });
 
     let signature_parameter = match parameter.kind {
@@ -1589,6 +2007,59 @@ fn plugin_protocol_parameter<'db>(
         }
         _ => Some(signature_parameter),
     }
+}
+
+fn plugin_callable_type_from_protocol_signature<'db>(
+    db: &'db dyn Db,
+    signature: &protocol::CallableSignature,
+    context: PluginTypeExprContext<'db, '_>,
+) -> Type<'db> {
+    let parameters = signature
+        .parameters
+        .iter()
+        .filter_map(|parameter| plugin_protocol_parameter_with_context(db, parameter, context))
+        .collect::<Vec<_>>();
+    let return_ty = plugin_type_expr_to_type_with_context(db, &signature.return_type, context);
+    Type::single_callable(
+        db,
+        Signature::new(
+            Parameters::new(parameters, ParametersKind::Standard),
+            return_ty,
+        ),
+    )
+}
+
+pub(crate) fn plugin_callable_type_from_protocol_signature_in_class<'db>(
+    db: &'db dyn Db,
+    signature: &protocol::CallableSignature,
+    class: StaticClassLiteral<'db>,
+    virtual_types: &[PluginVirtualTypePatch<'db>],
+) -> Type<'db> {
+    plugin_callable_type_from_protocol_signature(
+        db,
+        signature,
+        PluginTypeExprContext {
+            self_class: Some(class),
+            scope: Some(global_scope(db, class.file(db))),
+            virtual_types,
+            ..PluginTypeExprContext::default()
+        },
+    )
+}
+
+pub(crate) fn plugin_callable_type_from_protocol_signature_with_virtual_types<'db>(
+    db: &'db dyn Db,
+    signature: &protocol::CallableSignature,
+    virtual_types: &[PluginVirtualTypePatch<'db>],
+) -> Type<'db> {
+    plugin_callable_type_from_protocol_signature(
+        db,
+        signature,
+        PluginTypeExprContext {
+            virtual_types,
+            ..PluginTypeExprContext::default()
+        },
+    )
 }
 
 fn mock_plugin_execute_call_signature(
@@ -1818,6 +2289,7 @@ mod tests {
                     members: vec![
                         protocol::MemberPatch {
                             name: "plugin_marker".to_string(),
+                            mode: protocol::MemberPatchMode::FillOnMiss,
                             access: protocol::MemberAccessPatch::value(
                                 protocol::TypeExpr::annotation("str"),
                             ),
@@ -1826,6 +2298,7 @@ mod tests {
                         },
                         protocol::MemberPatch {
                             name: "score".to_string(),
+                            mode: protocol::MemberPatchMode::FillOnMiss,
                             access: protocol::MemberAccessPatch::Descriptor {
                                 class_type: None,
                                 instance_get_type: protocol::TypeExpr::annotation("int"),
@@ -1942,6 +2415,10 @@ mod tests {
 
         assert_eq!(parse_and_display_with_db(&db, "app.Book"), "Book");
         assert_eq!(
+            parse_and_display_with_db(&db, "type[app.Book]"),
+            "type[Book]"
+        );
+        assert_eq!(
             parse_and_display_with_db(&db, "app.Book | None"),
             "Book | None"
         );
@@ -1956,6 +2433,84 @@ mod tests {
         assert_eq!(
             parse_and_display_with_db(&db, "minidjango.QuerySet[app.Book, str]"),
             "QuerySet[Book, str]"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn plugin_type_snapshot_round_trips_structural_queryset_rows() -> anyhow::Result<()> {
+        let db = TestDbBuilder::new()
+            .with_file("/src/app.py", "class Book: ...\n")
+            .with_file(
+                "/src/minidjango.py",
+                "from typing import Generic, TypeVar\n\nT = TypeVar(\"T\")\nRow = TypeVar(\"Row\")\n\nclass QuerySet(Generic[T, Row]): ...\n",
+            )
+            .build()?;
+        let file = system_path_to_file(&db, "/src/app.py").expect("app.py");
+
+        for expression in [
+            r#"minidjango.QuerySet[app.Book, TypedDict({"title": str})]"#,
+            "minidjango.QuerySet[app.Book, tuple[str, int]]",
+        ] {
+            let original = plugin_type_expr_to_type_in_file(
+                &db,
+                &protocol::TypeExpr::annotation(expression),
+                file,
+            );
+            let serialized = plugin_qualified_type_expr_from_type(&db, original);
+            assert!(serialized.snapshot.is_some());
+            let restored = plugin_type_expr_to_type_in_file(&db, &serialized, file);
+            let (_, specialization) = restored
+                .class_specialization(&db)
+                .expect("specialized QuerySet");
+            let row = specialization.types(&db)[1];
+
+            if expression.contains("TypedDict") {
+                let Type::TypedDict(row) = row else {
+                    panic!("expected TypedDict row, got {}", row.display(&db));
+                };
+                assert_eq!(
+                    row.item(&db, "title")
+                        .expect("title field")
+                        .declared_ty
+                        .display(&db)
+                        .to_string(),
+                    "str"
+                );
+            } else {
+                let tuple = row.tuple_instance_spec(&db).expect("tuple row");
+                assert_eq!(
+                    tuple
+                        .iter_all_elements()
+                        .map(|element| element.display(&db).to_string())
+                        .collect::<Vec<_>>(),
+                    ["str", "int"]
+                );
+            }
+        }
+
+        let named_original = plugin_type_expr_to_type_in_file(
+            &db,
+            &protocol::TypeExpr::annotation(
+                r#"minidjango.QuerySet[app.Book, NamedTuple("Row", {"title": str, "pages": int})]"#,
+            ),
+            file,
+        );
+        let named_serialized = plugin_qualified_type_expr_from_type(&db, named_original);
+        let named_restored = plugin_type_expr_to_type_in_file(&db, &named_serialized, file);
+        let (_, specialization) = named_restored
+            .class_specialization(&db)
+            .expect("specialized QuerySet");
+        let named_row = specialization.types(&db)[1];
+        assert_eq!(
+            named_row
+                .member(&db, "pages")
+                .place
+                .expect_type()
+                .display(&db)
+                .to_string(),
+            "int"
         );
 
         Ok(())
