@@ -245,9 +245,9 @@ impl Plugin for MiniDjangoPlugin {
             "filter" => call_return(queryset_type(&model_type, &row_type), diagnostics),
             "get" => call_return(
                 if receiver_is_queryset {
-                    row_type.clone()
+                    row_type
                 } else {
-                    model_type.clone()
+                    model_type
                 },
                 diagnostics,
             ),
@@ -585,21 +585,13 @@ fn field_path_type<'a>(
     model_name: &str,
     path: &[&'a str],
 ) -> Option<(&'a str, &'a str)> {
-    let Some((last, prefix)) = path.split_last() else {
-        return None;
-    };
+    let (last, prefix) = path.split_last()?;
     let mut current_model = model_name.to_string();
     for field_name in prefix {
-        let Some(field_type) = model_fields(request, &current_model)
+        let field_type = model_fields(request, &current_model)
             .and_then(|fields| fields.get(*field_name))
-            .and_then(Value::as_str)
-        else {
-            return None;
-        };
-        let Some(related_model) = related_model_name(request, field_type) else {
-            return None;
-        };
-        current_model = related_model;
+            .and_then(Value::as_str)?;
+        current_model = related_model_name(request, field_type)?;
     }
 
     model_fields(request, &current_model)
@@ -709,7 +701,7 @@ fn unknown_lookup_diagnostic(
             .source
             .as_ref()
             .and_then(diagnostic_location_from_source),
-        metadata: Default::default(),
+        metadata: BTreeMap::default(),
     }
 }
 
@@ -730,15 +722,15 @@ fn invalid_lookup_value_diagnostic(
             .source
             .as_ref()
             .and_then(diagnostic_location_from_source),
-        metadata: Default::default(),
+        metadata: BTreeMap::default(),
     }
 }
 
 fn diagnostic_location_from_source(source: &SymbolSource) -> Option<DiagnosticLocation> {
     Some(DiagnosticLocation {
         file_path: source.file_path.clone()?,
-        start: source.start.clone()?,
-        end: source.end.clone()?,
+        start: source.start?,
+        end: source.end?,
     })
 }
 
@@ -755,7 +747,7 @@ fn unknown_relation_target_diagnostic(
         ),
         severity: DiagnosticSeverity::Error,
         location: diagnostic_location_from_source(source),
-        metadata: Default::default(),
+        metadata: BTreeMap::default(),
     }
 }
 
@@ -834,7 +826,7 @@ fn model_virtual_type_definitions(
                 ))],
                 members: Vec::new(),
             },
-            metadata: Default::default(),
+            metadata: Value::default(),
         },
         VirtualTypeDefinition {
             name: model_values_row_virtual_type_name(model_name),
@@ -842,14 +834,14 @@ fn model_virtual_type_definitions(
                 fields: model_virtual_type_fields(fields),
                 total: true,
             },
-            metadata: Default::default(),
+            metadata: Value::default(),
         },
         VirtualTypeDefinition {
             name: model_values_list_row_virtual_type_name(model_name),
             shape: VirtualTypeShape::NamedTuple {
                 fields: model_virtual_type_fields(fields),
             },
-            metadata: Default::default(),
+            metadata: Value::default(),
         },
     ]
 }

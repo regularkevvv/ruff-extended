@@ -13,7 +13,7 @@ use ty_plugin_sdk::protocol::{
     SettingValueSummary, SettingsModuleSummary, SymbolRef, SymbolSource, TextPosition, TypeExpr,
     VirtualTypeShape,
 };
-use ty_plugin_sdk::serde_json::json;
+use ty_plugin_sdk::serde_json::{Value, json};
 
 fn context() -> SemanticContext {
     SemanticContext {
@@ -491,7 +491,7 @@ fn minidjango_project_index_contributes_reverse_relation_members() {
             root: "/project".to_string(),
             python_version: "3.13".to_string(),
             platform: "linux".to_string(),
-            config: Default::default(),
+            config: Value::default(),
         },
         classes: vec![author, book],
         settings: Vec::new(),
@@ -598,7 +598,7 @@ fn minidjango_project_index_reports_relation_target_and_reverse_conflicts() {
             root: "/project".to_string(),
             python_version: "3.13".to_string(),
             platform: "linux".to_string(),
-            config: Default::default(),
+            config: Value::default(),
         },
         classes: vec![author, book],
         settings: Vec::new(),
@@ -654,7 +654,7 @@ fn minidjango_resolves_auth_user_model_from_settings_data() {
             root: "/project".to_string(),
             python_version: "3.13".to_string(),
             platform: "linux".to_string(),
-            config: Default::default(),
+            config: Value::default(),
         },
         classes: vec![user, book_request.class.clone()],
         settings: vec![settings_module(
@@ -763,7 +763,7 @@ fn minidjango_resolves_string_and_self_foreign_key_targets() {
             root: "/project".to_string(),
             python_version: "3.13".to_string(),
             platform: "linux".to_string(),
-            config: Default::default(),
+            config: Value::default(),
         },
         classes: vec![author, book_request.class],
         settings: Vec::new(),
@@ -938,7 +938,7 @@ fn minidjango_handles_defensive_request_shapes() {
             root: "/project".to_string(),
             python_version: "3.13".to_string(),
             platform: "linux".to_string(),
-            config: Default::default(),
+            config: Value::default(),
         },
         classes: vec![unrelated_class, author, user, book],
         settings: vec![mixed_settings_module()],
@@ -978,7 +978,7 @@ fn minidjango_handles_defensive_request_shapes() {
         type_expr: TypeExpr::annotation(base),
         nominal_class: Some(base.to_string()),
         generic_arguments,
-        plugin_metadata: Default::default(),
+        plugin_metadata: Value::default(),
     };
     let call_request = |method: &str,
                         receiver: Option<ReceiverSummary>,
@@ -1077,15 +1077,14 @@ fn minidjango_handles_defensive_request_shapes() {
         )),
         PluginResponse::NoChange
     );
-    assert_eq!(
+    assert!(
         return_type(plugin.adjust_call_return(&call_request(
             "values_list",
             manager.clone(),
             Vec::new(),
             Some(indexed.clone())
         )))
-        .starts_with("minidjango.QuerySet[app.Book, tuple["),
-        true
+        .starts_with("minidjango.QuerySet[app.Book, tuple[")
     );
     assert_eq!(
         plugin.adjust_call_return(&call_request(
@@ -1208,7 +1207,7 @@ fn minidjango_manager_return_hooks_use_receiver_and_arguments() {
             type_expr,
             nominal_class: Some(base.to_string()),
             generic_arguments,
-            plugin_metadata: Default::default(),
+            plugin_metadata: Value::default(),
         }
     };
     let request = |base: &str, method: &str, arguments: Vec<ArgumentSummary>| CallRequest {

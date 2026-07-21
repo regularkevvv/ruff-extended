@@ -521,7 +521,7 @@ fn structural_type_snapshot_round_trips() {
 
 #[test]
 fn mutation_request_and_response_round_trip() {
-    let request = PluginRequest::ValidateMutation(MutationRequest {
+    let request = PluginRequest::ValidateMutation(Box::new(MutationRequest {
         context: context(),
         operation: MutationOperation::ItemSet,
         receiver: TypeExpr::annotation("django.http.request.QueryDict"),
@@ -545,7 +545,7 @@ fn mutation_request_and_response_round_trip() {
         }),
         source: SymbolSource::default(),
         project_index: None,
-    });
+    }));
     let request_json = serde_json::to_string(&request).expect("serialize mutation request");
     let restored_request: PluginRequest =
         serde_json::from_str(&request_json).expect("deserialize mutation request");

@@ -37,7 +37,7 @@ fn project_context() -> ProjectContext {
         root: "/project".to_string(),
         python_version: "3.13".to_string(),
         platform: "linux".to_string(),
-        config: Default::default(),
+        config: serde_json::Value::default(),
     }
 }
 
@@ -166,7 +166,7 @@ fn values_list_request(project_index: serde_json::Value) -> PluginRequest {
             type_expr: TypeExpr::annotation("minidjango.Manager[app.Book]"),
             nominal_class: Some(minidjango::MANAGER_BASE.to_string()),
             generic_arguments: vec![TypeExpr::annotation("app.Book")],
-            plugin_metadata: Default::default(),
+            plugin_metadata: serde_json::Value::default(),
         }),
         arguments: vec![positional_str("title"), positional_str("pages")],
         existing_signature: None,
@@ -205,7 +205,7 @@ fn runs_example_plugin_compiled_to_wasm() {
     let response = host
         .execute(
             "example.minidjango",
-            &values_list_request(index.plugin_index.clone()),
+            &values_list_request(index.plugin_index),
         )
         .expect("plugin executes");
     let PluginResponse::CallReturnPatch(patch) = response else {

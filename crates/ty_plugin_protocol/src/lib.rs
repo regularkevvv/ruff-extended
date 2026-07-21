@@ -399,7 +399,10 @@ pub enum PluginRequest {
     AdjustCallSignature(CallRequest),
     AdjustCallReturn(CallRequest),
     AdditionalDependencies(DependencyRequest),
-    ValidateMutation(MutationRequest),
+    /// Boxed because `MutationRequest` is substantially larger than every other
+    /// variant; inlining it would grow `PluginRequest` for all request kinds.
+    /// `Box` is transparent to serde, so the wire format is unaffected.
+    ValidateMutation(Box<MutationRequest>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -659,30 +662,37 @@ pub struct ValueSummary {
     pub type_expr: Option<TypeExpr>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "kebab-case",
     rename_all_fields = "kebab-case"
 )]
 pub enum LiteralValue {
-    Bool { value: bool },
-    Int { value: i64 },
-    Str { value: String },
+    Bool {
+        value: bool,
+    },
+    Int {
+        value: i64,
+    },
+    Str {
+        value: String,
+    },
     None,
     EnumRef(SymbolRef),
     SymbolRef(SymbolRef),
     ClassRef(SymbolRef),
-    Tuple { items: Vec<LiteralValue> },
-    List { items: Vec<LiteralValue> },
-    Dict { entries: Vec<LiteralDictEntry> },
+    Tuple {
+        items: Vec<LiteralValue>,
+    },
+    List {
+        items: Vec<LiteralValue>,
+    },
+    Dict {
+        entries: Vec<LiteralDictEntry>,
+    },
+    #[default]
     Unknown,
-}
-
-impl Default for LiteralValue {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 impl LiteralValue {
@@ -768,9 +778,10 @@ pub struct SettingValueSummary {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
-#[expect(
+#[allow(
     clippy::large_enum_variant,
-    reason = "Protocol responses mirror the serialized wire shape."
+    reason = "Protocol responses mirror the serialized wire shape. Not `expect`, because \
+              the variant sizes only diverge enough to trip the lint on 64-bit targets."
 )]
 pub enum PluginResponse {
     Manifest(PluginManifest),
@@ -1041,7 +1052,7 @@ impl TypeExpr {
 /// Structural type data that survives a complete host -> plugin -> host round trip.
 ///
 /// This intentionally models Python type shapes rather than checker internals. Unsupported
-/// internal types use [`TypeSnapshot::Expression`], which preserves the existing TypeExpr
+/// internal types use [`TypeSnapshot::Expression`], which preserves the existing `TypeExpr`
 /// behavior while still retaining imports at the exact nested position where they are needed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
@@ -1242,7 +1253,7 @@ pub struct DiagnosticLocation {
     pub end: TextPosition,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct SymbolSource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1255,18 +1266,6 @@ pub struct SymbolSource {
     pub start: Option<TextPosition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end: Option<TextPosition>,
-}
-
-impl Default for SymbolSource {
-    fn default() -> Self {
-        Self {
-            module: None,
-            qualified_name: None,
-            file_path: None,
-            start: None,
-            end: None,
-        }
-    }
 }
 
 impl SymbolSource {

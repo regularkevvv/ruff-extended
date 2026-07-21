@@ -1862,7 +1862,7 @@ impl<'db> StaticClassLiteral<'db> {
         }
 
         let owner_qualified_name = ClassLiteral::Static(self).qualified_name(db).to_string();
-        let patch = semantic_plugins
+        semantic_plugins
             .plugins()
             .iter()
             .filter(|plugin| plugin.project_index_enabled())
@@ -1878,8 +1878,7 @@ impl<'db> StaticClassLiteral<'db> {
                                 .is_some_and(|member_name| member_name.as_str() == name)
                     })
                     .map(|contribution| &contribution.patch)
-            });
-        patch
+            })
     }
 
     fn plugin_contributed_constructor_patch(
@@ -4051,7 +4050,7 @@ fn plugin_project_index<'db>(
     let settings_diagnostics = settings
         .iter()
         .flat_map(|settings| settings.diagnostics.iter().cloned())
-        .filter_map(plugin_project_diagnostic_from_protocol)
+        .map(plugin_project_diagnostic_from_protocol)
         .collect::<Vec<_>>();
 
     let mut config: serde_json::Value =
@@ -4117,7 +4116,7 @@ fn plugin_project_index<'db>(
                 response
                     .diagnostics
                     .into_iter()
-                    .filter_map(plugin_project_diagnostic_from_protocol),
+                    .map(plugin_project_diagnostic_from_protocol),
             )
             .collect(),
     }
@@ -4150,8 +4149,8 @@ pub(crate) fn plugin_project_index_diagnostics_for_file(
 
 fn plugin_project_diagnostic_from_protocol(
     diagnostic: protocol::PluginDiagnostic,
-) -> Option<PluginProjectDiagnostic> {
-    Some(PluginProjectDiagnostic {
+) -> PluginProjectDiagnostic {
+    PluginProjectDiagnostic {
         id: diagnostic.id,
         message: diagnostic.message,
         severity: match diagnostic.severity {
@@ -4168,7 +4167,7 @@ fn plugin_project_diagnostic_from_protocol(
                 end_line: location.end.line,
                 end_column: location.end.column,
             }),
-    })
+    }
 }
 
 fn plugin_project_diagnostic_to_diagnostic(
@@ -4419,7 +4418,7 @@ fn plugin_settings_module_summary(
 
 fn plugin_settings_module_file(db: &dyn Db, module_name: &str) -> Option<File> {
     for module in all_modules(db) {
-        if module.name(db).to_string() == module_name {
+        if module.name(db) == module_name {
             return module.file(db);
         }
     }
@@ -4495,6 +4494,7 @@ fn setting_assignment_from_statement(
     }
 }
 
+#[expect(clippy::too_many_arguments)]
 fn setting_summary_from_statement(
     db: &dyn Db,
     file: File,
@@ -4564,7 +4564,7 @@ fn plugin_settings_diagnostic(
         message: message.into(),
         severity,
         location: source.and_then(plugin_diagnostic_location_from_source),
-        metadata: Default::default(),
+        metadata: BTreeMap::default(),
     }
 }
 
@@ -4630,7 +4630,7 @@ fn plugin_contribution_to_patch<'db>(
             })
         }
         protocol::ContributionPatch::Field(field) => PluginContributionMemberPatch::Field(
-            plugin_contribution_field_to_patch(db, field, virtual_types),
+            plugin_contribution_field_to_patch(db, &field, virtual_types),
         ),
         protocol::ContributionPatch::Constructor(signature) => {
             PluginContributionMemberPatch::Constructor(PluginConstructorPatch {
@@ -4655,7 +4655,7 @@ fn plugin_contribution_to_patch<'db>(
 
 fn plugin_contribution_field_to_patch<'db>(
     db: &'db dyn Db,
-    field: protocol::FieldPatch,
+    field: &protocol::FieldPatch,
     virtual_types: &[PluginVirtualTypePatch<'db>],
 ) -> PluginContributionFieldPatch<'db> {
     let descriptor_class_ty = match field.descriptor.as_ref() {
@@ -5744,6 +5744,7 @@ fn execute_member_plugin(
     }
 }
 
+#[expect(clippy::too_many_arguments)]
 fn merge_plugin_class_response<'db>(
     db: &'db dyn Db,
     class: StaticClassLiteral<'db>,
@@ -6000,7 +6001,7 @@ fn plugin_member_to_member<'db>(member: &PluginMemberPatch<'db>) -> Member<'db> 
     }
 }
 
-impl<'db> PluginContributionMemberPatch<'db> {
+impl PluginContributionMemberPatch<'_> {
     fn member_name(&self) -> Option<&Name> {
         match self {
             Self::Member(member) => Some(&member.name),
@@ -6389,8 +6390,8 @@ mod tests {
         class
     }
 
-    fn class_transform_request<'db>(
-        db: &'db TestDb,
+    fn class_transform_request(
+        db: &TestDb,
         path: &str,
         class_name: &str,
     ) -> protocol::AnalyzeClassRequest {
@@ -6707,7 +6708,7 @@ mod tests {
         let diagnostics = db.check_file(file);
         let messages = diagnostics
             .iter()
-            .map(|diagnostic| diagnostic.primary_message())
+            .map(Diagnostic::primary_message)
             .collect::<Vec<_>>();
         assert!(
             messages
@@ -6794,7 +6795,7 @@ mod tests {
         let diagnostics = db.check_file(file);
         let messages = diagnostics
             .iter()
-            .map(|diagnostic| diagnostic.primary_message())
+            .map(Diagnostic::primary_message)
             .collect::<Vec<_>>();
         assert_eq!(
             messages.len(),
@@ -6882,7 +6883,7 @@ mod tests {
         let diagnostics = db.check_file(file);
         let messages = diagnostics
             .iter()
-            .map(|diagnostic| diagnostic.primary_message())
+            .map(Diagnostic::primary_message)
             .collect::<Vec<_>>();
         assert!(
             messages
@@ -7227,7 +7228,7 @@ mod tests {
                         message: "immutable item write".to_string(),
                         severity: protocol::DiagnosticSeverity::Error,
                         location: None,
-                        metadata: Default::default(),
+                        metadata: BTreeMap::default(),
                     }],
                 },
             ))
@@ -7668,7 +7669,7 @@ mod tests {
         let diagnostics = db.check_file(file);
         let messages = diagnostics
             .iter()
-            .map(|diagnostic| diagnostic.primary_message())
+            .map(Diagnostic::primary_message)
             .collect::<Vec<_>>();
         assert_eq!(
             messages.len(),
@@ -7969,12 +7970,10 @@ mod tests {
         let diagnostics = db.check_file(file);
         let messages = diagnostics
             .iter()
-            .map(|diagnostic| diagnostic.primary_message())
+            .map(Diagnostic::primary_message)
             .collect::<Vec<_>>();
         assert!(
-            messages
-                .iter()
-                .any(|message| *message == "Argument is incorrect"),
+            messages.contains(&"Argument is incorrect"),
             "the valid plugin constructor call should pass and the bad title type should fail: {messages:#?}"
         );
         assert!(
@@ -7998,13 +7997,11 @@ mod tests {
             "bad direct, unsupported transformed, and values_list lookups should produce plugin diagnostics: {messages:#?}"
         );
         assert!(
-            messages.iter().any(|message| *message
-                == "Conflicting Mini-Django reverse relation `library.Author.books`"),
+            messages.contains(&"Conflicting Mini-Django reverse relation `library.Author.books`"),
             "duplicate reverse relation names should produce a project-index diagnostic: {messages:#?}"
         );
         assert!(
-            messages.iter().any(|message| *message
-                == "Unknown Mini-Django relation target `library.Missing` for field `models.Book.missing_author`"),
+            messages.contains(&"Unknown Mini-Django relation target `library.Missing` for field `models.Book.missing_author`"),
             "bad relation targets should produce a project-index diagnostic at the field source: {messages:#?}"
         );
         assert!(
@@ -8127,12 +8124,10 @@ mod tests {
         let diagnostics = db.check_file(file);
         let messages = diagnostics
             .iter()
-            .map(|diagnostic| diagnostic.primary_message())
+            .map(Diagnostic::primary_message)
             .collect::<Vec<_>>();
         assert!(
-            messages
-                .iter()
-                .any(|message| *message == "Object of type `str` is not assignable to `int`"),
+            messages.contains(&"Object of type `str` is not assignable to `int`"),
             "Django-style plugin fields should expose their instance type, not their raw class-body field value: {messages:#?}"
         );
         assert!(
@@ -8141,9 +8136,7 @@ mod tests {
         );
 
         assert!(
-            messages
-                .iter()
-                .any(|message| *message == "Argument is incorrect"),
+            messages.contains(&"Argument is incorrect"),
             "bad constructor calls should fail while valid constructor calls pass: {messages:#?}"
         );
         assert!(
@@ -8179,13 +8172,11 @@ mod tests {
             "invalid lookup literal values should fail: {messages:#?}"
         );
         assert!(
-            messages.iter().any(|message| *message
-                == "Conflicting Mini-Django reverse relation `library.Author.books`"),
+            messages.contains(&"Conflicting Mini-Django reverse relation `library.Author.books`"),
             "duplicate reverse relation names should produce a project-index diagnostic: {messages:#?}"
         );
         assert!(
-            messages.iter().any(|message| *message
-                == "Unknown Mini-Django relation target `library.Missing` for field `models.Book.missing_author`"),
+            messages.contains(&"Unknown Mini-Django relation target `library.Missing` for field `models.Book.missing_author`"),
             "bad relation targets should produce a project-index diagnostic at the field source: {messages:#?}"
         );
         let unknown_lookup_messages = messages
@@ -8250,16 +8241,14 @@ mod tests {
         let diagnostics = db.check_file(file);
         let messages = diagnostics
             .iter()
-            .map(|diagnostic| diagnostic.primary_message())
+            .map(Diagnostic::primary_message)
             .collect::<Vec<_>>();
         assert!(
-            messages.iter().any(|message| *message
-                == "Conflicting Mini-Django reverse relation `library.Author.books`"),
+            messages.contains(&"Conflicting Mini-Django reverse relation `library.Author.books`"),
             "project-index diagnostics should flow through check_file: {messages:#?}"
         );
         assert!(
-            messages.iter().any(|message| *message
-                == "Invalid Mini-Django lookup value for `pages__isnull` on `models.Book.pages`; expected `int | None`"),
+            messages.contains(&"Invalid Mini-Django lookup value for `pages__isnull` on `models.Book.pages`; expected `int | None`"),
             "call-return diagnostics should consume the cached project index: {messages:#?}"
         );
         assert_eq!(
@@ -8320,7 +8309,7 @@ mod tests {
         let diagnostics = db.check_file(file);
         let messages = diagnostics
             .iter()
-            .map(|diagnostic| diagnostic.primary_message())
+            .map(Diagnostic::primary_message)
             .collect::<Vec<_>>();
         assert!(
             !messages
@@ -8351,7 +8340,7 @@ mod tests {
         let diagnostics = db.check_file(file);
         let messages = diagnostics
             .iter()
-            .map(|diagnostic| diagnostic.primary_message())
+            .map(Diagnostic::primary_message)
             .collect::<Vec<_>>();
         assert!(
             messages.iter().any(|message| message

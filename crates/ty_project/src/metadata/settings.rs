@@ -209,6 +209,7 @@ impl PluginEntrySettings {
         &self.config
     }
 
+    #[must_use]
     pub fn with_config(mut self, config: PluginConfig) -> Self {
         self.config = config;
         self

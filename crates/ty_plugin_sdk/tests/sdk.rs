@@ -125,7 +125,9 @@ fn handle_dispatches_to_overridden_hook() {
 
 #[test]
 fn handle_dispatches_mutation_validation() {
-    let response = FieldPlugin.handle(&PluginRequest::ValidateMutation(mutation_request()));
+    let response = FieldPlugin.handle(&PluginRequest::ValidateMutation(Box::new(
+        mutation_request(),
+    )));
     assert!(matches!(response, PluginResponse::MutationDiagnostics(_)));
 }
 

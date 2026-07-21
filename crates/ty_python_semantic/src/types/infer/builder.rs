@@ -373,7 +373,6 @@ const fn plugin_diagnostic_severity(severity: protocol::DiagnosticSeverity) -> S
     }
 }
 
-
 fn transparent_callable_decorator_result<'db>(
     db: &'db dyn Db,
     bindings: &Bindings<'db>,

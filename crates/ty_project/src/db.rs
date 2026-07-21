@@ -82,15 +82,14 @@ impl SemanticPluginRuntimeState {
                 return Err(Self::unsupported_runtime_error());
             };
 
-            return host
-                .0
+            host.0
                 .execute(plugin_id, request)
-                .map_err(Self::host_error_to_runtime_error);
+                .map_err(Self::host_error_to_runtime_error)
         }
 
         #[cfg(not(all(feature = "plugins-wasm", not(target_arch = "wasm32"))))]
         {
-            let _ = (plugin_id, request);
+            let _ = (self, plugin_id, request);
             Err(Self::unsupported_runtime_error())
         }
     }
@@ -116,7 +115,7 @@ impl SemanticPluginRuntimeState {
                     wasm_host: None,
                     wasm_errors: Arc::new(BTreeMap::from([(
                         "*".to_string(),
-                        Self::runtime_error_to_semantic_error(error),
+                        Self::runtime_error_to_semantic_error(&error),
                     )])),
                 };
             }
@@ -204,7 +203,7 @@ impl SemanticPluginRuntimeState {
             if let Err(error) = runner.add_plugin(plugin.id(), artifact) {
                 errors.insert(
                     plugin.id().to_string(),
-                    Self::runtime_error_to_semantic_error(error),
+                    Self::runtime_error_to_semantic_error(&error),
                 );
                 continue;
             }
@@ -236,7 +235,7 @@ impl SemanticPluginRuntimeState {
     #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
     fn host_error_to_runtime_error(error: HostError) -> SemanticPluginRuntimeError {
         match error {
-            HostError::Runtime { source, .. } => Self::runtime_error_to_semantic_error(source),
+            HostError::Runtime { source, .. } => Self::runtime_error_to_semantic_error(&source),
             error => SemanticPluginRuntimeError::new(
                 error.to_string(),
                 "Fix the plugin manifest or remove the plugin.",
@@ -246,7 +245,7 @@ impl SemanticPluginRuntimeState {
 
     #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
     fn runtime_error_to_semantic_error(
-        error: ty_plugin_host::RuntimeError,
+        error: &ty_plugin_host::RuntimeError,
     ) -> SemanticPluginRuntimeError {
         SemanticPluginRuntimeError::new(error.to_string(), error.hint())
     }
@@ -922,10 +921,6 @@ pub(crate) mod testing {
             self.init_program_with_python_version(PythonVersion::latest_ty())
         }
 
-        #[expect(
-            clippy::unnecessary_wraps,
-            reason = "kept fallible to mirror `init_program` and let callers use `?`"
-        )]
         pub fn init_program_with_python_version(
             &mut self,
             python_version: PythonVersion,

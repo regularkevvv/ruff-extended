@@ -8,7 +8,7 @@ use ruff_python_ast as ast;
 
 mod arguments;
 pub(crate) mod bind;
-pub(super) use arguments::{Argument, CallArguments};
+pub(super) use arguments::{Argument, CallArgumentTypes, CallArguments};
 pub(super) use bind::{Binding, Bindings, CallableBinding, MatchedArgument};
 
 /// Whether the right operand's reflected method has priority based on the possible runtime

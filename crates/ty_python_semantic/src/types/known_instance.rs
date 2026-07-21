@@ -252,9 +252,9 @@ impl<'db> KnownInstanceType<'db> {
             Self::Literal(ty) => ty
                 .recursive_type_normalized_impl(db, div, true)
                 .map(Self::Literal),
-            Self::Annotated(ty) => ty
-                .recursive_type_normalized_impl(db, div, true)
-                .map(Self::Annotated),
+            Self::Annotated(ty) => Some(Self::Annotated(
+                ty.recursive_type_normalized_impl(db, div, true),
+            )),
             Self::TypeGenericAlias(ty) => ty
                 .recursive_type_normalized_impl(db, div, true)
                 .map(Self::TypeGenericAlias),
@@ -801,12 +801,7 @@ pub struct AnnotatedType<'db> {
 impl get_size2::GetSize for AnnotatedType<'_> {}
 
 impl<'db> AnnotatedType<'db> {
-    fn recursive_type_normalized_impl(
-        self,
-        db: &'db dyn Db,
-        div: Type<'db>,
-        nested: bool,
-    ) -> Option<Self> {
+    fn recursive_type_normalized_impl(self, db: &'db dyn Db, div: Type<'db>, nested: bool) -> Self {
         let base = self
             .base(db)
             .recursive_type_normalized_impl(db, div, nested)
@@ -821,7 +816,7 @@ impl<'db> AnnotatedType<'db> {
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        Some(Self::new(db, base, metadata, self.transparent(db)))
+        Self::new(db, base, metadata, self.transparent(db))
     }
 }
 
