@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 
 use itertools::Itertools;
-use ruff_python_ast::name::Name;
 use rustc_hash::FxHashSet;
 
 use crate::place::{DefinedPlace, Place};
@@ -15,6 +14,7 @@ use crate::types::enums::is_single_member_enum;
 use crate::types::function::FunctionDecorators;
 use crate::types::set_theoretic::RecursivelyDefined;
 use crate::types::signatures::{ParametersKind, SignatureRelationVisitor};
+use crate::types::tuple::TupleType;
 use crate::types::{
     ApplyTypeMappingVisitor, CallableType, ClassBase, ClassLiteral, ClassType, CycleDetector,
     IntersectionType, KnownBoundMethodType, KnownClass, KnownInstanceType, LiteralValueTypeKind,
@@ -24,7 +24,7 @@ use crate::types::{
 use crate::{
     Db,
     types::{
-        ErrorContext, ErrorContextTree, Type, constraints::ConstraintSet,
+        ErrorContext, ErrorContextTree, Type, TypePair, constraints::ConstraintSet,
         generics::InferableTypeVars,
     },
 };
@@ -464,16 +464,18 @@ impl<'db> Type<'db> {
     ) -> Cow<'db, OwnedConstraintSet<'db>> {
         #[salsa::tracked(
             returns(ref),
-            cycle_initial=|_, _, _, _| OwnedConstraintSet::always(),
+            cycle_initial=|_, _, _| OwnedConstraintSet::always(),
             heap_size=ruff_memory_usage::heap_size,
         )]
         fn when_constraint_set_assignable_to_owned_impl<'db>(
             db: &'db dyn Db,
-            source: Type<'db>,
-            target: Type<'db>,
+            types: TypePair<'db>,
         ) -> OwnedConstraintSet<'db> {
             let constraints = ConstraintSetBuilder::new();
             constraints.into_owned(|constraints| {
+                let source = types.first(db);
+                let target = types.second(db);
+
                 source.has_relation_to_with_typevar_evaluation(
                     db,
                     target,
@@ -490,7 +492,8 @@ impl<'db> Type<'db> {
         }
 
         Cow::Borrowed(when_constraint_set_assignable_to_owned_impl(
-            db, self, target,
+            db,
+            TypePair::new(db, self, target),
         ))
     }
 
@@ -530,16 +533,13 @@ impl<'db> Type<'db> {
     ///
     /// See [`TypeRelation::Redundancy`] for more details.
     pub(super) fn is_redundant_with(self, db: &'db dyn Db, other: Type<'db>) -> bool {
-        #[salsa::tracked(returns(copy), cycle_initial=|_, _, _, _| true, heap_size=ruff_memory_usage::heap_size)]
-        fn is_redundant_with_impl<'db>(
-            db: &'db dyn Db,
-            self_ty: Type<'db>,
-            other: Type<'db>,
-        ) -> bool {
-            self_ty
+        #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| true, heap_size=ruff_memory_usage::heap_size)]
+        fn is_redundant_with_impl<'db>(db: &'db dyn Db, types: TypePair<'db>) -> bool {
+            types
+                .first(db)
                 .has_relation_to(
                     db,
-                    other,
+                    types.second(db),
                     &ConstraintSetBuilder::new(),
                     InferableTypeVars::None,
                     TypeRelation::Redundancy { pure: false },
@@ -551,7 +551,7 @@ impl<'db> Type<'db> {
             return true;
         }
 
-        is_redundant_with_impl(db, self, other)
+        is_redundant_with_impl(db, TypePair::new(db, self, other))
     }
 
     pub(super) fn has_relation_to<'c>(
@@ -965,28 +965,6 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
         })
     }
 
-    /// Can we check `target`s relation to a `type[T]` in either the metaclass-instance domain (it
-    /// must pass `is_metaclass_instance`) or the regular instance domain (it must have Some
-    /// `.to_instance()`)?
-    ///
-    /// Do not use instance subtyping for an exact class object. For `T: (Y, Z)` where `Z` extends
-    /// `Y`, doing so would incorrectly simplify `type[T] & <class 'Y'>` to `type[T]`: both `Y` and
-    /// `Z` instances are subtypes of `Y`, but only the class object `Y` satisfies `klass is Y`.
-    ///
-    /// The exception is a type variable whose upper bound normalizes to this exact class object.
-    /// That can only happen for a final class, so the exact object is the only valid
-    /// specialization of the type variable.
-    fn can_check_typevar_subclass_relation_to_target(
-        db: &'db dyn Db,
-        source_subclass: SubclassOfType<'db>,
-        target: Type<'db>,
-    ) -> bool {
-        let is_exact_upper_bound = source_subclass.exact_typevar_upper_bound(db) == Some(target);
-
-        (!matches!(target, Type::ClassLiteral(_) | Type::GenericAlias(_)) || is_exact_upper_bound)
-            && (Self::is_metaclass_instance(db, target) || target.to_instance(db).is_some())
-    }
-
     /// Check the relation between a `type[T]` and a target type `A` when `A` can either be
     /// projected into the ordinary instance/object domain via `.to_instance()`, or is a plain
     /// metaclass object type.
@@ -1003,28 +981,51 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
     /// the metaclass of the upper bound of `T`, and compare in the metaclass-instance domain
     /// directly.
     ///
-    /// Exact class objects, and types that have no `.to_instance()` projection and are not
-    /// metaclass instances, do not pass the `can_check_typevar_subclass_relation_to_target` guard.
-    /// This helper does not decide their relation; they fall through to other type-pair branches.
+    /// When `.to_instance()` is an over-approximation, compare the original target in the
+    /// class-object domain instead. This preserves constraints that the projection discards, as
+    /// well as source constraints so that `T: (Y, Z)` can still be related to
+    /// `type[Y] | type[Z]`.
+    ///
+    /// Exact class objects also have an over-approximated instance projection. For `T: (Y, Z)`
+    /// where `Z` extends `Y`, instance subtyping would incorrectly simplify
+    /// `type[T] & <class 'Y'>` to `type[T]`: both `Y` and `Z` instances are subtypes of `Y`, but
+    /// only the class object `Y` satisfies `klass is Y`. The exception is a type variable whose
+    /// upper bound normalizes to this exact class object. That can only happen for a final class,
+    /// so the exact object is the only valid specialization of the type variable.
+    ///
+    /// Return `None` for targets without a `.to_instance()` projection, allowing other type-pair
+    /// branches to decide their relation.
     fn check_typevar_subclass_relation_to_target(
         &self,
         db: &'db dyn Db,
         source_subclass: SubclassOfType<'db>,
         target: Type<'db>,
-    ) -> ConstraintSet<'db, 'c> {
-        source_subclass
-            .into_type_var()
-            .when_some_and(db, self.constraints, |source_i| {
-                if Self::is_metaclass_instance(db, target) {
-                    self.check_type_pair(db, source_subclass.to_metaclass_instance(db), target)
-                } else {
-                    target
-                        .to_instance(db)
-                        .when_some_and(db, self.constraints, |target_i| {
-                            self.check_type_pair(db, Type::TypeVar(source_i), target_i)
-                        })
-                }
-            })
+    ) -> Option<ConstraintSet<'db, 'c>> {
+        let source_i = source_subclass.into_type_var()?;
+        let is_exact_upper_bound = source_subclass.exact_typevar_upper_bound(db) == Some(target);
+
+        if Self::is_metaclass_instance(db, target) {
+            return Some(self.check_type_pair(
+                db,
+                source_subclass.to_metaclass_instance(db),
+                target,
+            ));
+        }
+
+        let projection = target.to_instance(db)?;
+        if projection.is_exact() || is_exact_upper_bound {
+            return Some(self.check_type_pair(
+                db,
+                Type::TypeVar(source_i),
+                projection.into_inner(),
+            ));
+        }
+
+        let source = source_subclass
+            .subclass_of()
+            .with_transposed_type_var(db)
+            .into_type_var()?;
+        Some(self.check_type_pair(db, Type::TypeVar(source), target))
     }
 
     /// Return a constraint set indicating the conditions under which `self.relation` holds between `source` and `target`.
@@ -1380,23 +1381,45 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             // collapsing `A` through `to_instance()` would erase it to `object` (we have no
             // precise representation for "all instances of any classes with a given metaclass").
             (Type::SubclassOf(subclass_of), _)
-                if subclass_of.is_type_var()
-                    && Self::can_check_typevar_subclass_relation_to_target(
-                        db,
-                        subclass_of,
-                        target,
-                    ) =>
+                if let Some(constraint_set) =
+                    self.check_typevar_subclass_relation_to_target(db, subclass_of, target) =>
             {
-                self.check_typevar_subclass_relation_to_target(db, subclass_of, target)
+                constraint_set
             }
 
             // And vice versa. (No special metaclass handling is needed in this direction, since
             // "collapse to 'object'" in this case is a sound over-approximation.)
             (_, Type::SubclassOf(subclass_of))
                 if let Some(type_var) = subclass_of.into_type_var()
-                    && let Some(instance) = source.to_instance(db) =>
+                    && let Some(instance) = source.to_instance_approximation(db) =>
             {
                 self.check_type_pair(db, instance, Type::TypeVar(type_var))
+            }
+
+            // A TypeVarTuple specialization is represented by one tuple value. Keep inferable
+            // TypeVarTuples bare for constraint solving, but compare fixed symbolic values using
+            // the same tuple relation as concrete specializations.
+            (Type::TypeVar(bound_typevar), target)
+                if !bound_typevar.is_inferable(db, self.inferable)
+                    && bound_typevar.is_typevartuple(db)
+                    && target.exact_tuple_instance_spec(db).is_some() =>
+            {
+                self.check_type_pair(
+                    db,
+                    Type::tuple(Some(TupleType::unpacked_typevartuple(db, bound_typevar))),
+                    target,
+                )
+            }
+            (source, Type::TypeVar(bound_typevar))
+                if !bound_typevar.is_inferable(db, self.inferable)
+                    && bound_typevar.is_typevartuple(db)
+                    && source.exact_tuple_instance_spec(db).is_some() =>
+            {
+                self.check_type_pair(
+                    db,
+                    source,
+                    Type::tuple(Some(TupleType::unpacked_typevartuple(db, bound_typevar))),
+                )
             }
 
             // A gradual `ParamSpec` value (`...`) is assignability-consistent with any concrete
@@ -2615,7 +2638,7 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
             // `type[T]` is disjoint from a class object `A` if every instance of `T` is disjoint from an instance of `A`.
             (Type::SubclassOf(subclass_of), other) | (other, Type::SubclassOf(subclass_of))
                 if let Some(type_var) = subclass_of.into_type_var()
-                    && let Some(instance) = other.to_instance(db) =>
+                    && let Some(instance) = other.to_instance_approximation(db) =>
             {
                 self.check_type_pair(db, Type::TypeVar(type_var), instance)
             }
@@ -3175,11 +3198,7 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
                 Type::NominalInstance(nominal),
                 Type::Callable(_) | Type::DataclassDecorator(_) | Type::DataclassTransformer(_),
             ) if nominal.class(db).is_final(db) => Type::NominalInstance(nominal)
-                .member_lookup_with_policy(
-                    db,
-                    Name::new_static("__call__"),
-                    MemberLookupPolicy::NO_INSTANCE_FALLBACK,
-                )
+                .member_lookup_with_policy(db, "__call__", MemberLookupPolicy::NO_INSTANCE_FALLBACK)
                 .place
                 .ignore_possibly_undefined()
                 .when_none_or(db, self.constraints, |dunder_call| {

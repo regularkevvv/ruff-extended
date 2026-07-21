@@ -71,7 +71,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             .unwrap_or_else(Type::unknown);
 
         let name = if let Some(literal) = name_type.as_string_literal() {
-            ast::name::Name::new(literal.value(db))
+            literal.value(db)
         } else {
             if let Some(name_node) = name_node
                 && !name_type.is_assignable_to(db, KnownClass::Str.to_instance(db))
@@ -85,7 +85,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                     name_type.display(db)
                 ));
             }
-            ast::name::Name::new_static("<unknown>")
+            "<unknown>"
         };
 
         // For assigned `new_class()` calls, bases inference is deferred to handle forward
@@ -149,7 +149,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         let instance_members: Box<[(ast::name::Name, Type<'db>)]> = Box::new([]);
         let dynamic_class = DynamicClassLiteral::new(
             db,
-            &name,
+            name,
             anchor,
             members,
             instance_members,
@@ -165,7 +165,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             let mut disjoint_bases = self.validate_dynamic_type_bases(
                 bases_arg,
                 explicit_bases,
-                &name,
+                dynamic_class.name(db),
                 DynamicClassKind::NewClass,
             );
 

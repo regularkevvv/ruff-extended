@@ -1253,6 +1253,9 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                 Self::walk_narrowing_alias_predicate(&expr_if.body, f);
                 Self::walk_narrowing_alias_predicate(&expr_if.orelse, f);
             }
+            ast::Expr::Named(expr_named) => {
+                Self::walk_narrowing_alias_predicate(&expr_named.value, f);
+            }
             _ => {}
         }
     }
@@ -1652,7 +1655,7 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                 .enumerate()
             {
                 if let Some(target) = MemberExprBuilder::visit_subscript_expr(
-                    target.clone(),
+                    target,
                     &ast::Expr::NumberLiteral(ast::ExprNumberLiteral {
                         value: ast::Number::Int(ast::Int::from(i as u64)),
                         range: TextRange::default(),
@@ -1670,8 +1673,7 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                 continue;
             };
 
-            let Some(member_expr) = MemberExprBuilder::visit_subscript_expr(target.clone(), key)
-            else {
+            let Some(member_expr) = MemberExprBuilder::visit_subscript_expr(target, key) else {
                 continue;
             };
 
