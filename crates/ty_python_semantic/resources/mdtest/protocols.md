@@ -3055,7 +3055,7 @@ python-version = "3.12"
 ```
 
 ```py
-from typing import final
+from typing import Any, final, overload
 from typing_extensions import TypeVar, Self, Protocol
 from ty_extensions import static_assert
 from ty_extensions._internal import is_equivalent_to, is_assignable_to, is_subtype_of
@@ -3154,6 +3154,47 @@ class NominalReturningOtherClass:
     def g(self) -> Other:
         raise NotImplementedError
 
+class ConcreteMethod(Protocol):
+    def f(self, input: int) -> int: ...
+
+class GenericReceiver:
+    def f[T](self: T, input: T) -> T:
+        return self
+
+class GradualReceiverProtocol(Protocol):
+    def method(self: list[Any]) -> None: ...
+
+class GradualReceiverImplementation(list[int]):
+    def method(self: list[Any]) -> None: ...
+
+class ExplicitReceiverProtocol(Protocol):
+    def method(self: "ExplicitReceiverProtocol") -> None: ...
+
+class StructuralExplicitReceiver:
+    def method(self: ExplicitReceiverProtocol) -> None: ...
+
+class OverloadedExplicitReceiverProtocol(Protocol):
+    def overloaded(self: str, value: int | str) -> int: ...
+
+class OverloadedExplicitReceiverImplementation:
+    @overload
+    def overloaded(self, value: int) -> int: ...
+    @overload
+    def overloaded(self, value: str) -> int: ...
+    def overloaded(self, value: int | str) -> int:
+        return 1
+
+class ReceiverOnly(Protocol):
+    def method(self) -> None: ...
+
+class InvalidBoundedReceiver:
+    # TODO: Use `BoundTypeVarInstance::valid_specializations` to reject this receiver.
+    def method[T: int](self: T) -> None: ...
+
+class InvalidConstrainedReceiver:
+    # TODO: Use `BoundTypeVarInstance::valid_specializations` to reject this receiver.
+    def method[T: (int, str)](self: T) -> None: ...
+
 static_assert(is_equivalent_to(LegacyFunctionScoped, NewStyleFunctionScoped))
 static_assert(is_assignable_to(NominalNewStyle, NewStyleFunctionScoped))
 static_assert(is_assignable_to(NominalNewStyle, LegacyFunctionScoped))
@@ -3184,6 +3225,31 @@ static_assert(not is_assignable_to(NominalReturningSelfNotGeneric, LegacyFunctio
 static_assert(not is_assignable_to(NominalReturningSelfNotGeneric, UsesSelf))  # error: [static-assert-error]
 
 static_assert(not is_assignable_to(NominalReturningOtherClass, UsesSelf))
+
+# Binding `GenericReceiver.f` adds the constraint `GenericReceiver <= T`. It cannot choose
+# `T = int`, so the resulting bound method does not satisfy `ConcreteMethod.f`.
+static_assert(not is_assignable_to(GenericReceiver, ConcreteMethod))
+static_assert(not is_subtype_of(GenericReceiver, ConcreteMethod))
+
+# Specializing the receiver constraint to `GradualReceiverImplementation` must preserve the
+# assignability relation that produced it; `list[int]` is assignable to, but not a subtype of,
+# `list[Any]`.
+static_assert(is_assignable_to(GradualReceiverImplementation, GradualReceiverProtocol))
+
+# Checking the receiver constraint requires the same protocol relation that is already in
+# progress. The recursive check should terminate and establish the structural relation.
+static_assert(is_assignable_to(StructuralExplicitReceiver, ExplicitReceiverProtocol))
+static_assert(is_subtype_of(StructuralExplicitReceiver, ExplicitReceiverProtocol))
+
+# Aggregating the implementation's overloads covers the visible `int | str` parameter, but the
+# implementation's concrete receiver does not satisfy the protocol's explicit `str` receiver.
+static_assert(not is_assignable_to(OverloadedExplicitReceiverImplementation, OverloadedExplicitReceiverProtocol))
+static_assert(not is_subtype_of(OverloadedExplicitReceiverImplementation, OverloadedExplicitReceiverProtocol))
+
+static_assert(is_assignable_to(InvalidBoundedReceiver, ReceiverOnly))
+static_assert(is_subtype_of(InvalidBoundedReceiver, ReceiverOnly))
+static_assert(is_assignable_to(InvalidConstrainedReceiver, ReceiverOnly))
+static_assert(is_subtype_of(InvalidConstrainedReceiver, ReceiverOnly))
 
 # These test cases are taken from the typing conformance suite:
 class ShapeProtocolImplicitSelf(Protocol):
@@ -3272,9 +3338,18 @@ class FactoryProtocol(Protocol):
     @classmethod
     def make(cls) -> Self: ...
 
+class ExplicitReceiverFactoryProtocol(Protocol):
+    @classmethod
+    def make(cls: type[Self]) -> Self: ...
+
 class Factory:
     @classmethod
     def make(cls) -> Self:
+        return cls()
+
+class ExplicitReceiverFactory:
+    @classmethod
+    def make(cls: type[Self]) -> Self:
         return cls()
 
 class BadFactory:
@@ -3288,6 +3363,7 @@ class ClassObjectFactory:
         return cls
 
 static_assert(not is_assignable_to(TypeOf[Factory], FactoryProtocol))
+static_assert(not is_assignable_to(TypeOf[ExplicitReceiverFactory], ExplicitReceiverFactoryProtocol))
 static_assert(not is_assignable_to(TypeOf[BadFactory], FactoryProtocol))
 static_assert(is_assignable_to(type[ClassObjectFactory], FactoryProtocol))
 
@@ -4685,9 +4761,8 @@ def f(x: PGconn):
 
 ### Recursive protocols used as the first argument to `cast()`
 
-These caused issues in an early version of our `Protocol` implementation due to the fact that we use
-a recursive function in our `cast()` implementation to check whether a type contains `Unknown` or
-`Todo`. Recklessly recursing into a type causes stack overflows if the type is recursive:
+A redundant cast is reported only if neither type contains `Unknown` nor `Todo`. Inspecting protocol
+members for these types must terminate when a protocol refers back to itself.
 
 ```toml
 [environment]
@@ -4703,6 +4778,139 @@ class Iterator[T](Protocol):
 
 def f(value: Iterator[Any]):
     cast(Iterator[Any], value)  # error: [redundant-cast]
+```
+
+### Protocol methods and properties in `cast()`
+
+The `Iterator` example above also ensures that the implicit `self` parameter of an ordinary method
+does not make the protocol appear recursive. The method's return type must still be checked.
+
+```toml
+[environment]
+python-version = "3.12"
+```
+
+```py
+from typing import Protocol, cast
+
+from ty_extensions import Unknown
+
+class UnknownMethod[T](Protocol):
+    def method(self) -> Unknown: ...
+
+def method(value: UnknownMethod[int]) -> None:
+    cast(UnknownMethod[int], value)
+```
+
+Property getters follow the same rule: their implicit receiver is ignored, but their return type is
+checked.
+
+```py
+from typing import Protocol, cast
+
+from ty_extensions import Unknown
+
+class IntProperty[T](Protocol):
+    @property
+    def value(self) -> int: ...
+
+class UnknownProperty[T](Protocol):
+    @property
+    def value(self) -> Unknown: ...
+
+def properties(known: IntProperty[int], unknown: UnknownProperty[int]) -> None:
+    cast(IntProperty[int], known)  # error: [redundant-cast]
+    cast(UnknownProperty[int], unknown)
+```
+
+### Specialized protocol type parameters in `cast()`
+
+A type variable's bound does not remain part of a specialized protocol. Here, the `Unknown` bound
+has been replaced by `int`, so the cast is redundant.
+
+```py
+from typing import Protocol, TypeVar, cast
+
+from ty_extensions import Unknown
+
+T = TypeVar("T", bound=Unknown)
+
+class BoundedProtocol(Protocol[T]):
+    value: T
+
+def bounded(value: BoundedProtocol[int]) -> None:
+    cast(BoundedProtocol[int], value)  # error: [redundant-cast]
+```
+
+### Recursive protocol specializations in `cast()`
+
+A protocol can refer to itself with a different type argument on every step. Since the sequence
+`Linked[int]`, `Linked[list[int]]`, and so on never repeats exactly, the inspection stops when it
+sees the same protocol definition again. The diagnostic is not reported because a later
+specialization could expose `Unknown`.
+
+```toml
+[environment]
+python-version = "3.12"
+```
+
+```py
+from typing import Protocol, cast
+
+class Linked[T](Protocol):
+    value: T
+    next: "Linked[list[T]]"
+
+def linked(value: Linked[int]) -> None:
+    cast(Linked[int], value)
+```
+
+An explicit `self` annotation is part of the method's type, so recursion through that annotation
+must also terminate.
+
+```py
+from typing import Protocol, cast
+
+class ExplicitReceiver[T](Protocol):
+    def method(self: "ExplicitReceiver[list[T]]") -> int: ...
+
+def explicit_receiver(value: ExplicitReceiver[int]) -> None:
+    cast(ExplicitReceiver[int], value)
+```
+
+The diagnostic must be withheld because member lookup can depend on the type argument. In this
+example, descriptor overload resolution exposes `Unknown` only through the nested protocol.
+
+```py
+from typing import Protocol, cast, overload
+
+from ty_extensions import Unknown
+
+class Descriptor:
+    @overload
+    def __get__(
+        self,
+        instance: "DescriptorProtocol[list[int]]",
+        owner: type["DescriptorProtocol[list[int]]"],
+    ) -> Unknown: ...
+    @overload
+    def __get__(self, instance: object, owner: type[object]) -> int: ...
+    def __get__(self, instance: object, owner: type[object]) -> object:
+        return object()
+
+def descriptor(_function: object) -> Descriptor:
+    return Descriptor()
+
+class DescriptorProtocol[T](Protocol):
+    marker: T
+    next: "DescriptorProtocol[list[T]]"
+
+    @descriptor
+    def value(self) -> object: ...
+
+def descriptor_specialization(value: DescriptorProtocol[int]) -> None:
+    reveal_type((value.value, value.next.value))  # revealed: tuple[int, Unknown]
+    cast(DescriptorProtocol[int], value)
 ```
 
 ### Recursive generic protocols

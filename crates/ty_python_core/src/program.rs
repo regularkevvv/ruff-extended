@@ -211,6 +211,7 @@ impl SemanticPlugin {
         }
     }
 
+    #[must_use]
     pub fn with_call_method_on_subclass_claims(
         mut self,
         call_signature_method_on_subclass_claims: impl Into<Box<[SemanticPluginMethodClaim]>>,
@@ -222,6 +223,7 @@ impl SemanticPlugin {
         self
     }
 
+    #[must_use]
     pub fn with_instance_member_on_subclass_claims(
         mut self,
         claims: impl Into<Box<[String]>>,
@@ -230,6 +232,7 @@ impl SemanticPlugin {
         self
     }
 
+    #[must_use]
     pub fn with_mutation_claims(
         mut self,
         exact: impl Into<Box<[String]>>,
@@ -240,6 +243,7 @@ impl SemanticPlugin {
         self
     }
 
+    #[must_use]
     pub fn with_settings_module_claims(
         mut self,
         settings_module_claims: impl Into<Box<[String]>>,
@@ -248,16 +252,19 @@ impl SemanticPlugin {
         self
     }
 
+    #[must_use]
     pub const fn with_project_index_enabled(mut self, project_index_enabled: bool) -> Self {
         self.project_index_enabled = project_index_enabled;
         self
     }
 
+    #[must_use]
     pub fn with_config_json(mut self, config_json: impl Into<String>) -> Self {
         self.config_json = config_json.into();
         self
     }
 
+    #[must_use]
     pub const fn with_strict_settings(mut self, strict_settings: bool) -> Self {
         self.strict_settings = strict_settings;
         self

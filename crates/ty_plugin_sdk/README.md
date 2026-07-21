@@ -1,4 +1,4 @@
-# ty_plugin_sdk
+# `ty_plugin_sdk`
 
 [![crates.io](https://img.shields.io/crates/v/ty_plugin_sdk.svg)](https://crates.io/crates/ty_plugin_sdk)
 [![docs.rs](https://docs.rs/ty_plugin_sdk/badge.svg)](https://docs.rs/ty_plugin_sdk)
@@ -38,7 +38,7 @@ edition = "2024"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
-ty_plugin_sdk = "0.0.3"
+ty_plugin_sdk = "0.0.4"
 ```
 
 Implement `Plugin`, claim the matching hook in the manifest, and export it:
@@ -148,8 +148,7 @@ Test the same implementation at three levels:
 
 1. Call hook methods directly in ordinary Rust unit tests.
 1. Call `Plugin::handle` or `Plugin::handle_json` to verify dispatch and wire serialization.
-1. Build `wasm32-unknown-unknown` and run the packaged artifact with ty-extended against a fixture
-    Python project.
+1. Build `wasm32-unknown-unknown` and run the packaged artifact with ty-extended against a fixture Python project.
 
 Native tests stay fast because `export_plugin!` expands to nothing outside `wasm32`.
 

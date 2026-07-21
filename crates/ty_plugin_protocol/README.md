@@ -1,4 +1,4 @@
-# ty_plugin_protocol
+# `ty_plugin_protocol`
 
 [![crates.io](https://img.shields.io/crates/v/ty_plugin_protocol.svg)](https://crates.io/crates/ty_plugin_protocol)
 [![docs.rs](https://docs.rs/ty_plugin_protocol/badge.svg)](https://docs.rs/ty_plugin_protocol)
@@ -22,20 +22,18 @@ wire messages, or building protocol tooling.
 
 ```toml
 [dependencies]
-ty_plugin_protocol = "0.0.3"
+ty_plugin_protocol = "0.0.4"
 ```
 
 ## Protocol Model
 
 The main types are:
 
-- `PluginManifest`: identity, compatibility, runtime, capabilities, claims, configuration, and
-    stub overlays;
+- `PluginManifest`: identity, compatibility, runtime, capabilities, claims, configuration, and stub overlays;
 - `PluginRequest`: the tagged request enum sent by a host;
 - `PluginResponse`: the tagged response enum returned by an extension;
 - request summaries such as `AnalyzeClassRequest`, `CallRequest`, and `ResolveMemberRequest`;
-- declarative outputs such as `ClassPatch`, `MemberPatch`, `CallSignaturePatch`, and
-    `ProjectIndexResponse`;
+- declarative outputs such as `ClassPatch`, `MemberPatch`, `CallSignaturePatch`, and `ProjectIndexResponse`;
 - `TypeExpr`: source-level type data with expression, annotation, or stub mode;
 - `ProtocolVersion`: compatibility negotiation between a host and extension.
 

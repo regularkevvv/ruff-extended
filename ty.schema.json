@@ -35,6 +35,16 @@
         }
       ]
     },
+    "plugins": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/PluginsOptions"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "rules": {
       "description": "Configures the enabled rules and their severity.\n\nThe keys are either rule names or `all` to set a default severity for all rules.\nSee [the rules documentation](https://ty.dev/rules) for a list of all available rules.\n\nValid severities are:\n\n* `ignore`: Disable the rule.\n* `warn`: Enable the rule and create a warning diagnostic.\n* `error`: Enable the rule and create an error diagnostic.\n\nBy default, ty exits with code 1 if it emits any warning or error diagnostics.\nSet `terminal.error-on-warning` to `false` to exit with code 0 if all diagnostics have `warning` severity.",
       "anyOf": [
@@ -292,6 +302,129 @@
       "items": {
         "$ref": "#/definitions/OverrideOptions"
       }
+    },
+    "PluginEntriesOptions": {
+      "description": "Plugin entries configured under `plugins.plugin`.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/PluginEntryOptions"
+      }
+    },
+    "PluginEntryOptions": {
+      "type": "object",
+      "properties": {
+        "config": {
+          "description": "Plugin-specific configuration passed through the stable protocol."
+        },
+        "id": {
+          "description": "Stable plugin identifier.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/string"
+            }
+          ]
+        },
+        "manifest-path": {
+          "description": "Optional path to a separate manifest file.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RelativePathBuf"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path": {
+          "description": "Path to the plugin artifact.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/RelativePathBuf"
+            }
+          ]
+        },
+        "runtime": {
+          "description": "Runtime used to execute the plugin artifact.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginRuntimeOption"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stub-overlay-path": {
+          "description": "Optional path to a plugin-provided stub overlay root.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RelativePathBuf"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "trusted": {
+          "description": "Whether this plugin artifact is trusted to execute locally.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "path"
+      ]
+    },
+    "PluginRuntimeOption": {
+      "type": "string",
+      "enum": [
+        "wasm",
+        "subprocess",
+        "mock"
+      ]
+    },
+    "PluginsOptions": {
+      "description": "Configures external semantic plugins.",
+      "type": "object",
+      "properties": {
+        "auto-discover": {
+          "description": "Whether to load trusted plugin packages installed into the project's Python environment.\n\nInstalled plugin packages expose a `ty-plugin.json` manifest next to their artifact. This\nis disabled by default. Set this to `true` to activate installed-package plugins for a\nproject.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "config": {
+          "description": "Plugin-specific configuration keyed by installed plugin id.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true
+        },
+        "enabled": {
+          "description": "Whether semantic plugins are enabled for this project.\n\nPlugins are disabled by default. Enabling this option only allows plugins\nthat are explicitly listed in `plugins.plugin`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "plugin": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginEntriesOptions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "PythonPlatform": {
       "description": "The target platform to assume when resolving types.\n",

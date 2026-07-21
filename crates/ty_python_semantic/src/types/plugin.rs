@@ -20,7 +20,7 @@ use ty_python_core::program::{SemanticPlugin, SemanticPluginRuntime};
 use ty_python_core::scope::ScopeId;
 
 use crate::place::imported_symbol;
-use crate::types::call::CallArguments;
+use crate::types::call::{CallArgumentTypes, CallArguments};
 use crate::types::class::{
     DynamicClassAnchor, DynamicClassLiteral, DynamicNamedTupleAnchor, DynamicNamedTupleLiteral,
     NamedTupleField, NamedTupleSpec, StaticClassLiteral, plugin_project_index_json,
@@ -291,10 +291,10 @@ impl<'db> PluginVirtualTypePatch<'db> {
     }
 }
 
-pub(crate) fn plugin_virtual_type_patches_from_protocol<'db>(
-    db: &'db dyn Db,
+pub(crate) fn plugin_virtual_type_patches_from_protocol(
+    db: &dyn Db,
     definitions: Vec<protocol::VirtualTypeDefinition>,
-) -> Box<[PluginVirtualTypePatch<'db>]> {
+) -> Box<[PluginVirtualTypePatch<'_>]> {
     let scope = plugin_virtual_type_scope(db);
     definitions
         .into_iter()
@@ -346,7 +346,7 @@ fn plugin_virtual_type_definition_to_patch<'db>(
                 .unwrap_or("PluginNamedTuple");
             let named_tuple = DynamicNamedTupleLiteral::new(
                 db,
-                &Name::new(short_name),
+                Name::new(short_name),
                 DynamicNamedTupleAnchor::PluginVirtual {
                     scope,
                     identity: definition.name.clone(),
@@ -379,7 +379,7 @@ fn plugin_virtual_type_definition_to_patch<'db>(
                 .unwrap_or("PluginVirtualClass");
             let dynamic_class = DynamicClassLiteral::new(
                 db,
-                &Name::new(short_name),
+                Name::new(short_name),
                 &DynamicClassAnchor::PluginVirtual {
                     scope,
                     identity: definition.name.clone(),
@@ -400,11 +400,14 @@ fn plugin_virtual_type_definition_to_patch<'db>(
     Some(PluginVirtualTypePatch::new(definition.name, ty))
 }
 
+/// The class-level and instance-level members contributed by a plugin virtual class.
+type PluginVirtualClassMembers<'db> = (Box<[(Name, Type<'db>)]>, Box<[(Name, Type<'db>)]>);
+
 fn plugin_virtual_class_members<'db>(
     db: &'db dyn Db,
     members: &[protocol::MemberPatch],
     context: PluginTypeExprContext<'db, '_>,
-) -> (Box<[(Name, Type<'db>)]>, Box<[(Name, Type<'db>)]>) {
+) -> PluginVirtualClassMembers<'db> {
     let mut class_members = Vec::new();
     let mut instance_members = Vec::new();
     for member in members {
@@ -492,7 +495,7 @@ fn parse_plugin_class_base_expr<'db>(
     resolve_plugin_qualified_type_expr_value(db, &expression)
 }
 
-fn plugin_virtual_type_scope<'db>(db: &'db dyn Db) -> Option<ScopeId<'db>> {
+fn plugin_virtual_type_scope(db: &dyn Db) -> Option<ScopeId<'_>> {
     all_modules(db)
         .into_iter()
         .filter_map(|module| module.file(db))
@@ -501,25 +504,13 @@ fn plugin_virtual_type_scope<'db>(db: &'db dyn Db) -> Option<ScopeId<'db>> {
         .map(|file| global_scope(db, file))
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct PluginTypeExprContext<'db, 'ctx> {
     self_class: Option<StaticClassLiteral<'db>>,
     self_type: Option<Type<'db>>,
     scope: Option<ScopeId<'db>>,
     virtual_types: &'ctx [PluginVirtualTypePatch<'db>],
     imports: &'ctx [protocol::ImportBinding],
-}
-
-impl<'db, 'ctx> Default for PluginTypeExprContext<'db, 'ctx> {
-    fn default() -> Self {
-        Self {
-            self_class: None,
-            self_type: None,
-            scope: None,
-            virtual_types: &[],
-            imports: &[],
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1042,7 +1033,7 @@ fn parse_plugin_class_type_expr<'db>(
     let instance_members = instance_members.into_boxed_slice();
     let dynamic_class = DynamicClassLiteral::new(
         db,
-        &Name::new(name),
+        Name::new(name),
         &DynamicClassAnchor::PluginVirtual {
             scope,
             identity: expression.to_string(),
@@ -1622,6 +1613,7 @@ pub(crate) fn plugin_adjusted_call_return<'db>(
 }
 
 /// Run the first semantic plugin claiming mutation validation for `receiver_ty`.
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn plugin_mutation_diagnostics<'db>(
     db: &'db dyn Db,
     file: File,
@@ -1667,7 +1659,7 @@ pub(crate) fn plugin_mutation_diagnostics<'db>(
         value: plugin_literal_value_from_expr(expression),
         source: Some(plugin_symbol_source(db, file, expression.range(), None)),
     };
-    let request = protocol::PluginRequest::ValidateMutation(protocol::MutationRequest {
+    let request = protocol::PluginRequest::ValidateMutation(Box::new(protocol::MutationRequest {
         context: plugin_semantic_context(db, file, speculative),
         operation,
         receiver: plugin_qualified_type_expr_from_type(db, receiver_ty),
@@ -1675,7 +1667,7 @@ pub(crate) fn plugin_mutation_diagnostics<'db>(
         value: value.map(argument),
         source: plugin_symbol_source(db, file, source_range, None),
         project_index: plugin_project_index_json(db, plugin),
-    });
+    }));
 
     let response = match plugin.runtime() {
         SemanticPluginRuntime::Mock => protocol::PluginResponse::NoChange,
@@ -1689,6 +1681,7 @@ pub(crate) fn plugin_mutation_diagnostics<'db>(
     Ok(response.diagnostics)
 }
 
+#[expect(clippy::too_many_arguments)]
 fn plugin_call_request<'db>(
     db: &'db dyn Db,
     plugin: &SemanticPlugin,
@@ -1742,7 +1735,7 @@ fn plugin_receiver_summary<'db>(
         type_expr: plugin_qualified_type_expr_from_type(db, receiver_ty),
         nominal_class,
         generic_arguments,
-        plugin_metadata: Default::default(),
+        plugin_metadata: serde_json::Value::default(),
     }
 }
 
@@ -1831,7 +1824,7 @@ fn plugin_call_argument_summaries<'db>(
                 kind,
                 type_expr: call_arguments
                     .and_then(|arguments| arguments.argument_types(index))
-                    .and_then(|types| types.get_default())
+                    .and_then(CallArgumentTypes::get_default)
                     .map(|ty| plugin_type_expr_from_type(db, ty)),
                 value: plugin_literal_value_from_expr(expression),
                 source: Some(plugin_symbol_source(db, file, range, None)),
@@ -2212,7 +2205,7 @@ mod tests {
                         }],
                         total: true,
                     },
-                    metadata: Default::default(),
+                    metadata: serde_json::Value::default(),
                 },
                 protocol::VirtualTypeDefinition {
                     name: "minidjango.virtual.app.Book.ValuesListRow".to_string(),
@@ -2224,7 +2217,7 @@ mod tests {
                             read_only: false,
                         }],
                     },
-                    metadata: Default::default(),
+                    metadata: serde_json::Value::default(),
                 },
             ],
         );
@@ -2309,7 +2302,7 @@ mod tests {
                         },
                     ],
                 },
-                metadata: Default::default(),
+                metadata: serde_json::Value::default(),
             }],
         );
 

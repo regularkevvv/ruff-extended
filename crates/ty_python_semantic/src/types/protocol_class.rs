@@ -28,6 +28,7 @@ use crate::{
         constraints::{ConstraintSet, IteratorConstraintsExtension, OptionConstraintsExtension},
         context::InferContext,
         diagnostic::report_undeclared_protocol_member,
+        signatures::walk_signature,
     },
 };
 use ty_python_core::{definition::Definition, place::ScopedPlaceId, place_table, use_def_map};
@@ -202,6 +203,57 @@ pub(super) fn walk_protocol_interface<'db, V: super::visitor::TypeVisitor<'db> +
 ) {
     for member in interface.members(db) {
         walk_protocol_member(db, &member, visitor);
+    }
+}
+
+/// Walk the member types exposed through an instance of a protocol.
+///
+/// This binds inferred method receivers and property accessors to `receiver_ty`, while leaving
+/// explicit receiver annotations in place because they can affect which overload is exposed.
+/// For example, walking `P[int]` visits the return type `int`, but not the inferred receiver type:
+///
+/// ```python
+/// class P[T](Protocol):
+///     def method(self) -> T: ...
+/// ```
+pub(super) fn walk_protocol_instance_interface<
+    'db,
+    V: super::visitor::TypeVisitor<'db> + ?Sized,
+>(
+    db: &'db dyn Db,
+    interface: ProtocolInterface<'db>,
+    receiver_ty: Type<'db>,
+    visitor: &V,
+) {
+    for member in interface.members(db) {
+        match member.data.kind {
+            ProtocolMemberKind::Method(method, _) => {
+                let Type::Callable(callable) = method.ty() else {
+                    visitor.visit_type(db, method.ty());
+                    continue;
+                };
+                for signature in callable.signatures(db) {
+                    if signature.has_implicit_positional_receiver_annotation() {
+                        let signature = signature.bind_self(db, Some(receiver_ty));
+                        walk_signature(db, &signature, visitor);
+                    } else {
+                        walk_signature(db, signature, visitor);
+                    }
+                }
+            }
+            ProtocolMemberKind::Property { read, write } => {
+                for member_type in [read, write].into_iter().flatten() {
+                    if let Some(ty) = member_type.bind_self(db, receiver_ty) {
+                        visitor.visit_type(db, ty);
+                    }
+                }
+            }
+            ProtocolMemberKind::Attribute(attribute) => {
+                if let Some(ty) = attribute.bind_self(db, receiver_ty) {
+                    visitor.visit_type(db, ty);
+                }
+            }
+        }
     }
 }
 
@@ -1168,6 +1220,13 @@ impl<'a, 'db> ProtocolMember<'a, 'db> {
         )
     }
 
+    fn is_class_method(&self) -> bool {
+        matches!(
+            self.data.kind,
+            ProtocolMemberKind::Method(_, ProtocolMethodKind::Class)
+        )
+    }
+
     fn is_property(&self) -> bool {
         matches!(self.data.kind, ProtocolMemberKind::Property { .. })
     }
@@ -1754,6 +1813,16 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
             .to_instance(db)
             .or_else(|| ty.literal_fallback_instance(db))
             .unwrap_or(ty);
+        let implementation_receiver_binding_ty = if member.is_class_method() {
+            implementation_self_binding_ty.to_meta_type(db)
+        } else {
+            implementation_self_binding_ty
+        };
+        let protocol_receiver_binding_ty = if member.is_class_method() {
+            protocol_self_binding_ty.to_meta_type(db)
+        } else {
+            protocol_self_binding_ty
+        };
 
         // Checking a class object against a protocol's instance capabilities can expose the
         // property descriptor itself rather than the value returned by its getter. Compatibility
@@ -1777,9 +1846,17 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                     self.check_callables_vs_callable(
                         db,
                         &callables.map(|callable| {
-                            callable.apply_self(db, implementation_self_binding_ty)
+                            callable.apply_self_with_receiver(
+                                db,
+                                implementation_receiver_binding_ty,
+                                implementation_self_binding_ty,
+                            )
                         }),
-                        required_callable.apply_self(db, protocol_self_binding_ty),
+                        required_callable.apply_self_with_receiver(
+                            db,
+                            protocol_receiver_binding_ty,
+                            protocol_self_binding_ty,
+                        ),
                     )
                 })
         } else if member.is_instance_method() {
@@ -1818,7 +1895,11 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
             self.check_type_pair(
                 db,
                 attribute_type,
-                Type::Callable(required_callable.apply_self(db, protocol_self_binding_ty)),
+                Type::Callable(required_callable.apply_self_with_receiver(
+                    db,
+                    protocol_receiver_binding_ty,
+                    protocol_self_binding_ty,
+                )),
             )
         } else {
             required_ty

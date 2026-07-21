@@ -37,7 +37,7 @@ fn project_context() -> ProjectContext {
         root: "/project".to_string(),
         python_version: "3.13".to_string(),
         platform: "linux".to_string(),
-        config: Default::default(),
+        config: serde_json::Value::default(),
     }
 }
 
@@ -83,6 +83,7 @@ fn call_field(name: &str, callee: &str, arguments: Vec<ArgumentSummary>) -> Fiel
             callee: SymbolRef {
                 qualified_name: callee.to_string(),
             },
+            receiver: None,
             arguments,
             return_type: None,
         })),
@@ -99,6 +100,7 @@ fn model_class(qualified_name: &str, fields: Vec<FieldSummary>) -> ClassSummary 
         decorators: Vec::new(),
         metaclass: None,
         fields,
+        methods: Vec::new(),
         nested_classes: Vec::new(),
         class_constants: Vec::new(),
         source: SymbolSource::default(),
@@ -151,6 +153,7 @@ fn minidjango_project_index_request() -> PluginRequest {
             ),
         ],
         settings: Vec::new(),
+        assignments: Vec::new(),
         previous_index_fingerprint: None,
     })
 }
@@ -163,7 +166,7 @@ fn values_list_request(project_index: serde_json::Value) -> PluginRequest {
             type_expr: TypeExpr::annotation("minidjango.Manager[app.Book]"),
             nominal_class: Some(minidjango::MANAGER_BASE.to_string()),
             generic_arguments: vec![TypeExpr::annotation("app.Book")],
-            plugin_metadata: Default::default(),
+            plugin_metadata: serde_json::Value::default(),
         }),
         arguments: vec![positional_str("title"), positional_str("pages")],
         existing_signature: None,
@@ -202,7 +205,7 @@ fn runs_example_plugin_compiled_to_wasm() {
     let response = host
         .execute(
             "example.minidjango",
-            &values_list_request(index.plugin_index.clone()),
+            &values_list_request(index.plugin_index),
         )
         .expect("plugin executes");
     let PluginResponse::CallReturnPatch(patch) = response else {
