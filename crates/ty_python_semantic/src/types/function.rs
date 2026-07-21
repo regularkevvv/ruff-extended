@@ -85,6 +85,7 @@ use crate::types::list_members::all_members;
 use crate::types::narrow::ClassInfoConstraintFunction;
 use crate::types::relation::TypeRelationChecker;
 use crate::types::signatures::{CallableSignature, ReturnCallableTypeVarScope, Signature};
+use crate::types::tuple::TupleSpec;
 use crate::types::variance::{TypeVarVariance, VarianceInferable};
 use crate::types::visitor::non_any_dynamic_content;
 use crate::types::{
@@ -1632,7 +1633,7 @@ fn check_classinfo_in_isinstance<'db>(
                     Some(ast::Expr::Tuple(tuple_expr)) => Some(&tuple_expr.elts),
                     _ => None,
                 };
-                for (index, element) in tuple_spec.iter_all_elements().enumerate() {
+                for (index, element) in tuple_spec.iter_element_types(db).enumerate() {
                     let element_expr = element_exprs.and_then(|elts| elts.get(index));
                     check_classinfo_in_isinstance(
                         db,
@@ -1887,6 +1888,69 @@ fn is_instance_truthiness<'db>(
             // if it's worth the effort.
             Truthiness::Ambiguous
         }
+    }
+}
+
+/// Return whether a fixed `isinstance` tuple covers every possible type of an input.
+///
+/// Each class in the tuple uses the same truthiness inference as a single-class `isinstance` check.
+///
+/// ```python
+/// def f(x: A | B) -> bool:
+///     if isinstance(x, (A, B)):
+///         return True
+/// ```
+fn is_instance_tuple_exhaustive<'db>(db: &'db dyn Db, ty: Type<'db>, classinfo: Type<'db>) -> bool {
+    let Some(tuple) = classinfo
+        .as_nominal_instance()
+        .and_then(|nominal| nominal.tuple_spec(db))
+    else {
+        return false;
+    };
+    if tuple.is_variadic() {
+        return false;
+    }
+
+    is_instance_tuple_covers(db, &tuple, ty, &ActiveRecursionDetector::default())
+}
+
+fn is_instance_tuple_covers<'db>(
+    db: &'db dyn Db,
+    tuple: &TupleSpec<'db>,
+    ty: Type<'db>,
+    recursion_guard: &ActiveRecursionDetector<Type<'db>>,
+) -> bool {
+    match ty {
+        Type::TypeAlias(alias) => recursion_guard.visit(
+            &ty,
+            || true,
+            || is_instance_tuple_covers(db, tuple, alias.value_type(db), recursion_guard),
+        ),
+        Type::Union(union) => union
+            .elements(db)
+            .iter()
+            .all(|element| is_instance_tuple_covers(db, tuple, *element, recursion_guard)),
+        Type::Intersection(intersection) => intersection
+            .positive(db)
+            .iter()
+            .any(|element| is_instance_tuple_covers(db, tuple, *element, recursion_guard)),
+        Type::TypeVar(typevar) => match typevar.typevar(db).bound_or_constraints(db) {
+            Some(TypeVarBoundOrConstraints::UpperBound(bound)) => {
+                is_instance_tuple_covers(db, tuple, bound, recursion_guard)
+            }
+            Some(TypeVarBoundOrConstraints::Constraints(constraints)) => {
+                constraints.elements(db).iter().all(|constraint| {
+                    is_instance_tuple_covers(db, tuple, *constraint, recursion_guard)
+                })
+            }
+            None => is_instance_tuple_covers(db, tuple, Type::object(), recursion_guard),
+        },
+        ty => tuple.fixed_elements().any(|element| {
+            let Type::ClassLiteral(class) = element else {
+                return false;
+            };
+            is_instance_truthiness(db, ty, *class).is_always_true()
+        }),
     }
 }
 
@@ -2590,13 +2654,15 @@ impl KnownFunction {
                     call_expression.arguments.args.get(1),
                 );
 
-                if let Type::ClassLiteral(class) = second_argument
-                    && self == KnownFunction::IsInstance
-                {
-                    overload.set_return_type(Type::from_truthiness(
-                        db,
-                        is_instance_truthiness(db, *first_arg, *class),
-                    ));
+                if self == KnownFunction::IsInstance {
+                    let truthiness = match second_argument {
+                        Type::ClassLiteral(class) => is_instance_truthiness(db, *first_arg, *class),
+                        _ if is_instance_tuple_exhaustive(db, *first_arg, *second_argument) => {
+                            Truthiness::AlwaysTrue
+                        }
+                        _ => Truthiness::Ambiguous,
+                    };
+                    overload.set_return_type(Type::from_truthiness(db, truthiness));
                 }
             }
 

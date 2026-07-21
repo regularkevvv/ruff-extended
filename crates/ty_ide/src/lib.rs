@@ -410,7 +410,7 @@ mod tests {
     use ruff_python_trivia::textwrap::dedent;
     use ruff_text_size::TextSize;
     use ty_module_resolver::SearchPathSettings;
-    use ty_project::ProjectMetadata;
+    use ty_project::{Db as _, ProjectMetadata};
     use ty_python_core::platform::PythonPlatform;
     use ty_python_core::program::{
         FallibleStrategy, Program, ProgramSettings, SemanticPluginEnvironment,
@@ -554,6 +554,11 @@ mod tests {
                         cursor.is_none(),
                         "found more than one source that contains `<CURSOR>`"
                     );
+
+                    // The cursor file is open in the editor; expected types for
+                    // string-literal completions are only collected for open files.
+                    db.project().open_file(&mut db, file);
+
                     let source = source_text(&db, file);
                     let parsed = parsed_module(&db, file).load(&db);
                     let stylist =
@@ -724,6 +729,11 @@ mod tests {
                         cursor.is_none(),
                         "found more than one source that contains `<CURSOR>`"
                     );
+
+                    // The cursor file is open in the editor; expected types for
+                    // string-literal completions are only collected for open files.
+                    db.project().open_file(&mut db, file);
+
                     let source = source_text(&db, file);
                     let parsed = parsed_module(&db, file).load(&db);
                     let stylist =

@@ -222,7 +222,7 @@ fn resolve_module_query<'db>(
     resolved
         .into_iter()
         .next()
-        .map(|candidate| candidate.into_module(db, name.clone()))
+        .map(|candidate| candidate.into_module(db, name))
 }
 
 /// Like `resolve_module_query` but for cases where it failed to resolve the module
@@ -262,7 +262,7 @@ fn desperately_resolve_module<'db>(
     resolved
         .into_iter()
         .next()
-        .map(|candidate| candidate.into_module(db, name.clone()))
+        .map(|candidate| candidate.into_module(db, name))
 }
 
 /// Resolves the module for the given path.
@@ -1220,11 +1220,11 @@ impl ModuleResolutionCandidate {
     }
 
     // This is the module we were actually interested in resolving, complete the resolution
-    fn into_module(self, db: &'_ dyn Db, name: ModuleName) -> Module<'_> {
+    fn into_module<'db>(self, db: &'db dyn Db, name: &ModuleName) -> Module<'db> {
         match self.module {
             ResolvedModule::NamespacePackage => {
                 tracing::trace!("Resolve namespace package `{name}`");
-                Module::namespace_package(db, name)
+                Module::namespace_package(db, Cow::Borrowed(name))
             }
             ResolvedModule::LegacyNamespacePackage(file) => {
                 // legacy namespace packages behave like regular packages
@@ -1235,7 +1235,7 @@ impl ModuleResolutionCandidate {
                 );
                 Module::file_module(
                     db,
-                    name,
+                    Cow::Borrowed(name),
                     ModuleKind::Package,
                     self.path.into_search_path(),
                     file,
@@ -1248,7 +1248,7 @@ impl ModuleResolutionCandidate {
                 );
                 Module::file_module(
                     db,
-                    name,
+                    Cow::Borrowed(name),
                     ModuleKind::Package,
                     self.path.into_search_path(),
                     file,
@@ -1258,7 +1258,7 @@ impl ModuleResolutionCandidate {
                 tracing::trace!("Resolved module `{name}` to `{path}`", path = file.path(db));
                 Module::file_module(
                     db,
-                    name,
+                    Cow::Borrowed(name),
                     ModuleKind::Module,
                     self.path.into_search_path(),
                     file,

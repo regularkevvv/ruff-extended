@@ -56,11 +56,12 @@ use crate::types::signatures::{
     CallableSignature, Parameter, ParameterDisplayName, ParameterKind, Parameters, ParametersKind,
     PartialApplication, PartialSignatureApplication,
 };
-use crate::types::tuple::{TupleLength, TupleSpec, TupleType};
+use crate::types::tuple::{TupleLength, TupleSpec, TupleType, VariableSegment};
 use crate::types::typed_dict::{TypedDictOpenness, extract_unpacked_typed_dict_from_value_type};
 use crate::types::typevar::{BoundTypeVarIdentity, TypeVarNonceGenerator};
 use crate::types::visitor::{
-    TypeCollector, TypeKind, TypeVisitor, walk_non_atomic_type, walk_type_with_recursion_guard,
+    TypeCollector, TypeKind, TypeVisitor, any_over_type, walk_non_atomic_type,
+    walk_type_with_recursion_guard,
 };
 use crate::types::{
     BindingContext, BoundMethodType, BoundTypeVarInstance, CallableType, CallableTypes,
@@ -1806,7 +1807,8 @@ impl<'db> Bindings<'db> {
                         if bound_method.function(db).name(db) == "__iter__"
                             && is_enum_class(db, bound_method.self_instance(db)) =>
                     {
-                        if let Some(enum_instance) = bound_method.self_instance(db).to_instance(db)
+                        if let Some(enum_instance) =
+                            bound_method.self_instance(db).to_instance_approximation(db)
                         {
                             overload.set_return_type(
                                 KnownClass::Iterator.to_specialized_instance(db, &[enum_instance]),
@@ -4558,7 +4560,11 @@ impl<'a, 'db> ArgumentMatcher<'a, 'db> {
                 length: TupleLength,
                 variable_element: Option<Type<'db>>,
             },
-            Other(Cow<'db, TupleSpec<'db>>),
+            Other {
+                argument_types: Vec<Type<'db>>,
+                length: TupleLength,
+                variable_element: Option<Type<'db>>,
+            },
             None,
         }
 
@@ -4601,14 +4607,14 @@ impl<'a, 'db> ArgumentMatcher<'a, 'db> {
                         let any_variable = tuple_specs.iter().any(|s| s.len().is_variable());
                         let max_elements = tuple_specs
                             .iter()
-                            .map(|s| s.all_elements().len())
+                            .map(|s| s.iter_element_types(db).count())
                             .max()
                             .unwrap_or(0);
 
                         let variable_element = {
                             let var_types: Vec<_> = tuple_specs
                                 .iter()
-                                .filter_map(|s| s.variable_element().copied())
+                                .filter_map(|s| s.variable_element_type(db))
                                 .collect();
                             if var_types.is_empty() {
                                 None
@@ -4643,7 +4649,14 @@ impl<'a, 'db> ArgumentMatcher<'a, 'db> {
                             variable_element,
                         }
                     }
-                    _ => VariadicArgumentType::Other(argument_type.iterate(db)),
+                    _ => {
+                        let tuple = argument_type.iterate(db);
+                        VariadicArgumentType::Other {
+                            argument_types: tuple.iter_element_types(db).collect(),
+                            length: tuple.len(),
+                            variable_element: tuple.variable_element_type(db),
+                        }
+                    }
                 },
             },
             None => VariadicArgumentType::None,
@@ -4658,11 +4671,11 @@ impl<'a, 'db> ArgumentMatcher<'a, 'db> {
                 length,
                 variable_element,
             } => (argument_types.as_slice(), *length, *variable_element),
-            VariadicArgumentType::Other(tuple) => (
-                tuple.all_elements(),
-                tuple.len(),
-                tuple.variable_element().copied(),
-            ),
+            VariadicArgumentType::Other {
+                argument_types,
+                length,
+                variable_element,
+            } => (argument_types.as_slice(), *length, *variable_element),
             VariadicArgumentType::None => ([].as_slice(), TupleLength::unknown(), None),
         };
 
@@ -5332,11 +5345,29 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
         {
             for matched_parameter in self.argument_matches[argument_index].iter() {
                 let parameter_index = matched_parameter.index;
+                let parameter = &parameters[parameter_index];
+                let declared_type = parameter.annotated_type();
+                // TODO: Infer a `TypeVarTuple` from all matched positional arguments as a single
+                // tuple. Until then, skip per-argument inference.
+                if parameter.has_starred_annotation()
+                    && (matches!(
+                        declared_type,
+                        Type::TypeVar(typevar) if typevar.is_typevartuple(self.db)
+                    ) || matches!(
+                        declared_type.exact_tuple_instance_spec(self.db).as_deref(),
+                        Some(TupleSpec::Variable(variable))
+                            if matches!(
+                                variable.variable(),
+                                VariableSegment::TypeVarTuple(_)
+                            )
+                    ))
+                {
+                    continue;
+                }
                 if self.is_gradual_variadic_parameter(parameter_index) {
                     continue;
                 }
 
-                let declared_type = parameters[parameter_index].annotated_type();
                 let argument_type = argument_types.get_for_declared_type(declared_type);
                 let specialization_result = builder.infer(
                     declared_type,
@@ -5400,6 +5431,11 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
             && argument_type
                 .when_assignable_to(self.db, expected_ty, constraints, self.inferable_typevars)
                 .is_never_satisfied(self.db)
+            && !self.should_defer_typevartuple_callable_check(
+                parameter.annotated_type(),
+                expected_ty,
+                argument_type,
+            )
         {
             let positional = matches!(argument, Argument::Positional | Argument::Synthetic)
                 && !parameter.is_variadic();
@@ -5451,6 +5487,66 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
         matches!(parameters.kind(), ParametersKind::Gradual)
             && matches!(parameter.annotated_type(), Type::Dynamic(_))
             && (parameter.is_variadic() || parameter.is_keyword_variadic())
+    }
+
+    // TODO: Remove this workaround once call binding can infer a `TypeVarTuple` from `*args` and
+    // callable inference preserves correlations across overloads.
+    fn should_defer_typevartuple_callable_check(
+        &self,
+        declared_type: Type<'db>,
+        expected_type: Type<'db>,
+        argument_type: Type<'db>,
+    ) -> bool {
+        let Some(declared_callables) = declared_type.try_upcast_to_callable(self.db) else {
+            return false;
+        };
+        let parameters_contain_typevartuple = declared_callables.iter().any(|callable| {
+            callable.signatures(self.db).iter().any(|signature| {
+                signature.parameters().iter().any(|parameter| {
+                    any_over_type(self.db, parameter.annotated_type(), false, |ty| {
+                        matches!(
+                            ty,
+                            Type::TypeVar(typevar) if typevar.is_typevartuple(self.db)
+                        )
+                    })
+                })
+            })
+        });
+        if !parameters_contain_typevartuple {
+            return false;
+        }
+
+        let Some(argument_callables) = argument_type.try_upcast_to_callable(self.db) else {
+            return false;
+        };
+        if argument_callables
+            .iter()
+            .any(|callable| callable.signatures(self.db).overloads.len() > 1)
+        {
+            return true;
+        }
+
+        let argument_is_generic = argument_callables.iter().any(|callable| {
+            callable
+                .signatures(self.db)
+                .iter()
+                .any(|signature| signature.generic_context.is_some())
+        });
+        argument_is_generic
+            && expected_type
+                .try_upcast_to_callable(self.db)
+                .is_some_and(|callables| {
+                    callables.iter().any(|callable| {
+                        callable.signatures(self.db).iter().any(|signature| {
+                            signature
+                                .parameters()
+                                .variadic()
+                                .is_some_and(|(_, parameter)| {
+                                    parameter.annotated_type().is_dynamic()
+                                })
+                        })
+                    })
+                })
     }
 
     fn check_argument_types(&mut self, constraints: &ConstraintSetBuilder<'db>) {

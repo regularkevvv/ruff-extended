@@ -89,9 +89,14 @@ fn plugin_type_snapshot_from_type<'db>(db: &'db dyn Db, ty: Type<'db>) -> protoc
                     .iter()
                     .map(|element| plugin_type_snapshot_from_type(db, *element))
                     .collect(),
+                // A variable segment is either a homogeneous element type or an unpacked
+                // `TypeVarTuple`. The protocol cannot express a typevar, and reporting
+                // `variadic: None` would tell plugins this is a fixed-length tuple, so
+                // `element_type` is used to widen `tuple[*Ts]` to `object` while keeping
+                // the tuple variable-length.
                 Some(Box::new(plugin_type_snapshot_from_type(
                     db,
-                    tuple.variable(),
+                    tuple.variable().element_type(db),
                 ))),
                 tuple
                     .suffix_elements()
@@ -2475,7 +2480,7 @@ mod tests {
                 let tuple = row.tuple_instance_spec(&db).expect("tuple row");
                 assert_eq!(
                     tuple
-                        .iter_all_elements()
+                        .iter_element_types(&db)
                         .map(|element| element.display(&db).to_string())
                         .collect::<Vec<_>>(),
                     ["str", "int"]

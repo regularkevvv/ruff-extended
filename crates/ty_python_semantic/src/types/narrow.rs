@@ -7,9 +7,7 @@ use crate::subscript::PyIndex;
 use crate::types::function::KnownFunction;
 use crate::types::infer::{ExpressionInference, infer_same_file_expression_type};
 use crate::types::special_form::TypeQualifier;
-use crate::types::tuple::{
-    Tuple, TupleLength, TupleSpec, TupleSpecBuilder, TupleType, TupleUnpacker,
-};
+use crate::types::tuple::{TupleLength, TupleSpec, TupleSpecBuilder, TupleType, TupleUnpacker};
 use crate::types::typed_dict::{
     TypedDictField, TypedDictFieldBuilder, TypedDictSchema, TypedDictType,
 };
@@ -533,7 +531,7 @@ impl ClassInfoConstraintFunction {
                 UnionType::try_from_elements(
                     db,
                     tuple
-                        .iter_all_elements()
+                        .iter_element_types(db)
                         .map(|element| self.generate_constraint(db, element, is_positive)),
                 )
             }),
@@ -1117,8 +1115,37 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
                     constraints
                 }
             }
-            ast::Expr::Attribute(_) | ast::Expr::Subscript(_) => {
-                self.evaluate_simple_expr(expression_node, is_positive)
+            ast::Expr::Attribute(attribute) => {
+                let constraints = self.evaluate_simple_expr(expression_node, is_positive);
+                let inference = infer_expression_types(self.db, expression, TypeContext::default());
+                let nominal_constraints = self
+                    .narrow_nominal_attribute_by_truthiness(
+                        inference.expression_type(&*attribute.value),
+                        &attribute.value,
+                        attribute.attr.id(),
+                        is_positive,
+                    )
+                    .map(|(place, constraint)| {
+                        NarrowingConstraints::from_iter([(place, constraint)])
+                    });
+
+                Self::merge_optional_constraints_and(constraints, nominal_constraints)
+            }
+            ast::Expr::Subscript(subscript) => {
+                let constraints = self.evaluate_simple_expr(expression_node, is_positive);
+                let inference = infer_expression_types(self.db, expression, TypeContext::default());
+                let typeddict_constraints = self
+                    .narrow_typeddict_subscript_by_truthiness(
+                        inference.expression_type(&*subscript.value),
+                        &subscript.value,
+                        inference.expression_type(&*subscript.slice),
+                        is_positive,
+                    )
+                    .map(|(place, constraint)| {
+                        NarrowingConstraints::from_iter([(place, constraint)])
+                    });
+
+                Self::merge_optional_constraints_and(constraints, typeddict_constraints)
             }
             ast::Expr::Compare(expr_compare) => {
                 self.evaluate_expr_compare(expr_compare, expression, is_positive)
@@ -1131,7 +1158,9 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
             }
             ast::Expr::BoolOp(bool_op) => self.evaluate_bool_op(bool_op, expression, is_positive),
             ast::Expr::If(expr_if) => self.evaluate_expr_if(expr_if, expression, is_positive),
-            ast::Expr::Named(expr_named) => self.evaluate_expr_named(expr_named, is_positive),
+            ast::Expr::Named(expr_named) => {
+                self.evaluate_expr_named(expr_named, expression, is_positive)
+            }
             _ => None,
         }
     }
@@ -2429,11 +2458,13 @@ impl<'db> PatternSuccessAnalyzer<'db> {
 
         let tuple = subject_ty.try_iterate(self.db).unwrap_or_else(|error| {
             let fallback_element_ty = error.fallback_element_type(self.db);
-            Cow::Owned(Tuple::homogeneous(if fallback_element_ty.is_unknown() {
-                Type::object()
-            } else {
-                fallback_element_ty
-            }))
+            Cow::Owned(TupleSpec::homogeneous(
+                if fallback_element_ty.is_unknown() {
+                    Type::object()
+                } else {
+                    fallback_element_ty
+                },
+            ))
         });
         let mut unpacker = TupleUnpacker::new(self.db, target_len);
         unpacker.unpack_tuple(tuple.as_ref()).ok()?;
@@ -2880,10 +2911,28 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
     fn evaluate_expr_named(
         &mut self,
         expr_named: &ast::ExprNamed,
+        expression: Expression<'db>,
         is_positive: bool,
     ) -> Option<NarrowingConstraints<'db>> {
         let target_constraints = self.evaluate_simple_expr(&expr_named.target, is_positive);
-        let value_constraints = self.evaluate_simple_expr(&expr_named.value, is_positive);
+        let mut value_constraints =
+            self.evaluate_expression_node_predicate(&expr_named.value, expression, is_positive);
+
+        if let Some(value_constraints) = value_constraints.as_mut()
+            && let Some(target) = PlaceExpr::try_from_expr(&expr_named.target)
+            && let Some(target_place) = self.places().place_id(&target)
+        {
+            let places = self.places();
+            // The target is rebound after the value is evaluated, invalidating constraints on the
+            // target and any member places rooted at it.
+            value_constraints.retain(|place, _| {
+                *place != target_place
+                    && !places
+                        .parents(places.place(*place))
+                        .any(|parent| parent == target_place)
+            });
+        }
+
         match (target_constraints, value_constraints) {
             (Some(mut target), Some(value)) => {
                 merge_constraints_and(&mut target, value);
@@ -3026,6 +3075,33 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
         }
 
         constrained.then(|| builder.build())
+    }
+
+    /// Preserve the precise element types of an immediately consumed list or set literal.
+    ///
+    /// These expressions cannot be mutated before membership is evaluated. Representing them as
+    /// fixed-length tuples also lets negative narrowing exclude values that are guaranteed present.
+    fn inline_membership_rhs_type(
+        &self,
+        rhs: &ast::Expr,
+        inference: &ExpressionInference<'db>,
+    ) -> Option<Type<'db>> {
+        let elements = match rhs.expression_value() {
+            ast::Expr::List(list) => &list.elts,
+            ast::Expr::Set(set) => &set.elts,
+            _ => return None,
+        };
+
+        if elements.iter().any(ast::Expr::is_starred_expr) {
+            return None;
+        }
+
+        Some(Type::heterogeneous_tuple(
+            self.db,
+            elements
+                .iter()
+                .map(|element| inference.expression_type(element)),
+        ))
     }
 
     fn evaluate_expr_compare_op(
@@ -3449,6 +3525,12 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
         for (op, (left, right)) in std::iter::zip(&**ops, comparator_tuples) {
             let lhs_ty = last_rhs_ty.unwrap_or_else(|| inference.expression_type(left));
             let rhs_ty = inference.expression_type(right);
+            let lhs_narrowing_rhs_ty = if matches!(op, ast::CmpOp::In | ast::CmpOp::NotIn) {
+                self.inline_membership_rhs_type(right, inference)
+                    .unwrap_or(rhs_ty)
+            } else {
+                rhs_ty
+            };
 
             // Narrowing for:
             // - `if type(x) is Y`
@@ -3511,7 +3593,8 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
             // - `if x not in y`
             if narrowable_ast(left)
                 && let Some(narrowable) = PlaceExpr::try_from_expr(left)
-                && let Some(ty) = self.evaluate_expr_compare_op(lhs_ty, rhs_ty, *op, is_positive)
+                && let Some(ty) =
+                    self.evaluate_expr_compare_op(lhs_ty, lhs_narrowing_rhs_ty, *op, is_positive)
             {
                 let place = self.expect_place(&narrowable);
                 let constraint = NarrowingConstraint::intersection(ty);
@@ -4078,6 +4161,36 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
         Some((place, NarrowingConstraint::intersection(intersection)))
     }
 
+    /// Narrow tagged unions of `TypedDict`s based on the truthiness of a `Literal` key.
+    fn narrow_typeddict_subscript_by_truthiness(
+        &self,
+        subscript_value_type: Type<'db>,
+        subscript_value_expr: &ast::Expr,
+        subscript_key_type: Type<'db>,
+        is_positive: bool,
+    ) -> Option<(ScopedPlaceId, NarrowingConstraint<'db>)> {
+        if !is_or_contains_typeddict(self.db, subscript_value_type) {
+            return None;
+        }
+        let subscript_place_expr = PlaceExpr::try_from_expr(subscript_value_expr)?;
+        let key_literal = subscript_key_type.as_string_literal()?;
+
+        let excluded_field_type = if is_positive {
+            Type::AlwaysFalsy
+        } else {
+            Type::AlwaysTruthy
+        };
+        let field = TypedDictFieldBuilder::new(excluded_field_type)
+            .required(false)
+            .read_only(true)
+            .build();
+        let schema = TypedDictSchema::from_iter([(Name::from(key_literal.value(self.db)), field)]);
+        let synthesized_typeddict = TypedDictType::from_schema_items(self.db, schema);
+        let intersection = Type::TypedDict(synthesized_typeddict).negate(self.db);
+        let place = self.expect_place(&subscript_place_expr);
+        Some((place, NarrowingConstraint::intersection(intersection)))
+    }
+
     // TODO: Restructure this helper to return the key-presence constraint and apply it with
     // `NarrowingConstraint::intersection` at the call site instead of constructing a replacement
     // type here.
@@ -4199,6 +4312,37 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
                         || !attribute_type.is_disjoint_from(self.db, rhs_type)
                 } else {
                     !attribute_type.is_subtype_of(self.db, rhs_type)
+                }
+            })
+        });
+
+        if narrowed == Type::Union(union) {
+            return None;
+        }
+
+        let attribute_value_place_expr = PlaceExpr::try_from_expr(attribute_value_expr)?;
+        let place = self.expect_place(&attribute_value_place_expr);
+        Some((place, NarrowingConstraint::replacement(narrowed)))
+    }
+
+    fn narrow_nominal_attribute_by_truthiness(
+        &self,
+        attribute_value_type: Type<'db>,
+        attribute_value_expr: &ast::Expr,
+        attribute_name: &str,
+        is_positive: bool,
+    ) -> Option<(ScopedPlaceId, NarrowingConstraint<'db>)> {
+        let Type::Union(union) = attribute_value_type.resolve_type_alias(self.db) else {
+            return None;
+        };
+
+        let narrowed = union.filter(self.db, |element| {
+            nominal_attribute_type(self.db, *element, attribute_name).is_none_or(|attribute_type| {
+                let truthiness = attribute_type.bool(self.db);
+                if is_positive {
+                    !truthiness.is_always_false()
+                } else {
+                    !truthiness.is_always_true()
                 }
             })
         });

@@ -4,7 +4,6 @@
 //! constraints and definite truthiness while remaining conservative around custom comparison
 //! methods.
 
-use ruff_python_ast::name::Name;
 use rustc_hash::FxHashSet;
 
 use crate::{Db, place::PlaceAndQualifiers};
@@ -790,9 +789,7 @@ fn enum_literal_constraint<'db>(
     }
 
     let enum_class_literal = right.enum_class_literal(db);
-    let name = enum_class_literal
-        .resolve_member(db, right.name(db))?
-        .clone();
+    let name = enum_class_literal.resolve_member(db, right.name(db))?;
     let equal_to_right = Type::from(LiteralValueType::new(
         EnumLiteralType::new(db, enum_class_literal, name),
         right_literal.is_promotable(),
@@ -1515,11 +1512,7 @@ fn lookup_dunder<'db>(
     ty: Type<'db>,
     name: &'static str,
 ) -> PlaceAndQualifiers<'db> {
-    ty.member_lookup_with_policy(
-        db,
-        Name::new_static(name),
-        MemberLookupPolicy::MRO_NO_OBJECT_FALLBACK,
-    )
+    ty.member_lookup_with_policy(db, name, MemberLookupPolicy::MRO_NO_OBJECT_FALLBACK)
 }
 
 /// Return the comparison result for two literals when their runtime values determine it.
