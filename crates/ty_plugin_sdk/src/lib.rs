@@ -84,7 +84,7 @@ pub trait Plugin {
     /// variant dispatches to its hook method.
     fn handle(&self, request: &PluginRequest) -> PluginResponse {
         match request {
-            PluginRequest::Manifest => PluginResponse::Manifest(self.manifest()),
+            PluginRequest::Manifest => PluginResponse::Manifest(Box::new(self.manifest())),
             PluginRequest::BuildProjectIndex(request) => self.build_project_index(request),
             PluginRequest::AnalyzeClass(request) => self.analyze_class(request),
             PluginRequest::ResolveClassMember(request) => self.resolve_class_member(request),

@@ -38,7 +38,7 @@ edition = "2024"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
-ty_plugin_sdk = "0.0.3"
+ty_plugin_sdk = "0.0.4"
 ```
 
 Implement `Plugin`, claim the matching hook in the manifest, and export it:

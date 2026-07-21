@@ -22,7 +22,7 @@ wire messages, or building protocol tooling.
 
 ```toml
 [dependencies]
-ty_plugin_protocol = "0.0.3"
+ty_plugin_protocol = "0.0.4"
 ```
 
 ## Protocol Model

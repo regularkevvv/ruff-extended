@@ -399,9 +399,9 @@ pub enum PluginRequest {
     AdjustCallSignature(CallRequest),
     AdjustCallReturn(CallRequest),
     AdditionalDependencies(DependencyRequest),
-    /// Boxed because `MutationRequest` is substantially larger than every other
-    /// variant; inlining it would grow `PluginRequest` for all request kinds.
-    /// `Box` is transparent to serde, so the wire format is unaffected.
+    /// Boxed because `MutationRequest` is far larger than the rest, so inlining it
+    /// would grow every request. `Box` is transparent to serde, so the wire format is
+    /// unaffected.
     ValidateMutation(Box<MutationRequest>),
 }
 
@@ -778,13 +778,11 @@ pub struct SettingValueSummary {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
-#[allow(
-    clippy::large_enum_variant,
-    reason = "Protocol responses mirror the serialized wire shape. Not `expect`, because \
-              the variant sizes only diverge enough to trip the lint on 64-bit targets."
-)]
 pub enum PluginResponse {
-    Manifest(PluginManifest),
+    /// Boxed for the same reason as [`PluginRequest::ValidateMutation`]: this variant is
+    /// far larger than the rest, so inlining it would grow every response. `Box` is
+    /// transparent to serde, so the wire format is unaffected.
+    Manifest(Box<PluginManifest>),
     ProjectIndex(ProjectIndexResponse),
     ClassPatch(ClassPatch),
     MemberPatch(MemberPatch),
