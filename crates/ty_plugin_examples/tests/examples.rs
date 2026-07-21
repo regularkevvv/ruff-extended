@@ -52,6 +52,7 @@ fn analyze_request(fields: Vec<FieldSummary>) -> AnalyzeClassRequest {
             decorators: Vec::new(),
             metaclass: None,
             fields,
+            methods: Vec::new(),
             nested_classes: Vec::new(),
             class_constants: Vec::new(),
             source: SymbolSource::default(),
@@ -69,6 +70,7 @@ fn minidjango_analyze_request(fields: Vec<FieldSummary>) -> AnalyzeClassRequest 
             decorators: Vec::new(),
             metaclass: None,
             fields,
+            methods: Vec::new(),
             nested_classes: Vec::new(),
             class_constants: Vec::new(),
             source: SymbolSource::default(),
@@ -85,6 +87,7 @@ fn call_field(name: &str, callee: &str, arguments: Vec<ArgumentSummary>) -> Fiel
             callee: SymbolRef {
                 qualified_name: callee.to_string(),
             },
+            receiver: None,
             arguments,
             return_type: None,
         })),
@@ -472,6 +475,7 @@ fn minidjango_project_index_contributes_reverse_relation_members() {
         decorators: Vec::new(),
         metaclass: None,
         fields: Vec::new(),
+        methods: Vec::new(),
         nested_classes: Vec::new(),
         class_constants: Vec::new(),
         source: SymbolSource::default(),
@@ -491,6 +495,7 @@ fn minidjango_project_index_contributes_reverse_relation_members() {
         },
         classes: vec![author, book],
         settings: Vec::new(),
+        assignments: Vec::new(),
         previous_index_fingerprint: None,
     };
 
@@ -565,6 +570,7 @@ fn minidjango_project_index_reports_relation_target_and_reverse_conflicts() {
         decorators: Vec::new(),
         metaclass: None,
         fields: Vec::new(),
+        methods: Vec::new(),
         nested_classes: Vec::new(),
         class_constants: Vec::new(),
         source: SymbolSource::default(),
@@ -596,6 +602,7 @@ fn minidjango_project_index_reports_relation_target_and_reverse_conflicts() {
         },
         classes: vec![author, book],
         settings: Vec::new(),
+        assignments: Vec::new(),
         previous_index_fingerprint: None,
     };
 
@@ -629,6 +636,7 @@ fn minidjango_resolves_auth_user_model_from_settings_data() {
         decorators: Vec::new(),
         metaclass: None,
         fields: Vec::new(),
+        methods: Vec::new(),
         nested_classes: Vec::new(),
         class_constants: Vec::new(),
         source: SymbolSource::default(),
@@ -654,6 +662,7 @@ fn minidjango_resolves_auth_user_model_from_settings_data() {
             "AUTH_USER_MODEL",
             "accounts.User",
         )],
+        assignments: Vec::new(),
         previous_index_fingerprint: None,
     };
 
@@ -744,6 +753,7 @@ fn minidjango_resolves_string_and_self_foreign_key_targets() {
         decorators: Vec::new(),
         metaclass: None,
         fields: Vec::new(),
+        methods: Vec::new(),
         nested_classes: Vec::new(),
         class_constants: Vec::new(),
         source: SymbolSource::default(),
@@ -757,6 +767,7 @@ fn minidjango_resolves_string_and_self_foreign_key_targets() {
         },
         classes: vec![author, book_request.class],
         settings: Vec::new(),
+        assignments: Vec::new(),
         previous_index_fingerprint: None,
     };
 
@@ -833,6 +844,7 @@ fn minidjango_handles_defensive_request_shapes() {
         decorators: Vec::new(),
         metaclass: None,
         fields: Vec::new(),
+        methods: Vec::new(),
         nested_classes: Vec::new(),
         class_constants: Vec::new(),
         source: SymbolSource::default(),
@@ -843,6 +855,7 @@ fn minidjango_handles_defensive_request_shapes() {
         decorators: Vec::new(),
         metaclass: None,
         fields: Vec::new(),
+        methods: Vec::new(),
         nested_classes: Vec::new(),
         class_constants: Vec::new(),
         source: SymbolSource::default(),
@@ -857,6 +870,7 @@ fn minidjango_handles_defensive_request_shapes() {
             "minidjango.ForeignKey",
             vec![class_arg("app.Author")],
         )],
+        methods: Vec::new(),
         nested_classes: Vec::new(),
         class_constants: Vec::new(),
         source: SymbolSource::default(),
@@ -928,6 +942,7 @@ fn minidjango_handles_defensive_request_shapes() {
         },
         classes: vec![unrelated_class, author, user, book],
         settings: vec![mixed_settings_module()],
+        assignments: Vec::new(),
         previous_index_fingerprint: None,
     };
     let PluginResponse::ProjectIndex(index) = plugin.build_project_index(&request) else {

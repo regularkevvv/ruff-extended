@@ -83,6 +83,7 @@ fn call_field(name: &str, callee: &str, arguments: Vec<ArgumentSummary>) -> Fiel
             callee: SymbolRef {
                 qualified_name: callee.to_string(),
             },
+            receiver: None,
             arguments,
             return_type: None,
         })),
@@ -99,6 +100,7 @@ fn model_class(qualified_name: &str, fields: Vec<FieldSummary>) -> ClassSummary 
         decorators: Vec::new(),
         metaclass: None,
         fields,
+        methods: Vec::new(),
         nested_classes: Vec::new(),
         class_constants: Vec::new(),
         source: SymbolSource::default(),
@@ -151,6 +153,7 @@ fn minidjango_project_index_request() -> PluginRequest {
             ),
         ],
         settings: Vec::new(),
+        assignments: Vec::new(),
         previous_index_fingerprint: None,
     })
 }
