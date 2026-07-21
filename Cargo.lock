@@ -3925,6 +3925,7 @@ dependencies = [
  "bstr",
  "compact_str",
  "datatest-stable",
+ "drop_bomb",
  "get-size2",
  "insta",
  "itertools 0.15.0",

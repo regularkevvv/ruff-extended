@@ -21,7 +21,7 @@ use crate::types::protocol_class::{
     ProtocolClass, has_all_protocol_members_defined, walk_protocol_interface,
 };
 use crate::types::relation::{
-    DisjointnessChecker, HasRelationToVisitor, IsDisjointVisitor, TypeRelationChecker,
+    DisjointnessChecker, HasRelationToVisitor, IsDisjointVisitor, TypeRelation, TypeRelationChecker,
 };
 use crate::types::signatures::SignatureRelationVisitor;
 use crate::types::tuple::{TupleSpec, TupleType, walk_tuple_type};
@@ -527,6 +527,23 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
             {
                 return result;
             }
+
+            // For union simplification, failing the nominal relation between two
+            // specializations of the same protocol class is enough to keep both union elements.
+            // Falling back to the structural relation can recursively compare every protocol
+            // member even though a failed redundancy check only means that we preserve a
+            // potentially redundant union arm.
+            if matches!(self.relation, TypeRelation::Redundancy { pure: false })
+                && ty
+                    .as_protocol_instance()
+                    .and_then(ProtocolInstanceType::to_nominal_instance)
+                    .is_some_and(|source_instance| {
+                        source_instance.class(db).class_literal(db)
+                            == nominal_instance.class(db).class_literal(db)
+                    })
+            {
+                return nominally_satisfied;
+            }
         }
 
         // `Generator` special case: compare the type parameters nominally. Prior to 3.13, its
@@ -819,6 +836,14 @@ impl<'db> ProtocolInstanceType<'db> {
         Self {
             inner: Protocol::Synthesized(synthesized),
             _phantom: PhantomData,
+        }
+    }
+
+    /// Return the class backing a class-based protocol instance.
+    pub(super) fn as_class_based(self) -> Option<ProtocolClass<'db>> {
+        match self.inner {
+            Protocol::FromClass(class) => Some(class),
+            Protocol::Synthesized(_) => None,
         }
     }
 
