@@ -537,7 +537,11 @@ jobs:
           # `ty_plugin_host/test-wasm-fixture`, whose build script compiles the
           # plugin fixture for `wasm32-unknown-unknown`. Keep this on any job that
           # passes `--all-features`, or its build fails with `can't find crate for std`.
-          rustup target add wasm32-unknown-unknown
+          #
+          # `--toolchain` is required here: `rust-toolchain.toml` overrides
+          # `rustup default`, so a bare `target add` would install the target for the
+          # pinned toolchain rather than for the MSRV one this job builds with.
+          rustup target add wasm32-unknown-unknown --toolchain "${MSRV}"
       - name: "Install mold"
         uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
       - name: "Build tests"
