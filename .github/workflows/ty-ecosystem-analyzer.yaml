@@ -51,7 +51,10 @@ jobs:
       matrix:
         revision: [base, pr]
     runs-on: ${{ github.repository == 'astral-sh/ruff' && 'depot-ubuntu-22.04-32' || 'ubuntu-latest' }}
-    timeout-minutes: 5
+    # Upstream's 5 minutes assumes a 32-core Depot runner. The fork falls back to `ubuntu-latest`,
+    # where this build only fits in 5 minutes with a warm cache, so any sync that invalidates it
+    # times out.
+    timeout-minutes: ${{ github.repository == 'astral-sh/ruff' && 5 || 20 }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
