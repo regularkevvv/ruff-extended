@@ -3804,6 +3804,18 @@ mod plugin_tests {
     const CONFIG_PATH: &str = "/project/ty.toml";
     const ARTIFACT_PATH: &str = "/project/.ty/plugins/pydantic.mock";
     const MANIFEST_PATH: &str = "/project/.ty/plugins/pydantic.plugin.json";
+    // A virtualenv's `site-packages` sits at `<prefix>/Lib/site-packages` on Windows and
+    // `<prefix>/lib/pythonX.Y/site-packages` everywhere else. These fixtures have to match the
+    // layout `ty_site_packages` actually probes for, or discovery finds nothing on Windows.
+    #[cfg(windows)]
+    const SITE_PACKAGES: &str = "/project/.venv/Lib/site-packages";
+    #[cfg(not(windows))]
+    const SITE_PACKAGES: &str = "/project/.venv/lib/python3.13/site-packages";
+
+    #[cfg(windows)]
+    const AUTO_PLUGIN_MANIFEST_PATH: &str =
+        "/project/.venv/Lib/site-packages/django_ty/ty-plugin.json";
+    #[cfg(not(windows))]
     const AUTO_PLUGIN_MANIFEST_PATH: &str =
         "/project/.venv/lib/python3.13/site-packages/django_ty/ty-plugin.json";
     #[cfg(feature = "plugins-wasm")]
@@ -3969,7 +3981,7 @@ mod plugin_tests {
                     &installed_plugin_manifest_with_stub_json(),
                 ),
                 (
-                    "/project/.venv/lib/python3.13/site-packages/django_ty/stubs/django/__init__.pyi",
+                    &format!("{SITE_PACKAGES}/django_ty/stubs/django/__init__.pyi"),
                     "",
                 ),
             ],
@@ -3981,9 +3993,9 @@ mod plugin_tests {
                 .settings(&db)
                 .plugins()
                 .active_stub_overlay_paths(),
-            &[SystemPathBuf::from(
-                "/project/.venv/lib/python3.13/site-packages/django_ty/stubs"
-            )]
+            &[SystemPathBuf::from(format!(
+                "{SITE_PACKAGES}/django_ty/stubs"
+            ))]
         );
     }
 
