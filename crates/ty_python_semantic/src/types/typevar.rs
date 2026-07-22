@@ -282,7 +282,7 @@ impl<'db> TypeVarInstance<'db> {
         db: &'db dyn Db,
         visitor: &TypeVarDefaultVisitor<'db>,
     ) -> Option<Type<'db>> {
-        visitor.visit(self, || {
+        visitor.visit(db, self, || {
             self._default(db).and_then(|default| match default {
                 TypeVarDefaultEvaluation::Eager(ty) => Some(ty),
                 TypeVarDefaultEvaluation::Lazy => self.lazy_default_impl(db, visitor),
@@ -365,7 +365,7 @@ impl<'db> TypeVarInstance<'db> {
         ty: Type<'db>,
         visitor: &TypeVarDefaultVisitor<'db>,
     ) -> bool {
-        type SeenTypeAliases<'db> = SmallVec<[TypeAliasType<'db>; 1]>;
+        type SeenTypeAliases<'db> = SmallVec<[Definition<'db>; 1]>;
 
         #[derive(Copy, Clone)]
         struct State<'db, 'a> {
@@ -402,10 +402,13 @@ impl<'db> TypeVarInstance<'db> {
         ) -> bool {
             {
                 let mut seen_type_aliases = state.seen_type_aliases.borrow_mut();
-                if seen_type_aliases.contains(&type_alias) {
+                let definition = type_alias.definition(state.db);
+                // A recursive alias can produce a new specialization every time its body is
+                // expanded, so use its definition as the stable recursion key.
+                if seen_type_aliases.contains(&definition) {
                     return false;
                 }
-                seen_type_aliases.push(type_alias);
+                seen_type_aliases.push(definition);
             }
 
             let value_type = if let Some(specialization) = type_alias.specialization(state.db) {
@@ -1812,5 +1815,13 @@ impl<'db> TypeVarBoundOrConstraints<'db> {
 
 /// A [`CycleDetector`] that is used in `TypeVarInstance::default_type`.
 pub(crate) type TypeVarDefaultVisitor<'db> =
-    CycleDetector<VisitTypeVarDefault, TypeVarInstance<'db>, Option<Type<'db>>, 6>;
+    CycleDetector<'db, VisitTypeVarDefault, TypeVarInstance<'db>, Option<Type<'db>>, 6>;
 pub(crate) struct VisitTypeVarDefault;
+
+impl<'db> super::cyclic::HasIdentity<'db> for TypeVarInstance<'db> {
+    type Id = Self;
+
+    fn to_identity(&self, _db: &'db dyn Db) -> Self::Id {
+        *self
+    }
+}
