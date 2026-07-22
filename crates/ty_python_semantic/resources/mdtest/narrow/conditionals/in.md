@@ -44,6 +44,22 @@ def from_dict(value: str, valid_values: dict[MyType, int]) -> int | None:
     return None
 ```
 
+Explicitly annotated literals remain unpromotable through membership narrowing and inferred instance
+attributes:
+
+```py
+from typing import Literal
+
+class Backend:
+    def connect(self, mode: Literal["streaming", "batch"]) -> None:
+        if mode not in ("batch", "streaming"):
+            return
+        self._mode = mode
+
+    def mode(self) -> Literal["streaming", "batch"]:
+        return self._mode
+```
+
 ```py
 from typing import Literal
 
@@ -331,6 +347,21 @@ def union_literal_haystack(x: Literal["a", "ab", "z"], flag: bool):
     else:
         reveal_type(x)  # revealed: Literal["a", "ab", "z"]
 
+def literal_union_haystack(x: Literal["abc", "def"]):
+    if "a" in x:
+        # `x` could also be validly narrowed to `Literal["abc"]` here:
+        reveal_type(x)  # revealed: Literal["abc", "def"]
+    else:
+        # `x` could also be validly narrowed to `Literal["def"]` here:
+        reveal_type(x)  # revealed: Literal["abc", "def"]
+
+    if "a" not in x:
+        # `x` could also be validly narrowed to `Literal["def"]` here:
+        reveal_type(x)  # revealed: Literal["abc", "def"]
+    else:
+        # `x` could also be validly narrowed to `Literal["abc"]` here:
+        reveal_type(x)  # revealed: Literal["abc", "def"]
+
 def mixed_literal_union_haystack(
     x: Literal["a", "z", "missing"],
     values: Literal["abc"] | tuple[Literal["z"]],
@@ -441,14 +472,14 @@ def test(x: Literal["a", "b", "c"] | None | int = None):
 
 def broad_element_type(x: str | None, values: dict[str, int]):
     if x in values:
-        reveal_type(x)  # revealed: str
+        reveal_type(x)  # revealed: str | None
     else:
         reveal_type(x)  # revealed: str | None
 
 def broad_element_type_with_unknown(values: dict[str, int]):
     x = [None][0]
     if x in values:
-        reveal_type(x)  # revealed: Unknown
+        reveal_type(x)  # revealed: None | Unknown
     else:
         reveal_type(x)  # revealed: None | Unknown
 ```
@@ -517,7 +548,7 @@ def broad_dict_element(x: str | None, values: dict[str, int]) -> None:
     if x not in values:
         reveal_type(x)  # revealed: str | None
     else:
-        reveal_type(x)  # revealed: str
+        reveal_type(x)  # revealed: str | None
 
 def union_tuple_slot(x: Literal[1, 2], values: tuple[Literal[1, 2]]) -> None:
     if x not in values:
@@ -576,6 +607,25 @@ compare equal to any item in the container. A `TypedDict` cannot compare equal t
 final class with the default identity-based equality cannot compare equal to an integer. We retain
 types such as `int` and classes with custom equality when they might still match an item.
 
+A non-final element type can have a subclass that compares equal to `None`, so membership must
+preserve `None` just as an equality check does:
+
+```py
+class Foo: ...
+
+def equality_and_membership(x: Foo | None, y: Foo, values: list[Foo]):
+    if x == y:
+        reveal_type(x)  # revealed: Foo | None
+    if x in values:
+        reveal_type(x)  # revealed: Foo | None
+
+class C: ...
+
+def broad_union_membership(origin: C | int):
+    if origin in ("x",):
+        reveal_type(origin)  # revealed: C & ~int
+```
+
 ```py
 from typing import Literal, TypedDict, final
 
@@ -600,7 +650,7 @@ def default_equality(x: Token | Literal[1]):
 
 def overlapping_union_member(x: int | Literal["missing"]):
     if x in ("missing", 1):
-        reveal_type(x)  # revealed: Literal["missing", 1, True]
+        reveal_type(x)  # revealed: Literal[1, True, "missing"]
 
 def custom_equality(x: AlwaysEqual | Literal[1]):
     if x in (1,):
@@ -1061,46 +1111,43 @@ def custom_containment_component_prevents_narrowing(
 
 ## Range membership
 
-A `range` contains integers, so a string literal can be removed from the type of the tested value:
+A `range` contains integers, but equality against a broad `int` element type cannot rule out a
+string literal:
 
 ```py
 from typing import Literal
 
 def range_membership(value: Literal["x", 1], values: range) -> None:
     if value in values:
-        reveal_type(value)  # revealed: Literal[1]
+        reveal_type(value)  # revealed: Literal["x", 1]
 ```
 
 ## `TypedDict` key membership
 
-Membership in a `TypedDict` checks its string keys, so the tested value can be narrowed to a
-possible key. We do not apply key-based narrowing to arbitrary values, because `in` may test
-substrings or elements instead:
+Membership in a closed `TypedDict` checks its finite set of literal string keys, so the tested value
+can be narrowed to a possible key. An open `TypedDict` can contain arbitrary additional string keys:
 
 ```py
-from typing import Literal, TypedDict
+from typing import Literal
+from typing_extensions import TypedDict
 
-class Values(TypedDict):
+class ClosedValues(TypedDict, closed=True):
     present: int
+    other: str
 
-def typed_dict_container(value: Literal["present", 1], values: Values) -> None:
+class OpenValues(TypedDict):
+    present: int
+    other: str
+
+def closed_typed_dict_container(value: Literal["present", "other", "missing", 1], values: ClosedValues) -> None:
     if value in values:
-        reveal_type(value)  # revealed: Literal["present"]
+        reveal_type(value)  # revealed: Literal["present", "other"]
 
-def f(x: Literal["abc", "def"]):
-    if "a" in x:
-        # `x` could also be validly narrowed to `Literal["abc"]` here:
-        reveal_type(x)  # revealed: Literal["abc", "def"]
-    else:
-        # `x` could also be validly narrowed to `Literal["def"]` here:
-        reveal_type(x)  # revealed: Literal["abc", "def"]
-
-    if "a" not in x:
-        # `x` could also be validly narrowed to `Literal["def"]` here:
-        reveal_type(x)  # revealed: Literal["abc", "def"]
-    else:
-        # `x` could also be validly narrowed to `Literal["abc"]` here:
-        reveal_type(x)  # revealed: Literal["abc", "def"]
+def open_typed_dict_container(value: Literal["present", "other", "missing", 1], values: OpenValues) -> None:
+    if value in values:
+        # TODO: It would be safe to narrow `1` away if we could distinguish exact `str` from a
+        # subclass of `str` with custom equality.
+        reveal_type(value)  # revealed: Literal["present", "other", "missing", 1]
 ```
 
 ## bool

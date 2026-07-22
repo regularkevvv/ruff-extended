@@ -624,9 +624,10 @@ pub(crate) fn definite_match_pattern_type_for_subject<'db>(
                 }
                 Type::SpecialForm(SpecialFormType::CollectionsAbcCallable)
                     if kind.is_empty()
-                        && subject_ty.is_subtype_of(db, callable_pattern_type(db)) =>
+                        && let callable_pattern_ty = callable_pattern_type(db)
+                        && subject_ty.is_subtype_of(db, callable_pattern_ty) =>
                 {
-                    return callable_pattern_type(db);
+                    return callable_pattern_ty;
                 }
                 _ => {}
             }
@@ -1046,10 +1047,9 @@ pub(crate) fn definite_match_pattern_type<'db>(
         PatternPredicateKind::Singleton(singleton) => singleton_pattern_type(db, *singleton),
         PatternPredicateKind::Value(value) => {
             let ty = infer_same_file_expression_type(db, *value, TypeContext::default());
-            // Only return the type if it's single-valued and guaranteed to match itself.
+            // Only return the type if it's guaranteed to match itself.
             // Otherwise, we can't definitively exclude it from subsequent patterns.
-            if ty.is_single_valued(db) && equality_truthiness(db, ty, ty) == Truthiness::AlwaysTrue
-            {
+            if equality_truthiness(db, ty, ty) == Truthiness::AlwaysTrue {
                 ty
             } else {
                 Type::Never
