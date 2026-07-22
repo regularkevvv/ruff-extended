@@ -322,7 +322,10 @@ jobs:
     runs-on: ${{ github.repository == 'astral-sh/ruff' && 'depot-ubuntu-22.04-16' || 'ubuntu-latest' }}
     needs: determine_changes
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-test') && (needs.determine_changes.outputs.code == 'true' || github.ref == 'refs/heads/main') }}
-    timeout-minutes: 20
+    # Fork addition: upstream runs this on a 16-core Depot runner; the fork falls
+    # through to `ubuntu-latest`, and also builds the extra plugin crates and the
+    # wasm fixture. 20 minutes is not enough there, and the job is killed mid-run.
+    timeout-minutes: ${{ github.repository == 'astral-sh/ruff' && 20 || 60 }}
     env:
       # Line-tables-only debug info: faster builds, backtraces still work.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
@@ -440,7 +443,10 @@ jobs:
     runs-on: ${{ matrix.platform }}
     needs: determine_changes
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-test') && (needs.determine_changes.outputs.code == 'true' || github.ref == 'refs/heads/main') }}
-    timeout-minutes: 20
+    # Fork addition: upstream runs this on a 16-core Depot runner; the fork falls
+    # through to `ubuntu-latest`, and also builds the extra plugin crates and the
+    # wasm fixture. 20 minutes is not enough there, and the job is killed mid-run.
+    timeout-minutes: ${{ github.repository == 'astral-sh/ruff' && 20 || 60 }}
     env:
       # Line-tables-only debug info: faster builds, backtraces still work.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
