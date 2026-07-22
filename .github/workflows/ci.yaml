@@ -322,7 +322,10 @@ jobs:
     runs-on: ${{ github.repository == 'astral-sh/ruff' && 'depot-ubuntu-22.04-16' || 'ubuntu-latest' }}
     needs: determine_changes
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-test') && (needs.determine_changes.outputs.code == 'true' || github.ref == 'refs/heads/main') }}
-    timeout-minutes: 20
+    # Fork addition: upstream runs this on a 16-core Depot runner; the fork falls
+    # through to `ubuntu-latest`, and also builds the extra plugin crates and the
+    # wasm fixture. 20 minutes is not enough there, and the job is killed mid-run.
+    timeout-minutes: ${{ github.repository == 'astral-sh/ruff' && 20 || 60 }}
     env:
       # Line-tables-only debug info: faster builds, backtraces still work.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
@@ -335,7 +338,13 @@ jobs:
           shared-key: ruff-linux-debug
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: "Install Rust toolchain"
-        run: rustup show
+        run: |
+          rustup show
+          # Fork addition: `--all-features` enables
+          # `ty_plugin_host/test-wasm-fixture`, whose build script compiles the
+          # plugin fixture for `wasm32-unknown-unknown`. Keep this on any job that
+          # passes `--all-features`, or its build fails with `can't find crate for std`.
+          rustup target add wasm32-unknown-unknown
       - name: "Install mold"
         uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
       - name: "Install cargo nextest and insta"
@@ -401,7 +410,13 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: "Install Rust toolchain"
-        run: rustup show
+        run: |
+          rustup show
+          # Fork addition: `--all-features` enables
+          # `ty_plugin_host/test-wasm-fixture`, whose build script compiles the
+          # plugin fixture for `wasm32-unknown-unknown`. Keep this on any job that
+          # passes `--all-features`, or its build fails with `can't find crate for std`.
+          rustup target add wasm32-unknown-unknown
       - name: "Install mold"
         uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
       - name: "Install cargo nextest"
@@ -428,7 +443,10 @@ jobs:
     runs-on: ${{ matrix.platform }}
     needs: determine_changes
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-test') && (needs.determine_changes.outputs.code == 'true' || github.ref == 'refs/heads/main') }}
-    timeout-minutes: 20
+    # Fork addition: upstream runs this on a 16-core Depot runner; the fork falls
+    # through to `ubuntu-latest`, and also builds the extra plugin crates and the
+    # wasm fixture. 20 minutes is not enough there, and the job is killed mid-run.
+    timeout-minutes: ${{ github.repository == 'astral-sh/ruff' && 20 || 60 }}
     env:
       # Line-tables-only debug info: faster builds, backtraces still work.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
@@ -442,7 +460,13 @@ jobs:
           # Fix for https://github.com/Swatinem/rust-cache/issues/341
           cache-bin: "false"
       - name: "Install Rust toolchain"
-        run: rustup show
+        run: |
+          rustup show
+          # Fork addition: `--all-features` enables
+          # `ty_plugin_host/test-wasm-fixture`, whose build script compiles the
+          # plugin fixture for `wasm32-unknown-unknown`. Keep this on any job that
+          # passes `--all-features`, or its build fails with `can't find crate for std`.
+          rustup target add wasm32-unknown-unknown
       - name: "Install cargo nextest"
         uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2.82.10
         with:
@@ -513,7 +537,17 @@ jobs:
       - name: "Install Rust toolchain"
         env:
           MSRV: ${{ steps.msrv.outputs.value }}
-        run: rustup default "${MSRV}"
+        run: |
+          rustup default "${MSRV}"
+          # Fork addition: `--all-features` enables
+          # `ty_plugin_host/test-wasm-fixture`, whose build script compiles the
+          # plugin fixture for `wasm32-unknown-unknown`. Keep this on any job that
+          # passes `--all-features`, or its build fails with `can't find crate for std`.
+          #
+          # `--toolchain` is required here: `rust-toolchain.toml` overrides
+          # `rustup default`, so a bare `target add` would install the target for the
+          # pinned toolchain rather than for the MSRV one this job builds with.
+          rustup target add wasm32-unknown-unknown --toolchain "${MSRV}"
       - name: "Install mold"
         uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
       - name: "Build tests"
@@ -629,7 +663,13 @@ jobs:
     needs: determine_changes
     # Only runs on pull requests, since that is the only we way we can find the base version for comparison.
     # Ecosystem check needs linter and/or formatter changes.
+    # Fork addition: the ecosystem check clones a pinned list of third-party projects and
+    # fails the job on any clone error, which it cannot distinguish from a real regression.
+    # Those pins rot as upstream projects rename branches, so in a fork it produces failures
+    # that carry no signal about this repository. Gated off here the same way
+    # `cargo-test-linux-release` and the benchmark builds are.
     if: |
+      github.repository == 'astral-sh/ruff' &&
       !contains(github.event.pull_request.labels.*.name, 'no-test') && github.event_name == 'pull_request' &&
       (
         needs.determine_changes.outputs.linter == 'true' ||

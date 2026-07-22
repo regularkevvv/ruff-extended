@@ -140,7 +140,9 @@ def publish_placeholder_crate(
         repository = workspace_package.get("repository")
         license_expression = workspace_package.get("license")
 
-        description = "Placeholder release for a ty-extended semantic extension SDK crate"
+        description = (
+            "Placeholder release for a ty-extended semantic extension SDK crate"
+        )
 
         manifest = (
             "[package]\n"
@@ -308,7 +310,9 @@ def main() -> None:
         unknown = package_filter - publishable_names
         if unknown:
             packages = ", ".join(sorted(unknown))
-            print(f"error: package filter includes unpublished workspace crates: {packages}")
+            print(
+                f"error: package filter includes unpublished workspace crates: {packages}"
+            )
             sys.exit(2)
         crates = [crate for crate in crates if crate["name"] in package_filter]
     known = set() if force else load_known_crates()

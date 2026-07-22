@@ -19,12 +19,14 @@ use ruff_python_parser::{Mode, ParseOptions, parse_unchecked};
 use ty_module_resolver::{Db as ModuleResolverDb, SearchPathSettings};
 use ty_python_core::Db as _;
 use ty_python_core::platform::PythonPlatform;
-use ty_python_core::program::{FallibleStrategy, Program, ProgramSettings};
+use ty_python_core::program::{
+    FallibleStrategy, Program, ProgramSettings, SemanticPluginEnvironment,
+};
 use ty_python_semantic::lint::LintRegistry;
 use ty_python_semantic::types::check_types;
 use ty_python_semantic::{
-    AnalysisSettings, Db as SemanticDb, PythonVersionWithSource, default_lint_registry,
-    lint::RuleSelection,
+    AnalysisSettings, Db as SemanticDb, PluginRequest, PluginResponse, PythonVersionWithSource,
+    SemanticPluginRuntimeError, default_lint_registry, lint::RuleSelection,
 };
 
 /// Database that can be used for testing.
@@ -123,6 +125,15 @@ impl SemanticDb for TestDb {
         default_lint_registry()
     }
 
+    fn execute_semantic_plugin(
+        &self,
+        _plugin_id: &str,
+        _request: &PluginRequest,
+    ) -> Result<PluginResponse, SemanticPluginRuntimeError> {
+        // Fuzzing configures no semantic plugins.
+        Ok(PluginResponse::NoChange)
+    }
+
     fn verbose(&self) -> bool {
         false
     }
@@ -155,6 +166,7 @@ fn setup_db() -> TestDb {
             search_paths: SearchPathSettings::new(vec![src_root])
                 .to_search_paths(db.system(), db.vendored(), &FallibleStrategy)
                 .expect("Valid search path settings"),
+            semantic_plugins: SemanticPluginEnvironment::default(),
         },
     );
 
