@@ -2,7 +2,7 @@
 //! signature and call return hooks.
 //!
 //! The class-transform and member hooks (Phases 3 and 4) live in
-//! [`crate::types::class::static_literal`]; this module owns the call-site hooks and the small
+//! `crate::types::class::static_literal`; this module owns the call-site hooks and the small
 //! protocol conversion helpers that both sets of hooks share.
 
 use ruff_db::{
