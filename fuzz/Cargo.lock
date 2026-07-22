@@ -2414,6 +2414,7 @@ dependencies = [
  "ty_plugin_protocol",
  "ty_python_core",
  "ty_site_packages",
+ "ty_static",
 ]
 
 [[package]]
