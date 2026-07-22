@@ -28,6 +28,9 @@ pub use suppression::{
     suppress_single,
 };
 use ty_module_resolver::ModuleGlobSet;
+// Re-exported because `Db::execute_semantic_plugin` names them: an implementor of `Db`
+// should not have to depend on `ty_plugin_protocol` directly just to spell the signature.
+pub use ty_plugin_protocol::{PluginRequest, PluginResponse};
 use ty_python_core::definition::docstring_from_body;
 use ty_python_core::platform::PythonPlatform;
 use ty_python_core::program::Program;
