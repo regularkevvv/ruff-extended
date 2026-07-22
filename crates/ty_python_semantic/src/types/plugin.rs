@@ -41,6 +41,22 @@ use super::display::qualified_name_components_from_scope;
 ///
 /// This produces a display-form annotation; the host runtime only compares it as an opaque
 /// string, so the exact spelling is not load-bearing.
+/// Render a file's path for the plugin protocol.
+///
+/// These strings cross the wire to extensions that match on them, so they always use forward
+/// slashes. `SystemPath` renders with the host separator, which would otherwise hand a Windows
+/// extension `\src\models.py` where every other platform sends `/src/models.py`, silently
+/// breaking any extension that compares paths. The replacement is Windows-only because a
+/// backslash is a legal filename character elsewhere.
+pub(crate) fn plugin_file_path(db: &dyn Db, file: File) -> String {
+    let rendered = file.path(db).to_string();
+    if cfg!(windows) {
+        rendered.replace('\\', "/")
+    } else {
+        rendered
+    }
+}
+
 pub(crate) fn plugin_type_expr_from_type<'db>(
     db: &'db dyn Db,
     ty: Type<'db>,
@@ -1288,7 +1304,7 @@ pub(crate) fn plugin_semantic_context(
 
     protocol::SemanticContext {
         module,
-        file_path: file.path(db).to_string(),
+        file_path: plugin_file_path(db, file),
         python_version: Program::get(db).python_version(db).to_string(),
         platform: Program::get(db).python_platform(db).to_string(),
         speculative,
@@ -1925,7 +1941,7 @@ fn plugin_symbol_source(
             .unwrap_or_default()
             .into(),
         qualified_name,
-        file_path: Some(file.path(db).to_string()),
+        file_path: Some(plugin_file_path(db, file)),
         start: Some(protocol::TextPosition {
             line: u32::try_from(start.line.get()).unwrap_or(u32::MAX),
             column: u32::try_from(start.column.get()).unwrap_or(u32::MAX),

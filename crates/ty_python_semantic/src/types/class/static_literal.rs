@@ -16,8 +16,9 @@ use ty_plugin_protocol as protocol;
 
 use crate::types::plugin::{
     PluginVirtualTypePatch, plugin_callable_type_from_protocol_signature_in_class,
-    plugin_callable_type_from_protocol_signature_with_virtual_types, plugin_semantic_context,
-    plugin_type_expr_from_type, plugin_type_expr_to_type_in_class_with_virtual_types,
+    plugin_callable_type_from_protocol_signature_with_virtual_types, plugin_file_path,
+    plugin_semantic_context, plugin_type_expr_from_type,
+    plugin_type_expr_to_type_in_class_with_virtual_types,
     plugin_type_expr_to_type_with_virtual_types, plugin_virtual_type_patches_from_protocol,
 };
 use crate::{
@@ -4176,7 +4177,7 @@ fn plugin_project_diagnostic_to_diagnostic(
     plugin_diagnostic: &PluginProjectDiagnostic,
 ) -> Option<Diagnostic> {
     let location = plugin_diagnostic.location.as_ref()?;
-    if location.file_path != file.path(db).to_string() {
+    if location.file_path != plugin_file_path(db, file) {
         return None;
     }
 
@@ -4373,7 +4374,7 @@ fn plugin_settings_module_summary(
     let parsed = parsed_module(db, file).load(db);
     let mut values = Vec::new();
     let mut diagnostics = Vec::new();
-    let mut dependencies = BTreeSet::from([file.path(db).to_string()]);
+    let mut dependencies = BTreeSet::from([plugin_file_path(db, file)]);
     let settings_bindings = parsed
         .syntax()
         .body
@@ -4410,7 +4411,7 @@ fn plugin_settings_module_summary(
         diagnostics,
         source: protocol::SymbolSource {
             module: Some(module_name.to_string()),
-            file_path: Some(file.path(db).to_string()),
+            file_path: Some(plugin_file_path(db, file)),
             ..protocol::SymbolSource::default()
         },
     }
@@ -5462,7 +5463,7 @@ fn plugin_imported_settings_literal_value(
         resolving.remove(&resolving_key);
         return protocol::LiteralValue::Unknown;
     };
-    dependencies.insert(file.path(db).to_string());
+    dependencies.insert(plugin_file_path(db, file));
 
     let parsed = parsed_module(db, file).load(db);
     let settings_bindings = parsed
@@ -5557,7 +5558,7 @@ fn plugin_symbol_source(
     protocol::SymbolSource {
         module: Some(plugin_module_name(db, file)),
         qualified_name,
-        file_path: Some(file.path(db).to_string()),
+        file_path: Some(plugin_file_path(db, file)),
         start: Some(protocol::TextPosition {
             line: u32::try_from(start.line.get()).unwrap_or(u32::MAX),
             column: u32::try_from(start.column.get()).unwrap_or(u32::MAX),
