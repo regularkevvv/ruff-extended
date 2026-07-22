@@ -122,7 +122,9 @@ repos:
     rev: 01a675ea018f2fb714478a5ffb83fcea8374bb06 # frozen: v0.15.21
     hooks:
       - id: ruff-format
-        exclude: crates/ty_python_semantic/resources/corpus/
+        # `plugin_fixtures/` joins `corpus/` here: both are Python consumed by
+        # `include_str!` to exercise the checker, not code meant to pass lint.
+        exclude: crates/ty_python_semantic/resources/(corpus|plugin_fixtures)/
         priority: 0
 
   # Priority 1: Second-pass fixers (e.g., markdownlint-fix runs after mdformat).
@@ -132,7 +134,9 @@ repos:
       - id: ruff-check
         args: [--fix, --exit-non-zero-on-fix]
         types_or: [python, pyi]
-        exclude: crates/ty_python_semantic/resources/corpus/
+        # `plugin_fixtures/` joins `corpus/` here: both are Python consumed by
+        # `include_str!` to exercise the checker, not code meant to pass lint.
+        exclude: crates/ty_python_semantic/resources/(corpus|plugin_fixtures)/
         require_serial: true
         priority: 1
 

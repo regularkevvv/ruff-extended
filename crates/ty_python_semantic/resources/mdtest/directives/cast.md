@@ -41,8 +41,8 @@ def function_returning_any() -> Any:
 cast(Any, function_returning_any())
 ```
 
-`Annotated` casts retain their metadata-bearing target, even when the base type is unchanged.
-The metadata makes these casts semantically meaningful, so they are not redundant.
+`Annotated` casts retain their metadata-bearing target, even when the base type is unchanged. The
+metadata makes these casts semantically meaningful, so they are not redundant.
 
 ```py
 from typing import Annotated, TypedDict

@@ -211,7 +211,9 @@ def main(argv: list[str] | None = None) -> int:
         unknown = package_filter - publishable_names
         if unknown:
             packages = ", ".join(sorted(unknown))
-            print(f"error: package filter includes unpublished workspace crates: {packages}")
+            print(
+                f"error: package filter includes unpublished workspace crates: {packages}"
+            )
             return 2
         crates = [crate for crate in crates if crate.name in package_filter]
     return publish_workspace(
