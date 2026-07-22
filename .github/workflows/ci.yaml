@@ -663,15 +663,19 @@ jobs:
     needs: determine_changes
     # Only runs on pull requests, since that is the only we way we can find the base version for comparison.
     # Ecosystem check needs linter and/or formatter changes.
+    # Fork addition: the ecosystem check clones a pinned list of third-party projects and
+    # fails the job on any clone error, which it cannot distinguish from a real regression.
+    # Those pins rot as upstream projects rename branches, so in a fork it produces failures
+    # that carry no signal about this repository. Gated off here the same way
+    # `cargo-test-linux-release` and the benchmark builds are.
     if: |
+      github.repository == 'astral-sh/ruff' &&
       !contains(github.event.pull_request.labels.*.name, 'no-test') && github.event_name == 'pull_request' &&
       (
         needs.determine_changes.outputs.linter == 'true' ||
         needs.determine_changes.outputs.formatter == 'true'
       )
-    # Fork addition: same reason as the test jobs above -- upstream runs this on a Depot
-    # runner and the fork falls through to `ubuntu-latest`, where 20 minutes is not enough.
-    timeout-minutes: ${{ github.repository == 'astral-sh/ruff' && 20 || 60 }}
+    timeout-minutes: 20
     env:
       # Line-tables-only debug info: faster builds, backtraces still work.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
