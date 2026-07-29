@@ -527,14 +527,14 @@ impl ClassInfoConstraintFunction {
             // e.g. `isinstance(x, list[int])` fails at runtime.
             Type::GenericAlias(_) => None,
 
-            Type::NominalInstance(nominal) => nominal.tuple_spec(db).and_then(|tuple| {
+            Type::NominalInstance(nominal) if let Some(tuple) = nominal.tuple_spec(db) => {
                 UnionType::try_from_elements(
                     db,
                     tuple
                         .iter_element_types(db)
                         .map(|element| self.generate_constraint(db, element, is_positive)),
                 )
-            }),
+            }
 
             Type::KnownInstance(KnownInstanceType::UnionType(instance)) => {
                 UnionType::try_from_elements(
@@ -607,6 +607,7 @@ impl ClassInfoConstraintFunction {
             | Type::WrapperDescriptor(_)
             | Type::DataclassTransformer(_)
             | Type::TypedDict(_)
+            | Type::NominalInstance(_)
             | Type::NewTypeInstance(_) => None,
         }
     }
@@ -642,11 +643,12 @@ impl<'db> Conjunctions<'db> {
             return self.conjuncts[0];
         }
 
-        let mut intersection = IntersectionBuilder::new(db);
-        for conjunct in self.conjuncts {
-            intersection = intersection.add_positive(conjunct);
-        }
-        intersection.build()
+        // Collapse shared union arms before distributing the next constraint over them.
+        self.conjuncts
+            .into_iter()
+            .fold(Type::object(), |accumulated, conjunct| {
+                IntersectionType::from_two_elements(db, accumulated, conjunct)
+            })
     }
 }
 
@@ -1390,10 +1392,8 @@ impl<'db> PatternSuccessAnalyzer<'db> {
     }
 
     fn comparison_soundness_policy(&self) -> ComparisonSoundnessPolicy {
-        ComparisonSoundnessPolicy::from_strict_literal_narrowing(
-            self.db
-                .analysis_settings(self.scope.file(self.db))
-                .strict_literal_narrowing,
+        ComparisonSoundnessPolicy::from_analysis_settings(
+            self.db.analysis_settings(self.scope.file(self.db)),
         )
     }
 
@@ -1743,25 +1743,6 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                 .ignore_possibly_undefined();
             let place = subject_ty.member(self.db, name.as_str()).place;
             let mut member_ty = place.ignore_possibly_undefined();
-            if original_subject_ty.nominal_class(self.db).is_some()
-                && let Type::Intersection(intersection) = subject_ty
-            {
-                let overlapping_member_ty = UnionType::from_elements(
-                    self.db,
-                    intersection
-                        .positive(self.db)
-                        .iter()
-                        .filter_map(|positive| {
-                            positive
-                                .member(self.db, name.as_str())
-                                .place
-                                .ignore_possibly_undefined()
-                        }),
-                );
-                if !overlapping_member_ty.is_never() {
-                    member_ty = Some(overlapping_member_ty);
-                }
-            }
 
             if let Some(specialized_pattern_class) = specialized_pattern_class {
                 member_ty = Type::instance(self.db, specialized_pattern_class)
@@ -2100,8 +2081,9 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         if let Type::TypedDict(typed_dict) = subject_ty.resolve_type_alias(self.db) {
             let key_ty = key_ty.resolve_type_alias(self.db);
             let typed_dict_key_ty = typed_dict.key_type(self.db);
+            let policy = self.comparison_soundness_policy();
             if typed_dict_key_ty.is_never()
-                || equality_truthiness(self.db, typed_dict_key_ty, key_ty)
+                || equality_truthiness(self.db, typed_dict_key_ty, key_ty, policy)
                     == Truthiness::AlwaysFalse
             {
                 return None;
@@ -2682,10 +2664,8 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
     }
 
     fn comparison_soundness_policy(&self) -> ComparisonSoundnessPolicy {
-        ComparisonSoundnessPolicy::from_strict_literal_narrowing(
-            self.db
-                .analysis_settings(self.scope().file(self.db))
-                .strict_literal_narrowing,
+        ComparisonSoundnessPolicy::from_analysis_settings(
+            self.db.analysis_settings(self.scope().file(self.db)),
         )
     }
 
@@ -2846,10 +2826,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
                         Err(_) => Type::Never,
                     }
                 } else {
-                    let tuple_length = resolved
-                        .as_nominal_instance()
-                        .and_then(|instance| instance.tuple_spec(db))
-                        .map(|spec| spec.len());
+                    let tuple_length = resolved.tuple_instance_spec(db).map(|spec| spec.len());
                     let satisfies_comparison = |length_type: Type<'db>| {
                         length_type
                             .as_int_literal()
@@ -3218,8 +3195,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
         {
             let is_positive_check = is_positive == (ops[0] == ast::CmpOp::Is);
             let filtered = union.filter(self.db, |elem| {
-                elem.as_nominal_instance()
-                    .and_then(|inst| inst.tuple_spec(self.db))
+                elem.tuple_instance_spec(self.db)
                     .and_then(|spec| spec.py_index(self.db, index).ok())
                     .is_none_or(|el_ty| {
                         if is_positive_check {
@@ -4197,8 +4173,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
 
         // Filter the union based on whether each tuple element at the index could match the rhs.
         let filtered = union.filter(self.db, |elem| {
-            elem.as_nominal_instance()
-                .and_then(|inst| inst.tuple_spec(self.db))
+            elem.tuple_instance_spec(self.db)
                 .and_then(|spec| spec.py_index(self.db, index).ok())
                 .is_none_or(|el_ty| {
                     if is_equality {
@@ -4532,8 +4507,7 @@ fn any_tuple_has_out_of_bounds_index<'db>(
     index: i32,
 ) -> bool {
     union.elements(db).iter().any(|elem| {
-        elem.as_nominal_instance()
-            .and_then(|inst| inst.tuple_spec(db))
+        elem.tuple_instance_spec(db)
             .is_some_and(|spec| spec.py_index(db, index).is_err())
     })
 }
@@ -4550,8 +4524,7 @@ fn all_matching_tuple_elements_have_literal_types<'db>(
     index: i32,
 ) -> bool {
     union.elements(db).iter().all(|elem| {
-        elem.as_nominal_instance()
-            .and_then(|inst| inst.tuple_spec(db))
+        elem.tuple_instance_spec(db)
             .and_then(|spec| spec.py_index(db, index).ok())
             .is_none_or(is_supported_tag_literal)
     })
