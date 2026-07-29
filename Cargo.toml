@@ -87,7 +87,7 @@ clap_complete_command = { version = "0.6.0" }
 clearscreen = { version = "4.0.0" }
 codspeed-criterion-compat = { version = "5.0.0", default-features = false }
 colored = { version = "3.0.0" }
-compact_str = "0.9.0"
+compact_str = "0.10.0"
 console_error_panic_hook = { version = "0.1.7" }
 console_log = { version = "1.0.0" }
 countme = { version = "3.0.1" }
@@ -102,7 +102,7 @@ dunce = { version = "1.0.5" }
 etcetera = { version = "0.11.0" }
 fern = { version = "0.7.0" }
 filetime = { version = "0.2.23" }
-get-size2 = { version = "0.10.0", features = [
+get-size2 = { version = "0.10.3", features = [
     "derive",
     "smallvec",
     "hashbrown",
@@ -134,8 +134,8 @@ js-sys = { version = "0.3.69" }
 libc = { version = "0.2.153" }
 libcst = { version = "1.8.4", default-features = false }
 log = { version = "0.4.17" }
-lsp-server = { version = "0.8.0" }
-lsp-types = { package = "gen-lsp-types", version = "0.9.0", features = ["url"] }
+lsp-server = { version = "0.10.0" }
+lsp-types = { package = "gen-lsp-types", version = "0.10.0", features = ["url"] }
 matchit = { version = "0.9.0" }
 memchr = { version = "2.7.1" }
 mimalloc = { version = "0.1.49", features = ["v2"] }
@@ -143,7 +143,7 @@ natord = { version = "1.0.9" }
 notify = { version = "8.0.0" }
 ordermap = { version = "1.0.0" }
 parking_lot = { version = "0.12.4" }
-path-absolutize = { version = "3.1.1" }
+path-absolutize = { version = "4.0.0" }
 path-slash = { version = "0.2.1" }
 pathdiff = { version = "0.2.1" }
 pep440_rs = { version = "0.7.1" }
@@ -162,7 +162,7 @@ regex-syntax = { version = "0.8.8" }
 rustc-hash = { version = "2.0.0" }
 rustc-stable-hash = { version = "0.1.2" }
 # When updating salsa, make sure to also update the version in `fuzz/Cargo.toml`
-salsa = { version = "0.28.0", default-features = false, features = [
+salsa = { version = "0.28.1", default-features = false, features = [
     "compact_str",
     "macros",
     "salsa_unstable",

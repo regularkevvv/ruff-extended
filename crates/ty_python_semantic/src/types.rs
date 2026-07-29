@@ -71,7 +71,7 @@ use crate::types::context::{LintDiagnosticGuard, LintDiagnosticGuardBuilder};
 use crate::types::diagnostic::{INVALID_AWAIT, INVALID_TYPE_FORM};
 pub use crate::types::display::{DisplaySettings, TypeDetail, TypeDisplayDetails};
 pub(crate) use crate::types::enums::{EnumClassLiteral, EnumComplementType, enum_metadata};
-pub(crate) use crate::types::equality::equality_truthiness;
+pub(crate) use crate::types::equality::{ComparisonSoundnessPolicy, equality_truthiness};
 use crate::types::function::{
     DataclassTransformerFlags, DataclassTransformerParams, FunctionDecorators, FunctionSpans,
     FunctionType, KnownFunction,
@@ -6056,13 +6056,10 @@ impl<'db> Type<'db> {
             Type::NominalInstance(instance) => {
                 instance.class(db).iter_mro(db).find_map(from_class_base)
             }
-            Type::ProtocolInstance(instance) => {
-                if let Protocol::FromClass(class) = instance.inner {
-                    class.iter_mro(db).find_map(from_class_base)
-                } else {
-                    None
-                }
-            }
+            Type::ProtocolInstance(ProtocolInstanceType {
+                inner: Protocol::FromClass(class),
+                ..
+            }) => class.iter_mro(db).find_map(from_class_base),
             Type::Union(union) => {
                 let mut yield_builder = Some(UnionBuilder::new(db));
                 let mut send_builder = Some(UnionBuilder::new(db));
@@ -6642,7 +6639,6 @@ impl<'db> Type<'db> {
                         | KnownInstanceType::GenericContext(_)
                         | KnownInstanceType::Specialization(_)
                         | KnownInstanceType::Literal(_)
-                        | KnownInstanceType::LiteralStringAlias(_)
                         | KnownInstanceType::NewType(_)
                         | KnownInstanceType::Sentinel(_)
                         | KnownInstanceType::NamedTupleSpec(_),
@@ -7246,7 +7242,8 @@ impl<'db> Type<'db> {
                 KnownInstanceType::Callable(callable_type) => {
                     callable_type.find_legacy_typevars_impl(db, binding_context, typevars, visitor);
                 }
-                KnownInstanceType::TypeGenericAlias(ty) => {
+                KnownInstanceType::TypeGenericAlias(ty)
+                | KnownInstanceType::LiteralStringAlias(ty) => {
                     ty.inner(db)
                         .find_legacy_typevars_impl(db, binding_context, typevars, visitor);
                 }
@@ -7261,7 +7258,6 @@ impl<'db> Type<'db> {
                 | KnownInstanceType::GenericContext(_)
                 | KnownInstanceType::Specialization(_)
                 | KnownInstanceType::Literal(_)
-                | KnownInstanceType::LiteralStringAlias(_)
                 | KnownInstanceType::NamedTupleSpec(_)
                 | KnownInstanceType::NewType(_)
                 | KnownInstanceType::Sentinel(_)
@@ -7615,12 +7611,10 @@ impl<'db> Type<'db> {
     pub(crate) fn generic_origin(self, db: &'db dyn Db) -> Option<StaticClassLiteral<'db>> {
         match self {
             Type::GenericAlias(generic) => Some(generic.origin(db)),
-            Type::NominalInstance(instance) => {
-                if let ClassType::Generic(generic) = instance.class(db) {
-                    Some(generic.origin(db))
-                } else {
-                    None
-                }
+            Type::NominalInstance(instance)
+                if let ClassType::Generic(generic) = instance.class(db) =>
+            {
+                Some(generic.origin(db))
             }
             _ => None,
         }
