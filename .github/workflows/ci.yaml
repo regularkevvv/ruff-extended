@@ -793,7 +793,13 @@ jobs:
       - determine_changes
     # Only runs on pull requests, since that is the only we way we can find the base version for comparison.
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-test') && github.event_name == 'pull_request' && (needs.determine_changes.outputs.ty == 'true' || needs.determine_changes.outputs.py-fuzzer == 'true') }}
-    timeout-minutes: ${{ github.repository == 'astral-sh/ruff' && 10 || 20 }}
+    # This job builds ty twice, at the PR head and at the merge base. Upstream's 10 minutes assumes
+    # a 16-core Depot runner; the fork falls back to `ubuntu-latest`, where those two builds take
+    # most of the budget. The previous fork value of 20 minutes was not enough of a margin: the
+    # 0.0.62 sync finished in 19m21s, and the 0.0.63 sync exceeded 20 minutes and was cancelled.
+    # Upstream syncs are the worst case, because they invalidate the most of main's Rust cache, so
+    # this job would fail on precisely the pull requests it is most worth running on.
+    timeout-minutes: ${{ github.repository == 'astral-sh/ruff' && 10 || 45 }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
