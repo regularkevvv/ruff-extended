@@ -16,7 +16,7 @@ use crate::types::diagnostic::{
     TypedDictDeleteErrorKind, report_cannot_delete_typed_dict_key,
     report_invalid_arguments_to_annotated, report_not_subscriptable,
 };
-use crate::types::generics::{GenericContext, InferableTypeVars, bind_typevar};
+use crate::types::generics::{GenericContext, bind_typevar};
 use crate::types::infer::builder::annotation_expression::PEP613Policy;
 use crate::types::infer::builder::{ArgExpr, ArgumentsIter, MultiInferenceGuard};
 use crate::types::infer::{InferenceFlags, TypeExpressionFlags};
@@ -24,6 +24,7 @@ use crate::types::special_form::AliasSpec;
 use crate::types::subscript::{LegacyGenericOrigin, SubscriptError, SubscriptErrorKind};
 use crate::types::tuple::{Tuple, TupleSpecBuilder, TupleType, VariableSegment};
 use crate::types::typed_dict::{TypedDictAssignmentKind, TypedDictKeyAssignment};
+use crate::types::typevar::TypeVarSet;
 use crate::types::{
     AnnotatedType, BoundTypeVarInstance, CallArguments, CallDunderError, CallableBinding,
     CycleDetector, DynamicType, InternedType, KnownClass, KnownInstanceType, LintDiagnosticGuard,
@@ -239,19 +240,6 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                         generic_context,
                     );
                 }
-            }
-            Type::KnownInstance(KnownInstanceType::TypeAliasType(TypeAliasType::ManualPEP695(
-                _,
-            ))) => {
-                let slice_ty = self.infer_expression(slice, TypeContext::default());
-                let mut variables = FxOrderSet::default();
-                slice_ty.bind_and_find_all_legacy_typevars(
-                    db,
-                    self.typevar_binding_context,
-                    &mut variables,
-                );
-                let generic_context = GenericContext::from_typevar_instances(db, variables);
-                return Type::Dynamic(DynamicType::UnknownGeneric(generic_context));
             }
             Type::KnownInstance(KnownInstanceType::TypeAliasType(type_alias)) => {
                 if let Some(generic_context) = type_alias.generic_context(db) {
@@ -530,7 +518,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             if let Some(builder) = self.context.report_lint(&NOT_SUBSCRIPTABLE, subscript) {
                 let mut diagnostic =
                     builder.into_diagnostic("Cannot specialize non-generic type alias");
-                diagnostic.set_primary_message("Double specialization is not allowed");
+                diagnostic.set_primary_annotation_message("Double specialization is not allowed");
             }
             return Type::unknown();
         }
@@ -985,12 +973,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     match typevar.typevar(db).bound_or_constraints(db) {
                         Some(TypeVarBoundOrConstraints::UpperBound(bound)) => {
                             if provided_type
-                                .when_assignable_to(
-                                    db,
-                                    bound,
-                                    &constraints,
-                                    InferableTypeVars::None,
-                                )
+                                .when_assignable_to(db, bound, &constraints, TypeVarSet::None)
                                 .is_never_satisfied(db)
                             {
                                 if let Some(builder) = self
@@ -1025,7 +1008,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                                     db,
                                     typevar_constraints.as_type(db),
                                     &constraints,
-                                    InferableTypeVars::None,
+                                    TypeVarSet::None,
                                 )
                                 .is_never_satisfied(db)
                             {
@@ -1793,7 +1776,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                                 slice_ty.display(db),
                                 object_ty.display(db),
                             ));
-                            diagnostic.set_primary_message(format_args!(
+                            diagnostic.set_primary_annotation_message(format_args!(
                                 "Expected value assignable to `{}`",
                                 expected_ty.display(db)
                             ));

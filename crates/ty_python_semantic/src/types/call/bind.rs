@@ -27,6 +27,7 @@ use self::constructor::{ConstructorBinding, ConstructorContext};
 use super::{Argument, CallArguments, CallError, CallErrorKind, InferContext, Signature, Type};
 use crate::db::Db;
 use crate::dunder_all::dunder_all_names;
+use crate::lint::LintMetadata;
 use crate::place::{DefinedPlace, Definedness, Place};
 use crate::subscript::PyIndex;
 use crate::types::call::arguments::{CallArgumentTypes, Expansion, is_expandable_type};
@@ -34,6 +35,7 @@ use crate::types::callable::CallableTypeKind;
 use crate::types::constraints::{
     ConstraintSet, ConstraintSetBuilder, PathBound, PathBounds, Solutions,
 };
+use crate::types::context::LintDiagnosticGuardBuilder;
 use crate::types::dedicated::pydantic::{self, ConfigBoolean};
 use crate::types::diagnostic::{
     CALL_NON_CALLABLE, CALL_TOP_CALLABLE, INVALID_ARGUMENT_TYPE, INVALID_DATACLASS,
@@ -47,8 +49,7 @@ use crate::types::function::{
     OverloadLiteral,
 };
 use crate::types::generics::{
-    GenericContext, InferableTypeVars, Specialization, SpecializationBuilder, SpecializationError,
-    TypeVarInference,
+    GenericContext, Specialization, SpecializationBuilder, SpecializationError, TypeVarInference,
 };
 use crate::types::infer::original_class_type;
 use crate::types::known_instance::{FieldInstance, InternedConstraintSetSolution};
@@ -58,7 +59,7 @@ use crate::types::signatures::{
 };
 use crate::types::tuple::{TupleLength, TupleSpec, TupleType, VariableSegment};
 use crate::types::typed_dict::{TypedDictOpenness, extract_unpacked_typed_dict_from_value_type};
-use crate::types::typevar::{BoundTypeVarIdentity, TypeVarNonceGenerator};
+use crate::types::typevar::{BoundTypeVarIdentity, TypeVarNonceGenerator, TypeVarSet};
 use crate::types::visitor::{
     TypeCollector, TypeKind, TypeVisitor, any_over_type, walk_non_atomic_type,
     walk_type_with_recursion_guard,
@@ -67,9 +68,9 @@ use crate::types::{
     BindingContext, BoundMethodType, BoundTypeVarInstance, CallableType, CallableTypes,
     ClassLiteral, DATACLASS_FLAGS, DataclassFlags, DataclassParams, DynamicType, GenericAlias,
     InternedConstraintSet, IntersectionType, KnownBoundMethodType, KnownClass, KnownInstanceType,
-    LiteralValueTypeKind, NominalInstanceType, PropertyInstanceType, SpecialFormType,
-    TypeAliasType, TypeContext, TypeMapping, TypeVarBoundOrConstraints, TypeVarVariance,
-    UnionAccumulator, UnionBuilder, UnionType, WrapperDescriptorKind, enums, list_members,
+    LiteralValueTypeKind, NominalInstanceType, PropertyInstanceType, SpecialFormType, TypeContext,
+    TypeMapping, TypeVarBoundOrConstraints, TypeVarVariance, UnionAccumulator, UnionBuilder,
+    UnionType, WrapperDescriptorKind, enums, list_members,
 };
 use crate::{DisplaySettings, FxOrderSet, Program};
 use ruff_db::diagnostic::{Annotation, Diagnostic, Span, SubDiagnostic, SubDiagnosticSeverity};
@@ -77,6 +78,60 @@ use ruff_python_ast::{self as ast, AnyNodeRef, ArgOrKeyword, PythonVersion};
 use ty_python_core::semantic_index;
 
 pub(crate) use self::constructor::ConstructorCallableKind;
+
+/// Overrides the lint and headline message for a call diagnostic emitted from an implicit call.
+///
+/// The original call-error message is retained on the primary annotation if the call reporter
+/// does not supply its own annotation message, or as an info sub-diagnostic otherwise. `info`
+/// explains why the call happened. `argument_ranges` maps synthetic call arguments back to source
+/// ranges.
+pub(crate) struct CallDiagnosticOverride<'a> {
+    pub(crate) lint: &'static LintMetadata,
+    pub(crate) message: String,
+    pub(crate) info: &'a str,
+    pub(crate) argument_ranges: &'a [TextRange],
+}
+
+struct CallDiagnosticContext<'context, 'overrides, 'db, 'ast> {
+    context: &'context InferContext<'db, 'ast>,
+    overrides: Option<&'context CallDiagnosticOverride<'overrides>>,
+    argument_index_offset: usize,
+}
+
+impl<'db> CallDiagnosticContext<'_, '_, 'db, '_> {
+    fn report_lint<'ctx, T: Ranged>(
+        &'ctx self,
+        lint: &'static LintMetadata,
+        ranged: T,
+    ) -> Option<LintDiagnosticGuardBuilder<'ctx, 'db>> {
+        let lint = self.overrides.map_or(lint, |overrides| overrides.lint);
+        self.context.report_lint(lint, ranged).map(|builder| {
+            if let Some(overrides) = self.overrides {
+                builder.with_message_override(overrides.message.clone(), overrides.info)
+            } else {
+                builder
+            }
+        })
+    }
+
+    fn get_range(&self, node: ast::AnyNodeRef<'_>, argument_index: Option<usize>) -> TextRange {
+        let argument_index = argument_index.map(|index| index + self.argument_index_offset);
+        self.overrides
+            .and_then(|overrides| {
+                argument_index.and_then(|index| overrides.argument_ranges.get(index))
+            })
+            .copied()
+            .unwrap_or_else(|| BindingError::get_node(node, argument_index).range())
+    }
+}
+
+impl<'db, 'ast> std::ops::Deref for CallDiagnosticContext<'_, '_, 'db, 'ast> {
+    type Target = InferContext<'db, 'ast>;
+
+    fn deref(&self) -> &Self::Target {
+        self.context
+    }
+}
 
 fn generic_contexts_mentioned_in_type<'db>(
     db: &'db dyn Db,
@@ -156,16 +211,13 @@ fn freshen_generic_contexts_in_type<'db>(
 fn inferable_typevars_from_tuple<'db>(
     db: &'db dyn Db,
     instance: &NominalInstanceType<'db>,
-) -> Option<InferableTypeVars<'db>> {
-    let typevars: Option<FxOrderSet<_>> = instance
+) -> Option<TypeVarSet<'db>> {
+    let typevars: Option<Vec<_>> = instance
         .tuple_spec(db)?
         .fixed_elements()
-        .map(|ty| {
-            ty.as_typevar()
-                .map(|bound_typevar| bound_typevar.identity(db))
-        })
+        .map(|ty| ty.as_typevar())
         .collect();
-    typevars.map(|typevars| InferableTypeVars::from_typevars(db, typevars))
+    typevars.map(|typevars| TypeVarSet::from_typevars(db, typevars))
 }
 
 /// Priority levels for call errors in intersection types.
@@ -1261,6 +1313,37 @@ impl<'db> Bindings<'db> {
         context: &InferContext<'db, '_>,
         node: ast::AnyNodeRef,
     ) {
+        self.report_diagnostics_impl(
+            &CallDiagnosticContext {
+                context,
+                overrides: None,
+                argument_index_offset: 0,
+            },
+            node,
+        );
+    }
+
+    pub(crate) fn report_diagnostics_with_override(
+        &self,
+        context: &InferContext<'db, '_>,
+        node: ast::AnyNodeRef,
+        overrides: &CallDiagnosticOverride<'_>,
+    ) {
+        self.report_diagnostics_impl(
+            &CallDiagnosticContext {
+                context,
+                overrides: Some(overrides),
+                argument_index_offset: 0,
+            },
+            node,
+        );
+    }
+
+    fn report_diagnostics_impl(
+        &self,
+        context: &CallDiagnosticContext<'_, '_, 'db, '_>,
+        node: ast::AnyNodeRef,
+    ) {
         // If all elements are not callable, report that the type as a whole is not callable.
         if self.elements.iter().all(|e| !e.is_callable()) {
             let range = all_arguments_range(node);
@@ -1294,7 +1377,7 @@ impl<'db> Bindings<'db> {
             if !reported_ctor_init_callables.insert(downstream_bindings.callable_type()) {
                 continue;
             }
-            downstream_bindings.report_diagnostics(context, node);
+            downstream_bindings.report_diagnostics_impl(context, node);
         }
     }
 
@@ -1302,7 +1385,7 @@ impl<'db> Bindings<'db> {
     /// If the element is an intersection where all bindings failed, use priority hierarchy.
     fn report_element_diagnostics(
         &self,
-        context: &InferContext<'db, '_>,
+        context: &CallDiagnosticContext<'_, '_, 'db, '_>,
         node: ast::AnyNodeRef,
         element: &BindingsElement<'db>,
     ) {
@@ -1590,23 +1673,7 @@ impl<'db> Bindings<'db> {
                         ] = overload.parameter_types()
                         {
                             if let Some(setter) = property.setter(db) {
-                                if let Ok(return_ty) = setter
-                                    .try_call(db, &CallArguments::positional([*instance, *value]))
-                                    .map(|binding| binding.return_type(db))
-                                {
-                                    // `property.__set__` returns `None` for ordinary setters, but
-                                    // preserving `Never` keeps non-returning setters divergent.
-                                    overload.set_return_type(if return_ty.is_never() {
-                                        return_ty
-                                    } else {
-                                        Type::none(db)
-                                    });
-                                } else {
-                                    overload.errors.push(BindingError::InternalCallError(
-                                        "calling the setter failed",
-                                    ));
-                                    overload.set_return_type(Type::unknown());
-                                }
+                                overload.check_property_setter(db, setter, *instance, *value, 1);
                             } else {
                                 overload
                                     .errors
@@ -1648,23 +1715,7 @@ impl<'db> Bindings<'db> {
                     Type::KnownBoundMethod(KnownBoundMethodType::PropertyDunderSet(property)) => {
                         if let [Some(instance), Some(value), ..] = overload.parameter_types() {
                             if let Some(setter) = property.setter(db) {
-                                if let Ok(return_ty) = setter
-                                    .try_call(db, &CallArguments::positional([*instance, *value]))
-                                    .map(|binding| binding.return_type(db))
-                                {
-                                    // `property.__set__` returns `None` for ordinary setters, but
-                                    // preserving `Never` keeps non-returning setters divergent.
-                                    overload.set_return_type(if return_ty.is_never() {
-                                        return_ty
-                                    } else {
-                                        Type::none(db)
-                                    });
-                                } else {
-                                    overload.errors.push(BindingError::InternalCallError(
-                                        "calling the setter failed",
-                                    ));
-                                    overload.set_return_type(Type::unknown());
-                                }
+                                overload.check_property_setter(db, setter, *instance, *value, 0);
                             } else {
                                 overload
                                     .errors
@@ -2003,12 +2054,7 @@ impl<'db> Bindings<'db> {
                                 let ty_b = ty_b.project_type_form(db);
                                 let constraints = ConstraintSetBuilder::new();
                                 let result = constraints.into_owned(|constraints| {
-                                    ty_a.when_subtype_of(
-                                        db,
-                                        ty_b,
-                                        constraints,
-                                        InferableTypeVars::None,
-                                    )
+                                    ty_a.when_subtype_of(db, ty_b, constraints, TypeVarSet::None)
                                 });
                                 let tracked = InternedConstraintSet::new(db, result);
                                 overload.set_return_type(Type::KnownInstance(
@@ -2023,12 +2069,7 @@ impl<'db> Bindings<'db> {
                                 let ty_b = ty_b.project_type_form(db);
                                 let constraints = ConstraintSetBuilder::new();
                                 let result = constraints.into_owned(|constraints| {
-                                    ty_a.when_assignable_to(
-                                        db,
-                                        ty_b,
-                                        constraints,
-                                        InferableTypeVars::None,
-                                    )
+                                    ty_a.when_assignable_to(db, ty_b, constraints, TypeVarSet::None)
                                 });
                                 let tracked = InternedConstraintSet::new(db, result);
                                 overload.set_return_type(Type::KnownInstance(
@@ -2058,12 +2099,7 @@ impl<'db> Bindings<'db> {
                                 let ty_b = ty_b.project_type_form(db);
                                 let constraints = ConstraintSetBuilder::new();
                                 let result = constraints.into_owned(|constraints| {
-                                    ty_a.when_disjoint_from(
-                                        db,
-                                        ty_b,
-                                        constraints,
-                                        InferableTypeVars::None,
-                                    )
+                                    ty_a.when_disjoint_from(db, ty_b, constraints, TypeVarSet::None)
                                 });
                                 let tracked = InternedConstraintSet::new(db, result);
                                 overload.set_return_type(Type::KnownInstance(
@@ -2076,14 +2112,6 @@ impl<'db> Bindings<'db> {
                             if let [Some(ty)] = overload.parameter_types() {
                                 overload.set_return_type(Type::bool_literal(
                                     ty.project_type_form(db).is_singleton(db),
-                                ));
-                            }
-                        }
-
-                        Some(KnownFunction::IsSingleValued) => {
-                            if let [Some(ty)] = overload.parameter_types() {
-                                overload.set_return_type(Type::bool_literal(
-                                    ty.project_type_form(db).is_single_valued(db),
                                 ));
                             }
                         }
@@ -2124,7 +2152,7 @@ impl<'db> Bindings<'db> {
                                     }
 
                                     Type::KnownInstance(KnownInstanceType::TypeAliasType(
-                                        TypeAliasType::PEP695(alias),
+                                        alias,
                                     )) => alias.generic_context(db).map(wrap_generic_context),
 
                                     _ => None,
@@ -2736,7 +2764,7 @@ impl<'db> Bindings<'db> {
                                 ty_b,
                                 constraints.load(db, tracked.constraints(db)),
                                 constraints,
-                                InferableTypeVars::None,
+                                TypeVarSet::None,
                             )
                         });
                         let tracked = InternedConstraintSet::new(db, result);
@@ -2768,7 +2796,10 @@ impl<'db> Bindings<'db> {
                         ));
                     }
 
-                    Type::KnownBoundMethod(KnownBoundMethodType::ConstraintSetForAll(tracked)) => {
+                    Type::KnownBoundMethod(
+                        method @ (KnownBoundMethodType::ConstraintSetExists(tracked)
+                        | KnownBoundMethodType::ConstraintSetForAll(tracked)),
+                    ) => {
                         let [Some(typevars)] = overload.parameter_types() else {
                             continue;
                         };
@@ -2781,11 +2812,12 @@ impl<'db> Bindings<'db> {
 
                         let constraints = ConstraintSetBuilder::new();
                         let result = constraints.into_owned(|constraints| {
-                            constraints.load(db, tracked.constraints(db)).for_all(
-                                db,
-                                constraints,
-                                typevars,
-                            )
+                            let set = constraints.load(db, tracked.constraints(db));
+                            if matches!(method, KnownBoundMethodType::ConstraintSetExists(_)) {
+                                set.reduce_inferable(db, constraints, typevars)
+                            } else {
+                                set.for_all(db, constraints, typevars)
+                            }
                         });
                         let tracked = InternedConstraintSet::new(db, result);
                         overload.set_return_type(Type::KnownInstance(
@@ -2799,14 +2831,14 @@ impl<'db> Bindings<'db> {
                         let extract_inferable = |instance: &NominalInstanceType<'db>| {
                             if instance.has_known_class(db, KnownClass::NoneType) {
                                 // Caller explicitly passed None, so no typevars are inferable.
-                                return Some(InferableTypeVars::None);
+                                return Some(TypeVarSet::None);
                             }
                             inferable_typevars_from_tuple(db, instance)
                         };
 
                         let inferable = match overload.parameter_types() {
                             // Caller did not provide argument, so no typevars are inferable.
-                            [None] => InferableTypeVars::None,
+                            [None] => TypeVarSet::None,
                             [Some(ty)] => {
                                 let Type::NominalInstance(instance) = ty.project_type_form(db)
                                 else {
@@ -4152,7 +4184,7 @@ impl<'db> CallableBinding<'db> {
 
     fn report_diagnostics(
         &self,
-        context: &InferContext<'db, '_>,
+        context: &CallDiagnosticContext<'_, '_, 'db, '_>,
         node: ast::AnyNodeRef,
         compound_diag: Option<&dyn CompoundDiagnostic>,
     ) {
@@ -5000,6 +5032,7 @@ impl<'a, 'db> ArgumentMatcher<'a, 'db> {
 struct ArgumentTypeChecker<'a, 'db> {
     db: &'db dyn Db,
     signature_type: Type<'db>,
+    constructor_kind: Option<ConstructorCallableKind>,
     signature: &'a Signature<'db>,
     arguments: &'a CallArguments<'a, 'db>,
     argument_matches: &'a [MatchedArgument<'db>],
@@ -5009,7 +5042,7 @@ struct ArgumentTypeChecker<'a, 'db> {
     return_ty: Type<'db>,
     errors: &'a mut Vec<BindingError<'db>>,
 
-    inferable_typevars: InferableTypeVars<'db>,
+    inferable_typevars: TypeVarSet<'db>,
     inference: Option<TypeVarInference<'db>>,
 
     /// Argument indices for which specialization inference has already produced a sufficiently
@@ -5036,7 +5069,7 @@ fn validate_keyword_unpack_key_type<'db>(
     db: &'db dyn Db,
     constraints: &ConstraintSetBuilder<'db>,
     argument_type: Type<'db>,
-    inferable_typevars: InferableTypeVars<'db>,
+    inferable_typevars: TypeVarSet<'db>,
 ) -> KeywordUnpackKeyTypeCheck<'db> {
     if matches!(argument_type, Type::TypedDict(_))
         || argument_type.as_paramspec_typevar(db).is_some()
@@ -5068,6 +5101,7 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
     fn new(
         db: &'db dyn Db,
         signature_type: Type<'db>,
+        constructor_kind: Option<ConstructorCallableKind>,
         signature: &'a Signature<'db>,
         arguments: &'a CallArguments<'a, 'db>,
         argument_matches: &'a [MatchedArgument<'db>],
@@ -5079,6 +5113,7 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
         Self {
             db,
             signature_type,
+            constructor_kind,
             signature,
             arguments,
             argument_matches,
@@ -5087,7 +5122,7 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
             call_expression_tcx,
             return_ty,
             errors,
-            inferable_typevars: InferableTypeVars::None,
+            inferable_typevars: TypeVarSet::None,
             inference: None,
             constraint_set_errors: vec![false; arguments.len()],
         }
@@ -5489,9 +5524,51 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
             return;
         }
 
+        // Constraint inference has already checked the synthetic `cls`. For example:
+        //
+        // ```py
+        // from collections.abc import Callable
+        // from typing import Any, Self, overload
+        //
+        // @overload
+        // def callback[T](value: frozenset[T]) -> T: ...
+        // @overload
+        // def callback[T](value: T) -> T: ...
+        //
+        // class Mapper[R]:
+        //     def __new__[T](cls, callback: Callable[[T], R], values: list[T]) -> Self: ...
+        //
+        // values: Any
+        // Mapper(callback, values)
+        // ```
+        //
+        // The overloads provide alternative, correlated solutions for `T` and `R`. The current
+        // solver merges each TypeVar's solutions separately, losing that correlation. Applying
+        // the merged specialization to `cls` a second time then changes the receiver from
+        // `type[Mapper[frozenset[Never]]]` to
+        // `type[Mapper[frozenset[frozenset[Never]]]]`, incorrectly rejecting the valid call.
+        //
+        // A decorator using `Concatenate[type[U], P]` can also replace the inferred `type[Self]`
+        // receiver with its own `type[U]`, possibly through a type alias. Constraint inference has
+        // already checked the actual class against `type[U]`. If the other arguments cannot solve
+        // `U`, independently checking the class against `type[U]` again would reject the call
+        // solely because `U` remains unsolved.
+        //
+        // TODO: Remove this special case once solution extraction preserves correlations between
+        // TypeVars across alternative inference paths and constructor calls are solved in a single
+        // constraint set, so decorator-scoped receiver variables are not rechecked independently.
+        let constructor_receiver = matches!(argument, Argument::Synthetic)
+            && self.constructor_kind == Some(ConstructorCallableKind::New)
+            && matches!(
+                parameter.annotated_type().resolve_type_alias(self.db),
+                Type::SubclassOf(subclass_of) if subclass_of.into_type_var().is_some()
+            );
+
         let mut expected_ty = parameter.annotated_type();
         if let Some(specialization) = self.specialization() {
-            argument_type = argument_type.apply_specialization(self.db, specialization);
+            if !constructor_receiver {
+                argument_type = argument_type.apply_specialization(self.db, specialization);
+            }
             expected_ty = expected_ty.apply_specialization(self.db, specialization);
         }
 
@@ -5526,6 +5603,7 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
         //
         // TODO: handle starred annotations, e.g. `*args: *Ts` or `*args: *tuple[int, *tuple[str, ...]]`
         if !self.constraint_set_errors[argument_index]
+            && !constructor_receiver
             && !parameter.has_starred_annotation()
             && !is_valid_isinstance_target()
             && argument_type
@@ -5966,13 +6044,7 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
         }
     }
 
-    fn finish(
-        self,
-    ) -> (
-        InferableTypeVars<'db>,
-        Option<TypeVarInference<'db>>,
-        Type<'db>,
-    ) {
+    fn finish(self) -> (TypeVarSet<'db>, Option<TypeVarInference<'db>>, Type<'db>) {
         for (parameter_ty, builder) in self
             .parameter_tys
             .iter_mut()
@@ -6146,10 +6218,10 @@ struct ParamSpecArgumentContext<'a, 'call, 'db> {
 fn inferable_typevar_occurrences<'db>(
     db: &'db dyn Db,
     ty: Type<'db>,
-    inferable: InferableTypeVars<'db>,
+    inferable: TypeVarSet<'db>,
 ) -> usize {
     struct InferableTypeVarVisitor<'db> {
-        inferable: InferableTypeVars<'db>,
+        inferable: TypeVarSet<'db>,
         count: Cell<usize>,
         stack: RefCell<SmallVec<[Type<'db>; 8]>>,
     }
@@ -6227,7 +6299,7 @@ pub(crate) struct Binding<'db> {
     constructor_context: Option<ConstructorContext<'db>>,
 
     /// The inferable typevars in this signature.
-    inferable_typevars: InferableTypeVars<'db>,
+    inferable_typevars: TypeVarSet<'db>,
 
     /// The type-variable inference result for this binding, if the callable is generic.
     inference: Option<TypeVarInference<'db>>,
@@ -6249,6 +6321,37 @@ pub(crate) struct Binding<'db> {
 }
 
 impl<'db> Binding<'db> {
+    fn check_property_setter(
+        &mut self,
+        db: &'db dyn Db,
+        setter: Type<'db>,
+        instance: Type<'db>,
+        value: Type<'db>,
+        argument_index_offset: usize,
+    ) {
+        match setter.try_call(db, &CallArguments::positional([instance, value])) {
+            Ok(bindings) => {
+                let return_ty = bindings.return_type(db);
+                // `property.__set__` returns `None` for ordinary setters, but preserving `Never`
+                // keeps non-returning setters divergent.
+                self.set_return_type(if return_ty.is_never() {
+                    return_ty
+                } else {
+                    Type::none(db)
+                });
+            }
+            Err(CallError(_, bindings)) => {
+                self.errors.push(BindingError::PropertySetterCallError(
+                    PropertySetterCallError {
+                        bindings,
+                        argument_index_offset,
+                    },
+                ));
+                self.set_return_type(Type::unknown());
+            }
+        }
+    }
+
     pub(crate) fn single(signature_type: Type<'db>, signature: Signature<'db>) -> Binding<'db> {
         let return_ty = signature.return_ty;
         Binding {
@@ -6259,7 +6362,7 @@ impl<'db> Binding<'db> {
             signature_type,
             return_ty,
             constructor_context: None,
-            inferable_typevars: InferableTypeVars::None,
+            inferable_typevars: TypeVarSet::None,
             inference: None,
             argument_matches: Box::from([]),
             variadic_argument_matched_to_variadic_parameter: false,
@@ -6694,6 +6797,7 @@ impl<'db> Binding<'db> {
         let mut checker = ArgumentTypeChecker::new(
             db,
             self.signature_type,
+            self.constructor_context.map(ConstructorContext::kind),
             &self.signature,
             arguments,
             &self.argument_matches,
@@ -6733,12 +6837,7 @@ impl<'db> Binding<'db> {
 
             let argument_type = argument_types.get_default().unwrap_or(Type::unknown());
             if let KeywordUnpackKeyTypeCheck::Invalid(provided_ty) =
-                validate_keyword_unpack_key_type(
-                    db,
-                    constraints,
-                    argument_type,
-                    InferableTypeVars::None,
-                )
+                validate_keyword_unpack_key_type(db, constraints, argument_type, TypeVarSet::None)
             {
                 self.errors.push(BindingError::InvalidKeyType {
                     argument_index: adjusted_argument_index,
@@ -6950,7 +7049,7 @@ impl<'db> Binding<'db> {
 
     fn report_diagnostics(
         &self,
-        context: &InferContext<'db, '_>,
+        context: &CallDiagnosticContext<'_, '_, 'db, '_>,
         node: ast::AnyNodeRef,
         callable_ty: Type<'db>,
         callable_description: Option<&CallableDescription>,
@@ -7022,7 +7121,7 @@ impl<'db> Binding<'db> {
     /// Resets the state of this binding to its initial state.
     fn reset(&mut self, db: &'db dyn Db) {
         self.return_ty = self.initial_return_type(db);
-        self.inferable_typevars = InferableTypeVars::None;
+        self.inferable_typevars = TypeVarSet::None;
         self.inference = None;
         self.argument_matches = Box::from([]);
         self.parameter_tys = Box::from([]);
@@ -7033,7 +7132,7 @@ impl<'db> Binding<'db> {
 #[derive(Clone, Debug)]
 struct BindingSnapshot<'db> {
     return_ty: Type<'db>,
-    inferable_typevars: InferableTypeVars<'db>,
+    inferable_typevars: TypeVarSet<'db>,
     inference: Option<TypeVarInference<'db>>,
     argument_matches: Box<[MatchedArgument<'db>]>,
     parameter_tys: Box<[Option<Type<'db>>]>,
@@ -7361,9 +7460,10 @@ pub(crate) enum BindingError<'db> {
     },
     PropertyHasNoSetter(PropertyInstanceType<'db>),
     PropertyHasNoDeleter(PropertyInstanceType<'db>),
+    PropertySetterCallError(PropertySetterCallError<'db>),
     /// The call itself might be well constructed, but an error occurred while evaluating the call.
-    /// We use this variant to report errors in `property.__get__` and `property.__set__`, which
-    /// can occur when the call to the underlying getter/setter fails.
+    /// We use this variant to report errors in `property.__get__` and `property.__delete__`,
+    /// which can occur when the call to the underlying getter/deleter fails.
     InternalCallError(&'static str),
     /// This overload binding of the callable does not match the arguments.
     // TODO: We could expand this with an enum to specify why the overload is unmatched.
@@ -7377,6 +7477,31 @@ pub(crate) enum BindingError<'db> {
     /// The stdlib `dataclass` decorator factory was called with incompatible arguments.
     InvalidDataclassArgument(InvalidDataclassArgument),
 }
+
+#[derive(Clone, Debug)]
+pub(crate) struct PropertySetterCallError<'db> {
+    bindings: Box<Bindings<'db>>,
+    argument_index_offset: usize,
+}
+
+impl PartialEq for PropertySetterCallError<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.argument_index_offset == other.argument_index_offset
+            && self.bindings.callable_type() == other.bindings.callable_type()
+            && self
+                .bindings
+                .iter_flat()
+                .flatten()
+                .flat_map(Binding::errors)
+                .eq(other
+                    .bindings
+                    .iter_flat()
+                    .flatten()
+                    .flat_map(Binding::errors))
+    }
+}
+
+impl Eq for PropertySetterCallError<'_> {}
 
 impl BindingError<'_> {
     /// Returns whether this error is relevant to `functools.partial(...)` construction.
@@ -7463,7 +7588,8 @@ impl BindingError<'_> {
             | BindingError::MissingArguments { .. }
             | BindingError::UnmatchedOverload
             | BindingError::PropertyHasNoSetter(..)
-            | BindingError::PropertyHasNoDeleter(..) => {}
+            | BindingError::PropertyHasNoDeleter(..)
+            | BindingError::PropertySetterCallError(..) => {}
         }
     }
 
@@ -7523,6 +7649,7 @@ impl<'db> BindingError<'db> {
             | Self::InvalidDataclassArgument(_)
             | Self::PropertyHasNoSetter(_)
             | Self::PropertyHasNoDeleter(_)
+            | Self::PropertySetterCallError(_)
             | Self::CalledTopCallable(_)
             | Self::InternalCallError(_) => false,
 
@@ -7543,7 +7670,7 @@ impl<'db> BindingError<'db> {
     #[expect(clippy::too_many_arguments)]
     fn report_diagnostic(
         &self,
-        context: &InferContext<'db, '_>,
+        context: &CallDiagnosticContext<'_, '_, 'db, '_>,
         node: ast::AnyNodeRef,
         callable_ty: Type<'db>,
         callable_description: Option<&CallableDescription>,
@@ -7570,7 +7697,7 @@ impl<'db> BindingError<'db> {
                 // silenced diagnostics during overload evaluation, and rely on the assignability
                 // diagnostic being emitted here.
 
-                let range = Self::get_node(node, *argument_index);
+                let range = context.get_range(node, *argument_index);
                 let Some(builder) = context.report_lint(&INVALID_ARGUMENT_TYPE, range) else {
                     return;
                 };
@@ -7593,12 +7720,12 @@ impl<'db> BindingError<'db> {
                     provenance,
                     InvalidArgumentTypeProvenance::OpenTypedDictExtraItems
                 ) {
-                    diag.set_primary_message(format_args!(
+                    diag.set_primary_annotation_message(format_args!(
                         "Possible extra items in unpacked open `TypedDict` have type \
                          `{provided_ty_display}`, expected `{expected_ty_display}`"
                     ));
                 } else {
-                    diag.set_primary_message(format_args!(
+                    diag.set_primary_annotation_message(format_args!(
                         "Expected `{expected_ty_display}`, found `{provided_ty_display}`"
                     ));
                 }
@@ -7688,7 +7815,7 @@ impl<'db> BindingError<'db> {
                 argument_index,
                 provided_ty,
             } => {
-                let range = Self::get_node(node, *argument_index);
+                let range = context.get_range(node, *argument_index);
                 let Some(builder) = context.report_lint(&INVALID_ARGUMENT_TYPE, range) else {
                     return;
                 };
@@ -7697,7 +7824,7 @@ impl<'db> BindingError<'db> {
                 let mut diag = builder.into_diagnostic(
                     "Argument expression after ** must be a mapping with `str` key type",
                 );
-                diag.set_primary_message(format_args!("Found `{provided_ty_display}`"));
+                diag.set_primary_annotation_message(format_args!("Found `{provided_ty_display}`"));
 
                 if let Some(compound_diag) = compound_diag {
                     compound_diag.add_context(context.db(), &mut diag);
@@ -7709,8 +7836,8 @@ impl<'db> BindingError<'db> {
                 expected_positional_count,
                 provided_positional_count,
             } => {
-                let node = Self::get_node(node, *first_excess_argument_index);
-                if let Some(builder) = context.report_lint(&TOO_MANY_POSITIONAL_ARGUMENTS, node) {
+                let range = context.get_range(node, *first_excess_argument_index);
+                if let Some(builder) = context.report_lint(&TOO_MANY_POSITIONAL_ARGUMENTS, range) {
                     let mut diag = builder.into_diagnostic(format_args!(
                         "Too many positional arguments{}: expected \
                         {expected_positional_count}, got {provided_positional_count}",
@@ -7778,8 +7905,8 @@ impl<'db> BindingError<'db> {
                 argument_name,
                 argument_index,
             } => {
-                let node = Self::get_node(node, *argument_index);
-                if let Some(builder) = context.report_lint(&UNKNOWN_ARGUMENT, node) {
+                let range = context.get_range(node, *argument_index);
+                if let Some(builder) = context.report_lint(&UNKNOWN_ARGUMENT, range) {
                     let mut diag = builder.into_diagnostic(format_args!(
                         "Argument `{argument_name}` does not match any known parameter{}",
                         callable_description
@@ -7800,8 +7927,8 @@ impl<'db> BindingError<'db> {
             }
 
             Self::UnknownKeywordVariadicArgument { argument_index } => {
-                let node = Self::get_node(node, *argument_index);
-                if let Some(builder) = context.report_lint(&UNKNOWN_ARGUMENT, node) {
+                let range = context.get_range(node, *argument_index);
+                if let Some(builder) = context.report_lint(&UNKNOWN_ARGUMENT, range) {
                     let mut diag = builder.into_diagnostic(format_args!(
                         "Unpacked argument may contain keyword arguments that do not match any known parameter{}",
                         callable_description
@@ -7825,9 +7952,9 @@ impl<'db> BindingError<'db> {
                 argument_index,
                 parameter,
             } => {
-                let node = Self::get_node(node, *argument_index);
+                let range = context.get_range(node, *argument_index);
                 if let Some(builder) =
-                    context.report_lint(&POSITIONAL_ONLY_PARAMETER_AS_KWARG, node)
+                    context.report_lint(&POSITIONAL_ONLY_PARAMETER_AS_KWARG, range)
                 {
                     let mut diag = builder.into_diagnostic(format_args!(
                         "Positional-only parameter {parameter} passed as keyword argument{}",
@@ -7852,8 +7979,8 @@ impl<'db> BindingError<'db> {
                 argument_index,
                 parameter,
             } => {
-                let node = Self::get_node(node, *argument_index);
-                if let Some(builder) = context.report_lint(&PARAMETER_ALREADY_ASSIGNED, node) {
+                let range = context.get_range(node, *argument_index);
+                if let Some(builder) = context.report_lint(&PARAMETER_ALREADY_ASSIGNED, range) {
                     let mut diag = builder.into_diagnostic(format_args!(
                         "Multiple values provided for parameter {parameter}{}",
                         callable_description
@@ -7870,7 +7997,7 @@ impl<'db> BindingError<'db> {
                 error,
                 argument_index,
             } => {
-                let range = Self::get_node(node, *argument_index);
+                let range = context.get_range(node, *argument_index);
                 let Some(builder) = context.report_lint(&INVALID_ARGUMENT_TYPE, range) else {
                     return;
                 };
@@ -7889,7 +8016,7 @@ impl<'db> BindingError<'db> {
                     SpecializationError::MismatchedBound { bound_typevar, .. } => {
                         let typevar = bound_typevar.typevar(context.db());
                         let typevar_name = typevar.name(context.db());
-                        diag.set_primary_message(format_args!(
+                        diag.set_primary_annotation_message(format_args!(
                             "Argument type `{argument_ty_display}` does not \
                                 satisfy upper bound `{}` of type variable `{typevar_name}`",
                             typevar
@@ -7903,7 +8030,7 @@ impl<'db> BindingError<'db> {
                     SpecializationError::MismatchedConstraint { bound_typevar, .. } => {
                         let typevar = bound_typevar.typevar(context.db());
                         let typevar_name = typevar.name(context.db());
-                        diag.set_primary_message(format_args!(
+                        diag.set_primary_annotation_message(format_args!(
                             "Argument type `{argument_ty_display}` does not \
                                 satisfy constraints ({}) of type variable `{typevar_name}`",
                             typevar
@@ -7965,9 +8092,18 @@ impl<'db> BindingError<'db> {
                 );
             }
 
+            Self::PropertySetterCallError(error) => {
+                let context = CallDiagnosticContext {
+                    context: context.context,
+                    overrides: context.overrides,
+                    argument_index_offset: error.argument_index_offset,
+                };
+                error.bindings.report_diagnostics_impl(&context, node);
+            }
+
             Self::InternalCallError(reason) => {
-                let node = Self::get_node(node, None);
-                if let Some(builder) = context.report_lint(&CALL_NON_CALLABLE, node) {
+                let range = context.get_range(node, None);
+                if let Some(builder) = context.report_lint(&CALL_NON_CALLABLE, range) {
                     let mut diag = builder.into_diagnostic(format_args!(
                         "Call{} failed: {reason}",
                         callable_description
@@ -7983,8 +8119,8 @@ impl<'db> BindingError<'db> {
             Self::UnmatchedOverload => {}
 
             Self::CalledTopCallable(callable_ty) => {
-                let node = Self::get_node(node, None);
-                if let Some(builder) = context.report_lint(&CALL_TOP_CALLABLE, node) {
+                let range = context.get_range(node, None);
+                if let Some(builder) = context.report_lint(&CALL_TOP_CALLABLE, range) {
                     let callable_ty_display = callable_ty.display(context.db());
                     let mut diag = builder.into_diagnostic(format_args!(
                         "Object of type `{callable_ty_display}` is not safe to call; \
@@ -8001,8 +8137,8 @@ impl<'db> BindingError<'db> {
             }
 
             Self::InvalidDataclassApplication(target) => {
-                let node = Self::get_node(node, None);
-                if let Some(builder) = context.report_lint(&INVALID_DATACLASS, node) {
+                let range = context.get_range(node, None);
+                if let Some(builder) = context.report_lint(&INVALID_DATACLASS, range) {
                     let (message, info) = match target {
                         InvalidDataclassTarget::NamedTuple => (
                             "Cannot use `dataclass()` on a `NamedTuple` class",
@@ -8027,8 +8163,8 @@ impl<'db> BindingError<'db> {
             }
 
             Self::InvalidDataclassArgument(argument) => {
-                let node = Self::get_node(node, None);
-                if let Some(builder) = context.report_lint(&INVALID_DATACLASS, node) {
+                let range = context.get_range(node, None);
+                if let Some(builder) = context.report_lint(&INVALID_DATACLASS, range) {
                     builder.into_diagnostic(match argument {
                         InvalidDataclassArgument::OrderRequiresEq => {
                             "`order=True` requires `eq=True`"

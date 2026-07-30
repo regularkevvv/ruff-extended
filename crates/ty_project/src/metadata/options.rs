@@ -214,6 +214,7 @@ impl Options {
                     SysPrefixPathOrigin::ConfigFileSetting(path.clone(), python_path.range())
                 }
                 ValueSource::Editor => SysPrefixPathOrigin::Editor,
+                ValueSource::UvWorkspace => SysPrefixPathOrigin::UvWorkspace,
             };
 
             PythonEnvironment::new(python_path.absolute(project_root, system), origin, system)
@@ -578,6 +579,7 @@ impl Options {
                     SysPrefixPathOrigin::ConfigFileSetting(path.clone(), python_path.range())
                 }
                 ValueSource::Editor => SysPrefixPathOrigin::Editor,
+                ValueSource::UvWorkspace => SysPrefixPathOrigin::UvWorkspace,
             };
             PythonEnvironment::new(python_path.absolute(project_root, system), origin, system).ok()
         } else {
@@ -640,6 +642,7 @@ fn python_version_from_config(
                 PythonVersionFileSource::new(path.clone(), ranged_version.range()),
             ),
             ValueSource::Editor => PythonVersionSource::Editor,
+            ValueSource::UvWorkspace => PythonVersionSource::UvWorkspace,
         },
     }
 }
@@ -760,6 +763,10 @@ fn unsupported_inferred_python_version_diagnostic(
         PythonVersionSource::Editor => diagnostic.sub(SubDiagnostic::new(
             SubDiagnosticSeverity::Info,
             "The version was inferred from your editor.",
+        )),
+        PythonVersionSource::UvWorkspace => diagnostic.sub(SubDiagnostic::new(
+            SubDiagnosticSeverity::Info,
+            "The version was provided by uv workspace metadata.",
         )),
         PythonVersionSource::Default => diagnostic.sub(SubDiagnostic::new(
             SubDiagnosticSeverity::Info,
@@ -1012,6 +1019,18 @@ pub struct SrcOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub respect_ignore_files: Option<bool>,
 
+    /// Whether to exclude files containing PEP 723 inline script metadata unless they are
+    /// explicitly passed on the command line.
+    #[option(
+        default = r#"false"#,
+        value_type = r#"bool"#,
+        example = r#"
+            exclude-scripts = true
+        "#
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclude_scripts: Option<bool>,
+
     /// A list of files and directories to check. The `include` option
     /// follows a similar syntax to `.gitignore` but reversed:
     /// Including a file or directory will make it so that it (and its contents)
@@ -1131,6 +1150,7 @@ impl SrcOptions {
 
         Ok(SrcSettings {
             respect_ignore_files: self.respect_ignore_files.unwrap_or(true),
+            exclude_scripts: self.exclude_scripts.unwrap_or(false),
             files,
         })
     }
@@ -1176,6 +1196,7 @@ impl Rules {
                 ValueSource::File(_) => LintSource::File,
                 ValueSource::Cli => LintSource::Cli,
                 ValueSource::Editor => LintSource::Editor,
+                ValueSource::UvWorkspace => LintSource::UvWorkspace,
             };
 
             let mut set_lint_level = |lint| {
@@ -3147,6 +3168,10 @@ fn plugin_diagnostic_at_value<T>(
             SubDiagnosticSeverity::Info,
             "The plugin option was specified in the editor settings.",
         )),
+        ValueSource::UvWorkspace => diagnostic.sub(SubDiagnostic::new(
+            SubDiagnosticSeverity::Info,
+            "The plugin option was provided by uv workspace metadata.",
+        )),
     }
 }
 
@@ -3169,6 +3194,10 @@ fn plugin_diagnostic_at_relative_path(
         ValueSource::Editor => diagnostic.sub(SubDiagnostic::new(
             SubDiagnosticSeverity::Info,
             format!("The plugin path was specified in the editor settings: {detail}"),
+        )),
+        ValueSource::UvWorkspace => diagnostic.sub(SubDiagnostic::new(
+            SubDiagnosticSeverity::Info,
+            format!("The plugin path was provided by uv workspace metadata: {detail}"),
         )),
     }
 }
@@ -3776,6 +3805,10 @@ impl OptionDiagnostic {
             ValueSource::Editor => self.sub(SubDiagnostic::new(
                 SubDiagnosticSeverity::Info,
                 "The {value_label} was specified in the editor settings.",
+            )),
+            ValueSource::UvWorkspace => self.sub(SubDiagnostic::new(
+                SubDiagnosticSeverity::Info,
+                format!("The {value_label} was provided by uv workspace metadata."),
             )),
         }
     }
@@ -4528,7 +4561,7 @@ mod plugin_tests {
         let diagnostics = plugin_diagnostics(db);
         let actual = diagnostics
             .iter()
-            .map(|diagnostic| (diagnostic.severity(), diagnostic.primary_message()))
+            .map(|diagnostic| (diagnostic.severity(), diagnostic.headline_message()))
             .collect::<Vec<_>>();
         assert_eq!(actual, expected);
     }

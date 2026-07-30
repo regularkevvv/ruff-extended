@@ -59,11 +59,12 @@ use crate::types::diagnostic::{
     GeneratorMismatchKind, INEFFECTIVE_FINAL, INVALID_ARGUMENT_TYPE, INVALID_ASSIGNMENT,
     INVALID_DECLARATION, INVALID_ENUM_MEMBER_ANNOTATION, INVALID_LEGACY_TYPE_VARIABLE,
     INVALID_NEWTYPE, INVALID_PARAMSPEC, INVALID_TYPE_ALIAS_TYPE, INVALID_TYPE_FORM,
-    INVALID_TYPE_VARIABLE_BOUND, INVALID_TYPE_VARIABLE_CONSTRAINTS, POSSIBLY_MISSING_IMPLICIT_CALL,
-    POSSIBLY_MISSING_SUBMODULE, TypeCheckDiagnostics, UNDEFINED_REVEAL, UNRESOLVED_ATTRIBUTE,
-    UNRESOLVED_GLOBAL, UNRESOLVED_REFERENCE, UNSUPPORTED_OPERATOR, UNUSED_AWAITABLE,
-    hint_if_stdlib_attribute_exists_on_other_versions, report_attempted_protocol_instantiation,
-    report_bad_dunder_delattr_call, report_bad_dunder_delete_call, report_call_to_abstract_method,
+    INVALID_TYPE_VARIABLE_BOUND, INVALID_TYPE_VARIABLE_CONSTRAINTS, INVALID_TYPE_VARIABLE_DEFAULT,
+    POSSIBLY_MISSING_IMPLICIT_CALL, POSSIBLY_MISSING_SUBMODULE, TypeCheckDiagnostics,
+    UNDEFINED_REVEAL, UNRESOLVED_ATTRIBUTE, UNRESOLVED_GLOBAL, UNRESOLVED_REFERENCE,
+    UNSUPPORTED_OPERATOR, UNUSED_AWAITABLE, hint_if_stdlib_attribute_exists_on_other_versions,
+    report_attempted_protocol_instantiation, report_bad_dunder_delattr_call,
+    report_bad_dunder_delete_call, report_call_to_abstract_method,
     report_cannot_pop_required_field_on_typed_dict, report_invalid_assignment,
     report_invalid_class_match_pattern, report_invalid_exception_caught,
     report_invalid_exception_cause, report_invalid_exception_raised,
@@ -82,8 +83,7 @@ use crate::types::function::{
     same_module_uncached_raw_signature,
 };
 use crate::types::generics::{
-    GenericContext, InferableTypeVars, Specialization, SpecializationBuilder, bind_typevar,
-    enclosing_binding_contexts,
+    GenericContext, Specialization, SpecializationBuilder, bind_typevar, enclosing_binding_contexts,
 };
 use crate::types::infer::builder::named_tuple::NamedTupleKind;
 use crate::types::infer::builder::paramspec_validation::validate_paramspec_components;
@@ -105,26 +105,29 @@ use crate::types::tuple::promotion::TupleSizePromotionConstraints;
 use crate::types::tuple::{Tuple, TupleLength, TupleSpecBuilder, TupleType, VariableSegment};
 use crate::types::type_alias::{ManualPEP695TypeAliasType, PEP695TypeAliasType};
 use crate::types::typed_dict::{TypedDictAssignmentKind, TypedDictKeyAssignment};
-use crate::types::typevar::{BoundTypeVarIdentity, TypeVarConstraints, TypeVarIdentity};
+use crate::types::typevar::{
+    BoundTypeVarIdentity, TypeVarConstraints, TypeVarIdentity, TypeVarInstance, TypeVarSet,
+};
 use crate::types::unpacker::UnpackResult;
 use crate::types::{
-    BoundTypeVarInstance, CallDunderError, CallableBinding, CallableType, CallableTypes, ClassType,
-    DynamicType, InferenceFlags, InternedConstraintSet, InternedType, IntersectionBuilder,
-    IntersectionType, KnownClass, KnownInstanceType, KnownUnion, LiteralValueType,
-    LiteralValueTypeKind, MemberLookupPolicy, ParamSpecAttrKind, Parameter, Parameters,
-    SentinelInstance, Signature, SpecialFormType, SubclassOfType, Type, TypeAliasType,
+    BindingContext, BoundTypeVarInstance, CallDunderError, CallableBinding, CallableType,
+    CallableTypes, ClassType, DynamicType, InferenceFlags, InternedConstraintSet, InternedType,
+    IntersectionBuilder, IntersectionType, KnownClass, KnownInstanceType, KnownUnion,
+    LiteralValueType, LiteralValueTypeKind, MemberLookupPolicy, ParamSpecAttrKind, Parameter,
+    Parameters, SentinelInstance, Signature, SpecialFormType, SubclassOfType, Type, TypeAliasType,
     TypeAndQualifiers, TypeContext, TypeQualifiers, TypeVarBoundOrConstraints, TypeVarKind,
     TypeVarVariance, TypedDictModule, TypedDictType, UnionAccumulator, UnionBuilder, UnionType,
     any_over_type, binding_type, extract_fixed_length_iterable_element_types,
     infer_complete_scope_types, infer_scope_types, is_discarded_dict_key_assignment, todo_type,
 };
-use crate::{AnalysisSettings, Db, FxIndexSet, Program};
+use crate::{AnalysisSettings, Db, FxIndexSet, FxOrderSet, Program};
 use ty_python_core::ast_ids::ScopedUseId;
 use ty_python_core::definition::{
     AnnotatedAssignmentDefinitionKind, AssignmentDefinitionKind, ComprehensionDefinitionKind,
     Definition, DefinitionKind, DefinitionNodeKey, DefinitionState, ExceptHandlerDefinitionKind,
     ForStmtDefinitionKind, LambdaParameterDefinitionNodeKind, LoopHeaderDefinitionKind,
-    NestedBindingsDefinitionKind, ParameterDefinitionNodeKind, TargetKind, WithItemDefinitionKind,
+    NestedBindingExecution, NestedBindingsDefinitionKind, ParameterDefinitionNodeKind, TargetKind,
+    WithItemDefinitionKind,
 };
 use ty_python_core::expression::{Expression, ExpressionKind};
 use ty_python_core::narrowing_constraints::ConstraintKey;
@@ -161,7 +164,7 @@ mod typed_dict;
 mod typeguard;
 mod typevar;
 
-use super::comparisons::{self, BinaryComparisonVisitor};
+use super::comparisons;
 
 /// A helper to track if we already know that declared and inferred types are the same.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2493,18 +2496,18 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         let this_scope_sees_nonlocal_bindings = !(this_scope_sees_global_bindings
             || (scope.scope(db).kind().is_class() && symbol.is_local()));
 
-        let mut visible_nested_declarations = nested_bindings_kind
-            .nested_declarations
-            .iter()
-            .filter(|declaration| {
-                if declaration.is_global() {
+        let mut binding_sources = nested_bindings_kind
+            .binding_sources(self.index)
+            .filter_map(|(is_global, bindings)| {
+                (if is_global {
                     this_scope_sees_global_bindings
                 } else {
                     this_scope_sees_nonlocal_bindings
-                }
+                })
+                .then_some(bindings)
             })
             .peekable();
-        if visible_nested_declarations.peek().is_some()
+        if binding_sources.peek().is_some()
             && self
                 .index
                 .use_def_map(scope_id)
@@ -2519,20 +2522,33 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             return;
         }
 
-        let mut union = UnionBuilder::new(db).recursively_defined(RecursivelyDefined::Yes);
-        for declaration in visible_nested_declarations {
-            assert!(
-                declaration.is_bound,
-                "nested declarations without bindings shouldn't be recorded here",
-            );
-            let nested_place_table = self.index.place_table(declaration.file_scope_id);
-            let nested_symbol_id = nested_place_table
-                .symbol_id(&nested_bindings_kind.name)
-                .unwrap();
-            let use_def = self.index.use_def_map(declaration.file_scope_id);
+        let recursively_defined = match nested_bindings_kind.execution {
+            NestedBindingExecution::Lazy => RecursivelyDefined::Yes,
+            NestedBindingExecution::Eager => RecursivelyDefined::No,
+        };
+        let mut union = UnionBuilder::new(db).recursively_defined(recursively_defined);
+        for bindings in binding_sources {
+            if nested_bindings_kind.execution == NestedBindingExecution::Eager {
+                // A comprehension can execute repeatedly, so a source that is unreachable in the
+                // first modeled iteration may become reachable in a later one. Preserve each
+                // source's narrowed type and let the proxy's outer use-def state track boundness.
+                for binding in bindings {
+                    let DefinitionState::Defined(source) = binding.binding else {
+                        continue;
+                    };
+                    let ty = binding_type(db, source);
+                    union.add_in_place(binding.narrowing_constraint.narrow(
+                        db,
+                        ty,
+                        source.place(db),
+                    ));
+                }
+                continue;
+            }
+
             let Some(ty) = place_from_bindings_with_reachability_cache(
                 db,
-                use_def.reachable_bindings(nested_symbol_id.into()),
+                bindings,
                 self.reachability_cache(),
             )
             .place
@@ -2541,7 +2557,12 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             };
             union.add_in_place(ty);
         }
-        self.bindings.insert(definition, union.build());
+        let ty = union.build();
+        let ty = match nested_bindings_kind.execution {
+            NestedBindingExecution::Lazy => ty,
+            NestedBindingExecution::Eager => ty.promote(db),
+        };
+        self.bindings.insert(definition, ty);
     }
 
     fn infer_match_statement(&mut self, match_statement: &ast::StmtMatch) {
@@ -3634,7 +3655,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 .report_lint(&INVALID_NEWTYPE, &arguments.args[1])
             {
                 let mut diag = builder.into_diagnostic("invalid base for `typing.NewType`");
-                diag.set_primary_message("A `NewType` base cannot be generic");
+                diag.set_primary_annotation_message("A `NewType` base cannot be generic");
             }
             return;
         }
@@ -3660,7 +3681,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             .report_lint(&INVALID_NEWTYPE, &arguments.args[1])
         {
             let mut diag = builder.into_diagnostic("invalid base for `typing.NewType`");
-            diag.set_primary_message(format!("type `{}`", inferred.display(self.db())));
+            diag.set_primary_annotation_message(format!("type `{}`", inferred.display(self.db())));
             if matches!(inferred, Type::ProtocolInstance(_)) {
                 diag.info("The base of a `NewType` is not allowed to be a protocol class.");
             } else if matches!(inferred, Type::TypedDict(_)) {
@@ -3751,7 +3772,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         self.deferred.insert(definition);
 
         Type::KnownInstance(KnownInstanceType::TypeAliasType(
-            TypeAliasType::ManualPEP695(ManualPEP695TypeAliasType::new(db, name, definition)),
+            TypeAliasType::ManualPEP695(ManualPEP695TypeAliasType::new(db, name, definition, None)),
         ))
     }
 
@@ -3765,10 +3786,148 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         // in the alias value are bound to the alias definition.
         let previous_context = self.typevar_binding_context.replace(definition);
 
-        self.infer_type_expression(&arguments.args[1]);
+        let value_ty = self.infer_type_expression(&arguments.args[1]);
+        let mut type_params = FxHashSet::default();
+        let mut valid_type_params = true;
         // Infer keyword arguments (e.g. `type_params`) so their types are stored.
         for keyword in &arguments.keywords {
             self.infer_expression(&keyword.value, TypeContext::default());
+
+            if keyword.arg.as_deref() != Some("type_params") {
+                continue;
+            }
+
+            let Some(tuple) = keyword.value.as_tuple_expr() else {
+                valid_type_params = false;
+                if let Some(builder) = self
+                    .context
+                    .report_lint(&INVALID_TYPE_ALIAS_TYPE, &keyword.value)
+                {
+                    builder.into_diagnostic(
+                        "The `type_params` argument to `TypeAliasType` must be a tuple literal",
+                    );
+                }
+                continue;
+            };
+
+            let db = self.db();
+            let mut typevar_with_default = None;
+            let mut typevar_tuple: Option<TypeVarInstance> = None;
+            let mut reported_default_order_error = false;
+
+            for element in &tuple.elts {
+                let bound_typevar = match self.expression_type(element) {
+                    Type::KnownInstance(KnownInstanceType::TypeVar(typevar)) => bind_typevar(
+                        db,
+                        self.index,
+                        definition.file_scope(db),
+                        Some(definition),
+                        typevar,
+                    ),
+                    _ => None,
+                };
+                let Some(bound_typevar) = bound_typevar else {
+                    valid_type_params = false;
+                    if let Some(builder) =
+                        self.context.report_lint(&INVALID_TYPE_ALIAS_TYPE, element)
+                    {
+                        builder.into_diagnostic(
+                            "Each `type_params` entry for `TypeAliasType` must be a type variable",
+                        );
+                    }
+                    continue;
+                };
+                let typevar = bound_typevar.typevar(db);
+
+                if bound_typevar.binding_context(db) != BindingContext::Definition(definition) {
+                    valid_type_params = false;
+                    if let Some(builder) =
+                        self.context.report_lint(&INVALID_TYPE_ALIAS_TYPE, element)
+                    {
+                        builder.into_diagnostic(format_args!(
+                            "Type parameter `{}` is bound in an outer scope and cannot be used in `type_params`",
+                            typevar.name(db),
+                        ));
+                    }
+                    continue;
+                }
+
+                if !type_params.insert(bound_typevar.identity(db)) {
+                    valid_type_params = false;
+                    if let Some(builder) =
+                        self.context.report_lint(&INVALID_TYPE_ALIAS_TYPE, element)
+                    {
+                        builder.into_diagnostic(format_args!(
+                            "Type parameter `{}` is duplicated in `type_params`",
+                            typevar.name(db),
+                        ));
+                    }
+                }
+
+                if typevar.default_type(db).is_some() {
+                    if let Some(typevar_tuple) = typevar_tuple {
+                        valid_type_params = false;
+                        if let Some(builder) = self
+                            .context
+                            .report_lint(&INVALID_TYPE_VARIABLE_DEFAULT, element)
+                        {
+                            builder.into_diagnostic(format_args!(
+                                "Type parameter `{}` with a default follows TypeVarTuple `{}`",
+                                typevar.name(db),
+                                typevar_tuple.name(db),
+                            ));
+                        }
+                    }
+                    typevar_with_default.get_or_insert(typevar);
+                } else if let Some(typevar_with_default) = typevar_with_default {
+                    valid_type_params = false;
+                    if !reported_default_order_error
+                        && let Some(builder) = self
+                            .context
+                            .report_lint(&INVALID_TYPE_VARIABLE_DEFAULT, element)
+                    {
+                        reported_default_order_error = true;
+                        builder.into_diagnostic(format_args!(
+                            "Type parameter `{}` without a default cannot follow earlier parameter `{}` with a default",
+                            typevar.name(db),
+                            typevar_with_default.name(db),
+                        ));
+                    }
+                }
+
+                if typevar.is_typevartuple(db) {
+                    if typevar_tuple.is_some() {
+                        valid_type_params = false;
+                        if let Some(builder) =
+                            self.context.report_lint(&INVALID_TYPE_ALIAS_TYPE, element)
+                        {
+                            builder.into_diagnostic(
+                                "Only one `TypeVarTuple` parameter is allowed in `type_params`",
+                            );
+                        }
+                    } else {
+                        typevar_tuple = Some(typevar);
+                    }
+                }
+            }
+        }
+
+        if valid_type_params {
+            let mut value_typevars = FxOrderSet::default();
+            value_ty.find_legacy_typevars(self.db(), Some(definition), &mut value_typevars);
+
+            for typevar in value_typevars {
+                if !type_params.contains(&typevar.identity(self.db()))
+                    && let Some(builder) = self
+                        .context
+                        .report_lint(&INVALID_TYPE_ALIAS_TYPE, &arguments.args[1])
+                {
+                    builder.into_diagnostic(format_args!(
+                        "Type parameter `{}` used in the alias value must be included in `type_params`",
+                        typevar.name(self.db()),
+                    ));
+                }
+            }
         }
 
         self.typevar_binding_context = previous_context;
@@ -3955,7 +4114,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                                 .secondary(annotation.as_ref())
                                 .message("Declared type"),
                         );
-                        diag.set_primary_message(format_args!(
+                        diag.set_primary_annotation_message(format_args!(
                             "Incompatible value of type `{}`",
                             value_ty.display(self.db()),
                         ));
@@ -4817,7 +4976,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             };
             let mut diag =
                 builder.into_diagnostic(format_args!("Invalid global declaration of `{name}`"));
-            diag.set_primary_message(format_args!(
+            diag.set_primary_annotation_message(format_args!(
                 "`{name}` has no declarations or bindings in the global scope"
             ));
             diag.info("This limits ty's ability to make accurate inferences about the boundness and types of global-scope symbols");
@@ -5127,7 +5286,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     .signature
                     .generic_context
                     .map(|generic_context| generic_context.inferable_typevars(db))
-                    .unwrap_or(InferableTypeVars::None);
+                    .unwrap_or(TypeVarSet::None);
 
                 !overload
                     .return_ty
@@ -6419,7 +6578,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 .try_to_class_literal(self.db())
                 .and_then(|class| class.generic_context(self.db()))
                 .map(|generic_context| generic_context.inferable_typevars(self.db()))
-                .unwrap_or(InferableTypeVars::None);
+                .unwrap_or(TypeVarSet::None);
             annotation.filter_disjoint_elements(
                 self.db(),
                 Type::homogeneous_tuple(self.db(), Type::unknown()),
@@ -7145,7 +7304,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                         let mut diag = builder
                             .into_diagnostic("Argument expression after ** must be a mapping type");
 
-                        diag.set_primary_message(format_args!(
+                        diag.set_primary_annotation_message(format_args!(
                             "Found `{}`",
                             unpack_ty.display(self.db())
                         ));
@@ -8125,7 +8284,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
             builder
                 .into_diagnostic("Argument expression after ** must be a mapping type")
-                .set_primary_message(format_args!("Found `{}`", mapping_type.display(self.db())));
+                .set_primary_annotation_message(format_args!(
+                    "Found `{}`",
+                    mapping_type.display(self.db())
+                ));
         }
 
         call_arguments
@@ -9251,7 +9413,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             let mut diag =
                 builder.into_diagnostic(format_args!(r#"The class `{class_name}` is deprecated"#));
             if let Some(message) = deprecated.message {
-                diag.set_primary_message(message.value(self.db()));
+                diag.set_primary_annotation_message(message.value(self.db()));
             }
             diag.add_primary_tag(ruff_db::diagnostic::DiagnosticTag::Deprecated);
             return;
@@ -9283,7 +9445,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         let mut diag =
             builder.into_diagnostic(format_args!(r#"The function `{func_name}` is deprecated"#));
         if let Some(message) = deprecated.message {
-            diag.set_primary_message(message.value(self.db()));
+            diag.set_primary_annotation_message(message.value(self.db()));
         }
         diag.add_primary_tag(ruff_db::diagnostic::DiagnosticTag::Deprecated);
     }
@@ -9835,7 +9997,8 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         // because it's already caught by typing.Type.
         if Program::get(self.db()).python_version(self.db()) >= PythonVersion::PY39 {
             if let Some(("", builtin_name)) = as_pep_585_generic("typing", id) {
-                diagnostic.set_primary_message(format_args!("Did you mean `{builtin_name}`?"));
+                diagnostic
+                    .set_primary_annotation_message(format_args!("Did you mean `{builtin_name}`?"));
             }
         }
 
@@ -10675,7 +10838,6 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     *op,
                     right_ty,
                     range,
-                    &BinaryComparisonVisitor::new(Ok(Type::bool_literal(true))),
                 )
                 .unwrap_or_else(|error| {
                     report_unsupported_comparison(
@@ -11927,7 +12089,7 @@ impl<'db, 'ast> AddBinding<'db, 'ast> {
                         "Reassignment of `Final` symbol `{place}` is not allowed"
                     ));
 
-                    diagnostic.set_primary_message("Reassignment of `Final` symbol");
+                    diagnostic.set_primary_annotation_message("Reassignment of `Final` symbol");
 
                     if let Some(previous_definition) = previous_definition {
                         // It is not very helpful to show the previous definition if it results from
@@ -11954,7 +12116,8 @@ impl<'db, 'ast> AddBinding<'db, 'ast> {
                                         .message("Symbol declared as `Final` here"),
                                 );
                             }
-                            diagnostic.set_primary_message("Symbol later reassigned here");
+                            diagnostic
+                                .set_primary_annotation_message("Symbol later reassigned here");
                         }
                     }
                 }
