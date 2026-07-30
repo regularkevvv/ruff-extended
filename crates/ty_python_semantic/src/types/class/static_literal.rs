@@ -6711,7 +6711,7 @@ mod tests {
         let diagnostics = db.check_file(file);
         let messages = diagnostics
             .iter()
-            .map(Diagnostic::primary_message)
+            .map(Diagnostic::headline_message)
             .collect::<Vec<_>>();
         assert!(
             messages
@@ -6798,7 +6798,7 @@ mod tests {
         let diagnostics = db.check_file(file);
         let messages = diagnostics
             .iter()
-            .map(Diagnostic::primary_message)
+            .map(Diagnostic::headline_message)
             .collect::<Vec<_>>();
         assert_eq!(
             messages.len(),
@@ -6886,7 +6886,7 @@ mod tests {
         let diagnostics = db.check_file(file);
         let messages = diagnostics
             .iter()
-            .map(Diagnostic::primary_message)
+            .map(Diagnostic::headline_message)
             .collect::<Vec<_>>();
         assert!(
             messages
@@ -7182,7 +7182,7 @@ mod tests {
             .iter()
             .find(|diagnostic| {
                 diagnostic
-                    .primary_message()
+                    .headline_message()
                     .contains("is not a supported static literal")
             })
             .unwrap_or_else(|| panic!("expected settings diagnostic: {diagnostics:#?}"));
@@ -7255,7 +7255,7 @@ mod tests {
         assert!(
             diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.primary_message() == "immutable item write"),
+                .any(|diagnostic| diagnostic.headline_message() == "immutable item write"),
             "expected plugin mutation diagnostic: {diagnostics:#?}"
         );
 
@@ -7428,7 +7428,7 @@ mod tests {
             .iter()
             .find(|diagnostic| {
                 diagnostic
-                    .primary_message()
+                    .headline_message()
                     .contains("is not a supported static literal")
             })
             .unwrap_or_else(|| panic!("expected settings diagnostic: {diagnostics:#?}"));
@@ -7672,7 +7672,7 @@ mod tests {
         let diagnostics = db.check_file(file);
         let messages = diagnostics
             .iter()
-            .map(Diagnostic::primary_message)
+            .map(Diagnostic::headline_message)
             .collect::<Vec<_>>();
         assert_eq!(
             messages.len(),
@@ -7973,7 +7973,7 @@ mod tests {
         let diagnostics = db.check_file(file);
         let messages = diagnostics
             .iter()
-            .map(Diagnostic::primary_message)
+            .map(Diagnostic::headline_message)
             .collect::<Vec<_>>();
         assert!(
             messages.contains(&"Argument is incorrect"),
@@ -8127,7 +8127,7 @@ mod tests {
         let diagnostics = db.check_file(file);
         let messages = diagnostics
             .iter()
-            .map(Diagnostic::primary_message)
+            .map(Diagnostic::headline_message)
             .collect::<Vec<_>>();
         assert!(
             messages.contains(&"Object of type `str` is not assignable to `int`"),
@@ -8244,7 +8244,7 @@ mod tests {
         let diagnostics = db.check_file(file);
         let messages = diagnostics
             .iter()
-            .map(Diagnostic::primary_message)
+            .map(Diagnostic::headline_message)
             .collect::<Vec<_>>();
         assert!(
             messages.contains(&"Conflicting Mini-Django reverse relation `library.Author.books`"),
@@ -8312,7 +8312,7 @@ mod tests {
         let diagnostics = db.check_file(file);
         let messages = diagnostics
             .iter()
-            .map(Diagnostic::primary_message)
+            .map(Diagnostic::headline_message)
             .collect::<Vec<_>>();
         assert!(
             !messages
@@ -8343,7 +8343,7 @@ mod tests {
         let diagnostics = db.check_file(file);
         let messages = diagnostics
             .iter()
-            .map(Diagnostic::primary_message)
+            .map(Diagnostic::headline_message)
             .collect::<Vec<_>>();
         assert!(
             messages.iter().any(|message| message

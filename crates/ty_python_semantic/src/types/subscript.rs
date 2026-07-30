@@ -441,7 +441,7 @@ where
     if !results.is_empty() {
         let mut builder = IntersectionBuilder::new(db);
         for result in results {
-            builder = builder.add_positive(result);
+            builder.add_positive_in_place(result);
         }
         return Ok(builder.build());
     }
@@ -457,7 +457,7 @@ where
 
     for error in errors {
         if !any_has_method || error.any_method_available() {
-            builder = builder.add_positive(error.result_type());
+            builder.add_positive_in_place(error.result_type());
             let error_iter = error.into_errors().into_iter();
             if any_has_method {
                 collected_errors.extend(
@@ -779,16 +779,13 @@ impl<'db> Type<'db> {
                 Some(Ok(todo_type!("doubly-specialized typing.Protocol")))
             }
 
-            (
-                Type::KnownInstance(KnownInstanceType::TypeAliasType(TypeAliasType::PEP695(alias))),
-                _,
-            ) if alias.generic_context(db).is_none() => {
+            (Type::KnownInstance(KnownInstanceType::TypeAliasType(alias)), _)
+                if alias.generic_context(db).is_none() =>
+            {
                 debug_assert!(alias.specialization(db).is_none());
                 Some(Err(SubscriptError::new(
                     Type::unknown(),
-                    SubscriptErrorKind::NonGenericTypeAlias {
-                        alias: TypeAliasType::PEP695(alias),
-                    },
+                    SubscriptErrorKind::NonGenericTypeAlias { alias },
                 )))
             }
 

@@ -67,6 +67,7 @@ toml = { workspace = true }
 [features]
 default = []
 plugins-wasm = ["ty_project/plugins-wasm"]
+test-uv = []
 
 [lints]
 workspace = true
