@@ -400,13 +400,11 @@ def other_function(): ...
           |
         2 | make()
           | ^^^^ Clicking here
-          |
         info: Found 1 definition
          --> site-packages/foo/__init__.py:1:5
           |
         1 | def make():
           |     ----
-          |
         ");
     }
 
