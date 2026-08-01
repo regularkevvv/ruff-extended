@@ -37,7 +37,6 @@ fn cli_config_args_toml_string_basic() -> anyhow::Result<()> {
       |
     1 | print(x)  # [unresolved-reference]
       |       ^
-      |
 
     Found 1 diagnostic
 
@@ -54,7 +53,6 @@ fn cli_config_args_toml_string_basic() -> anyhow::Result<()> {
       |
     1 | print(x)  # [unresolved-reference]
       |       ^
-      |
 
     Found 1 diagnostic
 
@@ -87,7 +85,6 @@ fn cli_config_args_overrides_ty_toml() -> anyhow::Result<()> {
       |
     1 | print(x)  # [unresolved-reference]
       |       ^
-      |
 
     Found 1 diagnostic
 
@@ -104,7 +101,6 @@ fn cli_config_args_overrides_ty_toml() -> anyhow::Result<()> {
       |
     1 | print(x)  # [unresolved-reference]
       |       ^
-      |
 
     Found 1 diagnostic
 
@@ -126,7 +122,6 @@ fn cli_config_args_later_overrides_earlier() -> anyhow::Result<()> {
       |
     1 | print(x)  # [unresolved-reference]
       |       ^
-      |
 
     Found 1 diagnostic
 
@@ -185,7 +180,6 @@ fn config_file_override() -> anyhow::Result<()> {
       |
     1 | print(x)  # [unresolved-reference]
       |       ^
-      |
 
     Found 1 diagnostic
 
@@ -202,7 +196,6 @@ fn config_file_override() -> anyhow::Result<()> {
       |
     1 | print(x)  # [unresolved-reference]
       |       ^
-      |
 
     Found 1 diagnostic
 
@@ -262,7 +255,6 @@ fn config_file_invalid_plugin_configuration() -> anyhow::Result<()> {
       |
     7 | path = ".ty/plugins/missing.mock"
       |        ^^^^^^^^^^^^^^^^^^^^^^^^^^ `<temp_dir>/.ty/plugins/missing.mock` does not exist or is not a file
-      |
 
     Found 1 diagnostic
 
@@ -320,23 +312,22 @@ fn config_file_plugin_stub_overlay_affects_type_checking() -> anyhow::Result<()>
         ("test.py", "from foo import make\nvalue: int = make()\n"),
     ])?;
 
-    assert_cmd_snapshot!(case.command(), @r#"
+    assert_cmd_snapshot!(case.command(), @"
     success: false
     exit_code: 1
     ----- stdout -----
     error[invalid-assignment]: Object of type `str` is not assignable to `int`
-     --> test.py:2:8
+     --> test.py:2:14
       |
     2 | value: int = make()
       |        ---   ^^^^^^ Incompatible value of type `str`
       |        |
       |        Declared type
-      |
 
     Found 1 diagnostic
 
     ----- stderr -----
-    "#);
+    ");
 
     Ok(())
 }
@@ -400,16 +391,14 @@ bad_name: int = user.name
       |
     8 | bad_user = User(name=1)
       |                 ^^^^^^ Expected `str`, found `Literal[1]`
-      |
 
     error[invalid-assignment]: Object of type `str` is not assignable to `int`
-     --> test.py:9:11
+     --> test.py:9:17
       |
     9 | bad_name: int = user.name
       |           ---   ^^^^^^^^^ Incompatible value of type `str`
       |           |
       |           Declared type
-      |
 
     Found 2 diagnostics
 
@@ -496,41 +485,38 @@ bad_existing_value: str = existing.dynamic_field
         ),
     ])?;
 
-    assert_cmd_snapshot!(case.command(), @r#"
+    assert_cmd_snapshot!(case.command(), @"
     success: false
     exit_code: 1
     ----- stdout -----
     error[invalid-assignment]: Object of type `str` is not assignable to `int`
-     --> test.py:5:20
+     --> test.py:5:26
       |
     5 | bad_dynamic_value: int = model.dynamic_field
       |                    ---   ^^^^^^^^^^^^^^^^^^^ Incompatible value of type `str`
       |                    |
       |                    Declared type
-      |
 
     error[invalid-assignment]: Object of type `str` is not assignable to `int`
-     --> test.py:8:18
+     --> test.py:8:24
       |
     8 | bad_class_value: int = Model.dynamic_class_field
       |                  ---   ^^^^^^^^^^^^^^^^^^^^^^^^^ Incompatible value of type `str`
       |                  |
       |                  Declared type
-      |
 
     error[invalid-assignment]: Object of type `int` is not assignable to `str`
-      --> test.py:12:21
+      --> test.py:12:27
        |
     12 | bad_existing_value: str = existing.dynamic_field
        |                     ---   ^^^^^^^^^^^^^^^^^^^^^^ Incompatible value of type `int`
        |                     |
        |                     Declared type
-       |
 
     Found 3 diagnostics
 
     ----- stderr -----
-    "#);
+    ");
 
     Ok(())
 }
@@ -623,27 +609,24 @@ missing_widget = Widget()
     exit_code: 1
     ----- stdout -----
     error[invalid-assignment]: Object of type `int` is not assignable to `str`
-     --> test.py:5:12
+     --> test.py:5:18
       |
     5 | bad_field: str = Field(default=0)
       |            ---   ^^^^^^^^^^^^^^^^ Incompatible value of type `int`
       |            |
       |            Declared type
-      |
 
     error[invalid-argument-type]: Argument is incorrect
      --> test.py:9:21
       |
     9 | bad_widget = Widget(value="x")
       |                     ^^^^^^^^^ Expected `int`, found `Literal["x"]`
-      |
 
     error[missing-argument]: No argument provided for required parameter `value`
       --> test.py:10:18
        |
     10 | missing_widget = Widget()
        |                  ^^^^^^^^
-       |
 
     Found 3 diagnostics
 
@@ -679,7 +662,7 @@ reveal_type(Field(default=0))
         ("test.py", TEST_PY),
     ])?;
 
-    assert_cmd_snapshot!(without_plugin.command(), @r#"
+    assert_cmd_snapshot!(without_plugin.command(), @"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -688,12 +671,11 @@ reveal_type(Field(default=0))
       |
     4 | reveal_type(Field(default=0))
       |             ^^^^^^^^^^^^^^^^ `int`
-      |
 
     Found 1 diagnostic
 
     ----- stderr -----
-    "#);
+    ");
 
     let with_plugin = CliTest::with_files([
         (
@@ -737,7 +719,7 @@ reveal_type(Field(default=0))
         ("test.py", TEST_PY),
     ])?;
 
-    assert_cmd_snapshot!(with_plugin.command(), @r#"
+    assert_cmd_snapshot!(with_plugin.command(), @"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -746,12 +728,11 @@ reveal_type(Field(default=0))
       |
     4 | reveal_type(Field(default=0))
       |             ^^^^^^^^^^^^^^^^ `str`
-      |
 
     Found 1 diagnostic
 
     ----- stderr -----
-    "#);
+    ");
 
     Ok(())
 }
@@ -821,14 +802,12 @@ missing_widget = Widget()
       |
     4 | bad_widget = Widget(value="x")
       |                     ^^^^^^^^^ Expected `int`, found `Literal["x"]`
-      |
 
     error[missing-argument]: No argument provided for required parameter `value`
      --> test.py:5:18
       |
     5 | missing_widget = Widget()
       |                  ^^^^^^^^
-      |
 
     Found 2 diagnostics
 
@@ -914,7 +893,7 @@ bad_name: int = user.name
     ])?;
     case.write_file(".ty/plugins/toy-model.wasm", &wasm_model_plugin)?;
 
-    assert_cmd_snapshot!(case.command(), @r#"
+    assert_cmd_snapshot!(case.command(), @"
     success: false
     exit_code: 1
     ----- stdout -----
@@ -923,21 +902,19 @@ bad_name: int = user.name
       |
     7 | bad_user = User(name=1)
       |                 ^^^^^^ Expected `str`, found `Literal[1]`
-      |
 
     error[invalid-assignment]: Object of type `str` is not assignable to `int`
-     --> test.py:8:11
+     --> test.py:8:17
       |
     8 | bad_name: int = user.name
       |           ---   ^^^^^^^^^ Incompatible value of type `str`
       |           |
       |           Declared type
-      |
 
     Found 2 diagnostics
 
     ----- stderr -----
-    "#);
+    ");
 
     Ok(())
 }
@@ -1004,7 +981,7 @@ bad_dynamic: int = model.dynamic
     ])?;
     case.write_file(".ty/plugins/toy-members.wasm", &wasm_member_plugin)?;
 
-    assert_cmd_snapshot!(case.command(), @r#"
+    assert_cmd_snapshot!(case.command(), @"
     success: false
     exit_code: 1
     ----- stdout -----
@@ -1013,21 +990,19 @@ bad_dynamic: int = model.dynamic
       |
     5 | reveal_type(model.dynamic)
       |             ^^^^^^^^^^^^^ `str`
-      |
 
     error[invalid-assignment]: Object of type `str` is not assignable to `int`
-     --> test.py:6:14
+     --> test.py:6:20
       |
     6 | bad_dynamic: int = model.dynamic
       |              ---   ^^^^^^^^^^^^^ Incompatible value of type `str`
       |              |
       |              Declared type
-      |
 
     Found 2 diagnostics
 
     ----- stderr -----
-    "#);
+    ");
 
     Ok(())
 }
@@ -1094,7 +1069,7 @@ reveal_type(Field(default=0))
         ),
     ])?;
 
-    assert_cmd_snapshot!(case.command(), @r#"
+    assert_cmd_snapshot!(case.command(), @"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -1103,7 +1078,6 @@ reveal_type(Field(default=0))
       |
     4 | reveal_type(Field(default=0))
       |             ^^^^^^^^^^^^^^^^ plugin trapped: wasm trap: wasm `unreachable` instruction executed
-      |
     info: The plugin crashed while handling a request. Report this to the plugin author; update or disable the plugin to continue.
 
     info[revealed-type]: Revealed type
@@ -1111,12 +1085,11 @@ reveal_type(Field(default=0))
       |
     4 | reveal_type(Field(default=0))
       |             ^^^^^^^^^^^^^^^^ `int`
-      |
 
     Found 2 diagnostics
 
     ----- stderr -----
-    "#);
+    ");
 
     Ok(())
 }
