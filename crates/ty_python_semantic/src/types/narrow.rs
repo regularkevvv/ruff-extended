@@ -7,9 +7,7 @@ use crate::types::function::KnownFunction;
 use crate::types::infer::{ExpressionInference, infer_same_file_expression_type};
 use crate::types::special_form::TypeQualifier;
 use crate::types::tuple::{TupleLength, TupleSpec, TupleSpecBuilder, TupleType, TupleUnpacker};
-use crate::types::typed_dict::{
-    TypedDictField, TypedDictFieldBuilder, TypedDictSchema, TypedDictType,
-};
+use crate::types::typed_dict::{TypedDictFieldBuilder, TypedDictSchema, TypedDictType};
 use crate::types::{
     CallableType, ClassBase, ClassLiteral, ClassPatternPositionalSource, ClassType,
     IntersectionBuilder, IntersectionType, KnownClass, KnownInstanceType, LiteralValueTypeKind,
@@ -3632,9 +3630,11 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
                 Some(rhs_constraint.negate(db, &self.env))
             }
             ast::CmpOp::Is => {
-                let mut builder = UnionBuilder::new(db, &self.env).add(rhs_ty);
-                let rhs_resolved = rhs_ty.resolve_type_alias(db);
                 let rhs_identity_ty = rhs_ty.identity_comparison_type(db, &self.env);
+                // Identity transfers the runtime type, not a `NewType` tag or type-variable
+                // selection belonging to the other operand.
+                let mut builder = UnionBuilder::new(db, &self.env).add(rhs_identity_ty);
+                let rhs_resolved = rhs_ty.resolve_type_alias(db);
                 let add_runtime_overlap = |builder: UnionBuilder<'db>, element: Type<'db>| {
                     let overlaps_only_at_runtime = |rhs_element| {
                         element.is_disjoint_from(db, &self.env, rhs_element)
@@ -4040,9 +4040,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
                 }
             } else {
                 let requires_key = |td: TypedDictType<'db>| -> bool {
-                    td.items(db)
-                        .get(key)
-                        .is_some_and(TypedDictField::is_required)
+                    td.key_membership_truthiness(db, key).is_always_true()
                 };
 
                 let resolved_rhs_type = rhs_type.resolve_type_alias(db);
@@ -4813,6 +4811,13 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
             Type::Union(union) => union.map(db, &self.env, |element| {
                 self.narrow_with_present_key(*element, key)
             }),
+            Type::TypedDict(typed_dict)
+                if typed_dict
+                    .key_membership_truthiness(db, key)
+                    .is_always_false() =>
+            {
+                Type::Never
+            }
             resolved if typeddict_declares_key(db, resolved, key) => resolved,
             // TODO: Extend this to subtypes of `Mapping[str, object]` whose membership and
             // subscript operations obey the `Mapping` contract.

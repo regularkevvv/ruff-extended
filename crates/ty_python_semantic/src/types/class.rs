@@ -765,7 +765,10 @@ impl<'db> ClassLiteral<'db> {
     ) -> Type<'db> {
         self.metaclass(db)
             .to_instance_approximation(db, env)
-            .expect("`Type::to_instance()` should always return `Some()` when called on the type of a metaclass")
+            .expect(
+                "`Type::to_instance()` should always return `Some()` \
+                when called on the type of a metaclass",
+            )
     }
 
     /// Returns whether this class is type-check only.
@@ -1728,10 +1731,12 @@ impl<'db> ClassType<'db> {
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
     ) -> Type<'db> {
-        self
-            .metaclass(db)
+        self.metaclass(db)
             .to_instance_approximation(db, env)
-            .expect("`Type::to_instance()` should always return `Some()` when called on the type of a metaclass")
+            .expect(
+                "`Type::to_instance()` should always return `Some()` \
+                when called on the type of a metaclass",
+            )
     }
 
     /// Returns the class member of this class named `name`.
@@ -2039,7 +2044,8 @@ impl<'db> ClassType<'db> {
                             assert_eq!(
                                 tuple.iter_element_types(db).count(),
                                 1,
-                                "Tuple specialization should have exactly one element when it has no length restriction"
+                                "Tuple specialization should have exactly one element when it has \
+                                 no length restriction"
                             );
                             iterable_parameter = iterable_parameter.with_annotated_type(
                                 KnownClass::Iterable.to_specialized_instance(
