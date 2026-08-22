@@ -1,134 +1,119 @@
 use crate::{Db, platform::PythonPlatform};
 
+use ruff_db::files::File;
 use ruff_db::system::SystemPath;
+use ruff_db::vendored::VendoredFileSystem;
 use ruff_python_ast::PythonVersion;
-use salsa::Durability;
 use salsa::Setter;
-use ty_module_resolver::SearchPaths;
+use ty_module_resolver::{ResolverEnvironment, SearchPaths};
 use ty_site_packages::PythonVersionWithSource;
+
+use crate::ProgramFile;
 
 // Re-export the misconfiguration strategy types from ty_module_resolver.
 pub use ty_module_resolver::{FallibleStrategy, MisconfigurationStrategy, UseDefaultStrategy};
 
-#[salsa::input(singleton, heap_size=ruff_memory_usage::heap_size)]
-pub struct Program {
-    #[returns(ref)]
-    pub python_version_with_source: PythonVersionWithSource,
-
+#[salsa::interned(debug, heap_size=ruff_memory_usage::heap_size)]
+pub struct Program<'db> {
     #[returns(ref)]
     pub python_platform: PythonPlatform,
 
-    #[returns(ref)]
-    pub search_paths: SearchPaths,
-
-    #[returns(ref)]
-    pub semantic_plugins: SemanticPluginEnvironment,
+    #[returns(copy)]
+    pub resolver_environment: ResolverEnvironment<'db>,
 }
 
-impl Program {
-    pub fn init_or_update(db: &mut dyn Db, settings: ProgramSettings) -> Self {
-        match Self::try_get(db) {
-            Some(program) => {
-                program.update_from_settings(db, settings);
-                program
-            }
-            None => Self::from_settings(db, settings),
-        }
-    }
+impl get_size2::GetSize for Program<'_> {}
 
-    pub fn from_settings(db: &dyn Db, settings: ProgramSettings) -> Self {
+impl<'db> Program<'db> {
+    /// Creates a program from settings whose search roots have already been registered.
+    pub fn from_settings(db: &'db dyn Db, settings: ProgramSettings) -> Self {
         let ProgramSettings {
             python_version,
             python_platform,
             search_paths,
-            semantic_plugins,
+            // Plugin configuration is registered separately, through `SemanticPlugins`: this
+            // constructor runs inside a tracked query, which cannot create Salsa inputs.
+            semantic_plugins: _,
         } = settings;
 
-        search_paths.try_register_static_roots(db);
-
-        Program::builder(
-            python_version,
-            python_platform,
-            search_paths,
-            semantic_plugins,
-        )
-        .durability(Durability::HIGH)
-        .new(db)
+        let resolver_environment =
+            ResolverEnvironment::new(db, python_version.version, &search_paths);
+        Program::new(db, python_platform, resolver_environment)
     }
 
-    pub fn python_version(self, db: &dyn Db) -> PythonVersion {
-        self.python_version_with_source(db).version
+    pub fn python_version(self, db: &'db dyn Db) -> PythonVersion {
+        self.resolver_environment(db).python_version(db)
     }
 
-    pub fn update_from_settings(self, db: &mut dyn Db, settings: ProgramSettings) {
-        let ProgramSettings {
-            python_version,
-            python_platform,
-            search_paths,
-            semantic_plugins,
-        } = settings;
-
-        if self.search_paths(db) != &search_paths {
-            tracing::debug!("Updating search paths");
-            search_paths.try_register_static_roots(db);
-            self.set_search_paths(db).to(search_paths);
-        }
-
-        if &python_platform != self.python_platform(db) {
-            tracing::debug!("Updating python platform: `{python_platform:?}`");
-            self.set_python_platform(db).to(python_platform);
-        }
-
-        if &python_version != self.python_version_with_source(db) {
-            tracing::debug!(
-                "Updating python version: Python {version}",
-                version = python_version.version
-            );
-            self.set_python_version_with_source(db).to(python_version);
-        }
-
-        if self.semantic_plugins(db) != &semantic_plugins {
-            tracing::debug!(
-                "Updating semantic plugin environment: fingerprint {}",
-                semantic_plugins.fingerprint()
-            );
-            self.set_semantic_plugins(db).to(semantic_plugins);
-        }
+    pub fn search_paths(self, db: &'db dyn Db) -> &'db SearchPaths {
+        self.resolver_environment(db).search_paths(db)
     }
 
-    /// Permanently freezes all program inputs.
-    pub fn freeze(self, db: &mut dyn Db) {
-        let durability = Durability::NEVER_CHANGE;
-        let python_version = self.python_version_with_source(db).clone();
-        let python_platform = self.python_platform(db).clone();
-        let search_paths = self.search_paths(db).clone();
-        let semantic_plugins = self.semantic_plugins(db).clone();
-
-        self.set_python_version_with_source(db)
-            .with_durability(durability)
-            .to(python_version);
-        self.set_python_platform(db)
-            .with_durability(durability)
-            .to(python_platform);
-        self.set_search_paths(db)
-            .with_durability(durability)
-            .to(search_paths);
-        self.set_semantic_plugins(db)
-            .with_durability(durability)
-            .to(semantic_plugins);
+    pub fn program_file(self, db: &'db dyn Db, file: File) -> ProgramFile<'db> {
+        ProgramFile::new(db, file, self)
     }
 
-    pub fn custom_stdlib_search_path(self, db: &dyn Db) -> Option<&SystemPath> {
+    pub fn custom_stdlib_search_path(self, db: &'db dyn Db) -> Option<&'db SystemPath> {
         self.search_paths(db).custom_stdlib()
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, get_size2::GetSize)]
 pub struct ProgramSettings {
     pub python_version: PythonVersionWithSource,
     pub python_platform: PythonPlatform,
     pub search_paths: SearchPaths,
     pub semantic_plugins: SemanticPluginEnvironment,
+}
+
+/// The semantic plugin environment configured for the project.
+///
+/// This is a Salsa input of its own rather than a field on [`Program`]. Plugin configuration is
+/// project-wide, so unlike a Python version it has no per-file meaning, and keeping it separate
+/// means it stays reachable from `db` alone in the plugin machinery, which runs in contexts that
+/// have no file, scope, or definition to resolve a `Program` from.
+///
+/// Being an input keeps the fingerprint part of the query graph: changing the configured plugins
+/// invalidates every check that consulted them.
+#[salsa::input(singleton, heap_size=ruff_memory_usage::heap_size)]
+pub struct SemanticPlugins {
+    #[returns(ref)]
+    pub environment: SemanticPluginEnvironment,
+}
+
+impl SemanticPlugins {
+    /// Registers `environment`, replacing any previously configured one.
+    pub fn init_or_update(db: &mut dyn Db, environment: SemanticPluginEnvironment) {
+        match Self::try_get(db) {
+            Some(plugins) => {
+                if plugins.environment(db) != &environment {
+                    tracing::debug!(
+                        "Updating semantic plugin environment: fingerprint {}",
+                        environment.fingerprint()
+                    );
+                    plugins.set_environment(db).to(environment);
+                }
+            }
+            None => {
+                Self::new(db, environment);
+            }
+        }
+    }
+
+    /// Registers `environment` on a database that has none yet.
+    pub fn init(db: &dyn Db, environment: SemanticPluginEnvironment) {
+        if Self::try_get(db).is_none() {
+            Self::new(db, environment);
+        }
+    }
+
+    /// The configured environment, or an empty one on a database that never registered plugins.
+    pub fn environment_or_empty(db: &dyn Db) -> &SemanticPluginEnvironment {
+        static EMPTY: std::sync::LazyLock<SemanticPluginEnvironment> =
+            std::sync::LazyLock::new(SemanticPluginEnvironment::default);
+
+        Self::try_get(db).map_or(&EMPTY, |plugins| plugins.environment(db))
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, get_size2::GetSize)]
@@ -389,4 +374,15 @@ pub enum SemanticPluginRuntime {
     Mock,
     InProcess,
     Wasm,
+}
+
+impl ProgramSettings {
+    pub fn empty(vendored: &VendoredFileSystem) -> Self {
+        Self {
+            python_version: PythonVersionWithSource::default(),
+            python_platform: PythonPlatform::default(),
+            search_paths: SearchPaths::empty(vendored),
+            semantic_plugins: SemanticPluginEnvironment::default(),
+        }
+    }
 }

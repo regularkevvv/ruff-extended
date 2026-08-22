@@ -8,7 +8,7 @@ use ruff_db::Db as _;
 use ruff_db::files::{File, Files, system_path_to_file};
 use ruff_db::system::{SystemPath, SystemPathBuf};
 use rustc_hash::FxHashSet;
-use ty_python_core::program::{FallibleStrategy, Program};
+use ty_python_core::program::FallibleStrategy;
 
 /// Represents the result of applying changes to the project database.
 pub struct ChangeResult {
@@ -37,7 +37,7 @@ impl ProjectDatabase {
             project.metadata(self),
             project.settings(self).plugins().reload_paths(),
         );
-        let program = Program::get(self);
+        let program = self.project().program(self);
         let custom_stdlib_versions_path = program
             .custom_stdlib_search_path(self)
             .map(|path| path.join("VERSIONS"));
@@ -256,8 +256,7 @@ impl ProjectDatabase {
                         &FallibleStrategy,
                     ) {
                         Ok((program_settings, diagnostics)) => {
-                            let program = Program::get(self);
-                            program.update_from_settings(self, program_settings);
+                            project.update_program(self, program_settings);
                             diagnostics
                         }
                         Err(error) => {
@@ -268,7 +267,7 @@ impl ProjectDatabase {
                         }
                     };
 
-                    let (settings, settings_diagnostics) = match merged_options
+                    let (settings, mut settings_diagnostics) = match merged_options
                         .to_settings(self, &FallibleStrategy)
                     {
                         Ok((settings, diagnostics)) => {
@@ -286,15 +285,14 @@ impl ProjectDatabase {
                             (None, vec![error.into_diagnostic()])
                         }
                     };
+                    settings_diagnostics.extend(
+                        program_settings_diagnostics
+                            .into_iter()
+                            .map(|diagnostic| diagnostic.into_diagnostic(self)),
+                    );
 
                     tracing::debug!("Reloading project after structural change");
-                    match project.reload(
-                        self,
-                        metadata,
-                        settings,
-                        settings_diagnostics,
-                        program_settings_diagnostics,
-                    ) {
+                    match project.reload(self, metadata, settings, settings_diagnostics) {
                         ProjectReloadResult::Unchanged => {}
                         ProjectReloadResult::Changed { files_changed } => {
                             result.project_changed = true;
@@ -335,7 +333,7 @@ impl ProjectDatabase {
                 &FallibleStrategy,
             ) {
                 Ok((program_settings, program_settings_diagnostics)) => {
-                    let settings_diagnostics =
+                    let mut settings_diagnostics =
                         match merged_options.to_settings(self, &FallibleStrategy) {
                             Ok((settings, diagnostics)) => {
                                 self.semantic_plugin_runtime =
@@ -347,12 +345,13 @@ impl ProjectDatabase {
                             }
                             Err(error) => vec![error.into_diagnostic()],
                         };
-                    program.update_from_settings(self, program_settings);
-                    project.update_settings_diagnostics(
-                        self,
-                        settings_diagnostics,
-                        program_settings_diagnostics,
+                    project.update_program(self, program_settings);
+                    settings_diagnostics.extend(
+                        program_settings_diagnostics
+                            .into_iter()
+                            .map(|diagnostic| diagnostic.into_diagnostic(self)),
                     );
+                    project.update_settings_diagnostics(self, settings_diagnostics);
                 }
                 Err(error) => {
                     tracing::error!("Failed to resolve program settings: {error}");

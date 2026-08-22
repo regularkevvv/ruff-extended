@@ -29,6 +29,7 @@ pub(crate) use suppression::{
 };
 use ty_module_resolver::ModuleGlobSet;
 pub use ty_python_core::Program;
+use ty_python_core::ProgramFile;
 
 // Re-exported because `Db::execute_semantic_plugin` names them: an implementor of `Db`
 // should not have to depend on `ty_plugin_protocol` directly just to spell the signature.
@@ -134,7 +135,7 @@ pub(crate) fn attribute_assignments<'db, 's>(
     class_body_scope: ScopeId<'db>,
     name: &'s str,
 ) -> impl Iterator<Item = (BindingWithConstraintsIterator<'db, 'db>, FileScopeId)> + use<'s, 'db> {
-    let index = semantic_index(db, class_body_scope.python_file(db));
+    let index = semantic_index(db, class_body_scope.program_file(db));
 
     attribute_scopes(db, class_body_scope).filter_map(|function_scope_id| {
         let place_table = index.place_table(function_scope_id);
@@ -154,7 +155,7 @@ pub(crate) fn attribute_declarations<'db, 's>(
     class_body_scope: ScopeId<'db>,
     name: &'s str,
 ) -> impl Iterator<Item = (DeclarationsIterator<'db, 'db>, FileScopeId)> + use<'s, 'db> {
-    let index = semantic_index(db, class_body_scope.python_file(db));
+    let index = semantic_index(db, class_body_scope.program_file(db));
 
     attribute_scopes(db, class_body_scope).filter_map(|function_scope_id| {
         let place_table = index.place_table(function_scope_id);
@@ -174,13 +175,13 @@ pub(crate) fn module_docstring(db: &dyn Db, file: PythonFile<'_>) -> Option<Stri
         .map(|docstring_expr| docstring_expr.value.to_str().to_owned())
 }
 
-pub fn check_file_unwrap(db: &dyn Db, file: PythonFile<'_>) -> Vec<Diagnostic> {
+pub fn check_file_unwrap(db: &dyn Db, file: ProgramFile<'_>) -> Vec<Diagnostic> {
     check_file(db, file)
         .map(<[ruff_db::diagnostic::Diagnostic]>::into_vec)
         .unwrap_or_else(|error| vec![error])
 }
 
-pub fn check_file(db: &dyn Db, file: PythonFile<'_>) -> Result<Box<[Diagnostic]>, Diagnostic> {
+pub fn check_file(db: &dyn Db, file: ProgramFile<'_>) -> Result<Box<[Diagnostic]>, Diagnostic> {
     let source_file = file.file(db);
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
 
@@ -195,7 +196,7 @@ pub fn check_file(db: &dyn Db, file: PythonFile<'_>) -> Result<Box<[Diagnostic]>
         .to_diagnostic());
     }
 
-    let parsed = parsed_module(db, file);
+    let parsed = parsed_module(db, file.python_file(db));
 
     let parsed_ref = parsed.load(db);
     diagnostics.extend(
@@ -207,7 +208,12 @@ pub fn check_file(db: &dyn Db, file: PythonFile<'_>) -> Result<Box<[Diagnostic]>
 
     diagnostics.extend(parsed_ref.unsupported_syntax_errors().iter().map(|error| {
         let mut error = Diagnostic::invalid_syntax(source_file, error, error);
-        add_inferred_python_version_hint_to_diagnostic(db, &mut error, "parsing syntax");
+        add_inferred_python_version_hint_to_diagnostic(
+            db,
+            source_file,
+            &mut error,
+            "parsing syntax",
+        );
         error
     }));
 

@@ -3,7 +3,9 @@ use std::num::NonZeroUsize;
 
 use similar::{ChangeTag, DiffOp, TextDiff};
 
-use annotate_snippets::Renderer as AnnotateRenderer;
+use annotate_snippets::{
+    Group as AnnotateGroup, Level as AnnotateLevel, Renderer as AnnotateRenderer,
+};
 use ruff_diagnostics::{Applicability, Fix};
 use ruff_notebook::NotebookIndex;
 use ruff_source_file::OneIndexed;
@@ -69,6 +71,9 @@ impl<'a> FullRenderer<'a> {
                     Diff::from_diagnostic(diag, &stylesheet, self.resolver, self.config)
             {
                 write!(f, "{diff}")?;
+                if let Some(applicability) = to_applicability_annotate(diff.fix) {
+                    writeln!(f, "{}", renderer.render(&[applicability]))?;
+                }
             }
 
             writeln!(f)?;
@@ -113,21 +118,7 @@ impl<'a> Diff<'a> {
         })
     }
 
-    fn write_gutter(&self, f: &mut std::fmt::Formatter, width: NonZeroUsize) -> std::fmt::Result {
-        writeln!(
-            f,
-            "{line} {separator}",
-            line = fmt_styled(Line { index: None, width }, self.stylesheet.line_no),
-            separator = fmt_styled("|", self.stylesheet.line_no),
-        )
-    }
-}
-
-/// Limit diffs to a narrow range around each fix rather than diffing the whole file.
-const DIFF_CONTEXT_WINDOW: usize = 3;
-
-impl std::fmt::Display for Diff<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn write(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let source_code = self.diagnostic_source.as_source_code();
         let source_text = source_code.text();
 
@@ -309,35 +300,25 @@ impl std::fmt::Display for Diff<'_> {
             self.write_gutter(f, digit_with)?;
         }
 
-        match self.fix.applicability() {
-            Applicability::Safe => {}
-            Applicability::Unsafe => {
-                writeln!(
-                    f,
-                    "{note}: {msg}",
-                    note = fmt_styled("note", self.stylesheet.warning),
-                    msg = fmt_styled(
-                        "This is an unsafe fix and may change runtime behavior",
-                        self.stylesheet.emphasis
-                    )
-                )?;
-            }
-            Applicability::DisplayOnly => {
-                // Note that this is still only used in tests. There's no `--display-only-fixes`
-                // analog to `--unsafe-fixes` for users to activate this or see the styling.
-                writeln!(
-                    f,
-                    "{note}: {msg}",
-                    note = fmt_styled("note", self.stylesheet.error),
-                    msg = fmt_styled(
-                        "This is a display-only fix and is likely to be incorrect",
-                        self.stylesheet.emphasis
-                    )
-                )?;
-            }
-        }
-
         Ok(())
+    }
+
+    fn write_gutter(&self, f: &mut std::fmt::Formatter, width: NonZeroUsize) -> std::fmt::Result {
+        writeln!(
+            f,
+            "{line} {separator}",
+            line = fmt_styled(Line { index: None, width }, self.stylesheet.line_no),
+            separator = fmt_styled("|", self.stylesheet.line_no),
+        )
+    }
+}
+
+/// Limit diffs to a narrow range around each fix rather than diffing the whole file.
+const DIFF_CONTEXT_WINDOW: usize = 3;
+
+impl std::fmt::Display for Diff<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.write(f)
     }
 }
 
@@ -371,6 +352,25 @@ fn show_nonprinting(s: &str) -> Cow<'_, str> {
     } else {
         Cow::Borrowed(s)
     }
+}
+
+fn to_applicability_annotate(fix: &Fix) -> Option<AnnotateGroup<'static>> {
+    let (level, message) = match fix.applicability() {
+        Applicability::Safe => return None,
+        Applicability::Unsafe => (
+            AnnotateLevel::WARNING,
+            "This is an unsafe fix and may change runtime behavior",
+        ),
+        Applicability::DisplayOnly => (
+            // Note that this is still only used in tests. There's no `--display-only-fixes`
+            // analog to `--unsafe-fixes` for users to activate this or see the styling.
+            AnnotateLevel::ERROR,
+            "This is a display-only fix and is likely to be incorrect",
+        ),
+    };
+    let level = level.with_name("note");
+
+    Some(AnnotateGroup::with_title(level.primary_title(message)))
 }
 
 #[cfg(test)]
