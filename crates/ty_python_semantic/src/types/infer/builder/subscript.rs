@@ -29,10 +29,10 @@ use crate::types::typed_dict::{
 use crate::types::typevar::TypeVarSet;
 use crate::types::{
     AnnotatedType, BoundTypeVarInstance, CallArguments, CallDunderError, CallableBinding,
-    CycleDetector, DynamicType, InternedType, KnownClass, KnownInstanceType, LintDiagnosticGuard,
-    MemberLookupPolicy, Parameter, Parameters, SpecialFormType, StaticClassLiteral, Type,
-    TypeAliasType, TypeAndQualifiers, TypeContext, TypeVarBoundOrConstraints, UnionType,
-    UnionTypeInstance, any_over_type, todo_type,
+    CycleDetector, DisplaySettings, DynamicType, InternedType, KnownClass, KnownInstanceType,
+    LintDiagnosticGuard, MemberLookupPolicy, Parameter, Parameters, SpecialFormType,
+    StaticClassLiteral, Type, TypeAliasType, TypeAndQualifiers, TypeContext,
+    TypeVarBoundOrConstraints, UnionType, UnionTypeInstance, any_over_type, todo_type,
 };
 use crate::{Db, FxOrderSet, ProgramEnvironment};
 use ty_python_core::definition::Definition;
@@ -2012,14 +2012,22 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                                             target.range.cover(rhs_value_node.range()),
                                         )
                                     {
-                                        let assigned_d = rhs_value_ty.display(db, env);
-                                        let object_d = object_ty.display(db, env);
+                                        let settings =
+                                            DisplaySettings::from_possibly_ambiguous_types(
+                                                db,
+                                                env,
+                                                [rhs_value_ty, object_ty, slice_ty],
+                                            );
+                                        let assigned_d =
+                                            rhs_value_ty.display_with(db, env, settings.clone());
+                                        let object_d =
+                                            object_ty.display_with(db, env, settings.clone());
 
                                         let mut diagnostic = builder.into_diagnostic(format_args!(
                                             "Invalid subscript assignment with key of type `{}` \
                                             and value of type `{assigned_d}` \
                                             on object of type `{object_d}`",
-                                            slice_ty.display(db, env),
+                                            slice_ty.display_with(db, env, settings),
                                         ));
 
                                         // Special diagnostic for dictionaries

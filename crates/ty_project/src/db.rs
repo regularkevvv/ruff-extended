@@ -932,7 +932,11 @@ pub(crate) mod testing {
 
             let (settings, settings_diagnostics) = project
                 .options()
-                .to_settings(&db, OptionsContext::Project(project.root()), &FallibleStrategy)
+                .to_settings(
+                    &db,
+                    OptionsContext::Project(project.root()),
+                    &FallibleStrategy,
+                )
                 .unwrap();
             let root = project.root().to_path_buf();
             db.system

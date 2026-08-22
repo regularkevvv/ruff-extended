@@ -6,8 +6,8 @@ use ty_combine::Combine;
 use ty_python_semantic::AnalysisSettings;
 use ty_python_semantic::lint::RuleSelection;
 
-use crate::metadata::options::{InnerOverrideOptions, Options, OutputFormat, PluginConfig};
-use crate::script::{Script, script_metadata};
+use crate::metadata::options::{InnerOverrideOptions, OutputFormat, PluginConfig};
+use crate::script::Script;
 use crate::{Db, glob::IncludeExcludeFilter};
 
 /// The resolved [`super::Options`] for the project.

@@ -14,11 +14,11 @@ use ordermap::OrderMap;
 use pep440_rs::VersionSpecifiers;
 use ruff_cache::{CacheKey, CacheKeyHasher};
 use ruff_db::RustDoc;
-use ruff_db::files::system_path_to_file;
 use ruff_db::diagnostic::{
     Annotation, Diagnostic, DiagnosticFormat, DiagnosticId, DisplayDiagnosticConfig, Severity,
     Span, SubDiagnostic, SubDiagnosticSeverity,
 };
+use ruff_db::files::system_path_to_file;
 use ruff_db::system::{System, SystemPath, SystemPathBuf};
 use ruff_db::vendored::VendoredFileSystem;
 use ruff_macros::{Combine, OptionsMetadata, RustDoc};
