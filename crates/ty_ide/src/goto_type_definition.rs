@@ -1,13 +1,14 @@
 use crate::goto::find_goto_target;
 use crate::{Db, HasNavigationTargets, NavigationTargets, RangedValue};
-use ruff_db::files::{File, FileRange};
+use ruff_db::PythonFile;
+use ruff_db::files::FileRange;
 use ruff_db::parsed::parsed_module;
 use ruff_text_size::{Ranged, TextSize};
 use ty_python_semantic::SemanticModel;
 
 pub fn goto_type_definition(
     db: &dyn Db,
-    file: File,
+    file: PythonFile<'_>,
     offset: TextSize,
 ) -> Option<RangedValue<NavigationTargets>> {
     let module = parsed_module(db, file).load(db);
@@ -15,13 +16,14 @@ pub fn goto_type_definition(
     let goto_target = find_goto_target(&model, &module, offset)?;
 
     let ty = goto_target.inferred_type(&model)?;
+    let env = model.program_environment();
 
-    tracing::debug!("Inferred type of covering node is {}", ty.display(db));
+    tracing::debug!("Inferred type of covering node is {}", ty.display(db, &env));
 
-    let navigation_targets = ty.navigation_targets(db);
+    let navigation_targets = ty.navigation_targets(db, &env);
 
     Some(RangedValue {
-        range: FileRange::new(file, goto_target.range()),
+        range: FileRange::new(file.file(db), goto_target.range()),
         value: navigation_targets,
     })
 }
@@ -898,7 +900,7 @@ mod tests {
         LL | a: "MyClass |" = 1
            |    ^^^^^^^^^^^ Clicking here
         info: Found 1 type definition
-          --> stdlib/ty_extensions/__init__.pyi:LL:1
+          --> stdlib/ty_extensions/_internal.pyi:LL:1
            |
         LL | Unknown: _SpecialForm
            | -------
@@ -948,7 +950,7 @@ mod tests {
         LL | a: "MyClass | No" = 1
            |               ^^ Clicking here
         info: Found 1 type definition
-          --> stdlib/ty_extensions/__init__.pyi:LL:1
+          --> stdlib/ty_extensions/_internal.pyi:LL:1
            |
         LL | Unknown: _SpecialForm
            | -------
@@ -970,7 +972,7 @@ mod tests {
         LL | ab: "ab"
            |      ^^ Clicking here
         info: Found 1 type definition
-          --> stdlib/ty_extensions/__init__.pyi:LL:1
+          --> stdlib/ty_extensions/_internal.pyi:LL:1
            |
         LL | Unknown: _SpecialForm
            | -------
@@ -992,7 +994,7 @@ mod tests {
         LL | x: "foobar"
            |     ^^^^^^ Clicking here
         info: Found 1 type definition
-          --> stdlib/ty_extensions/__init__.pyi:LL:1
+          --> stdlib/ty_extensions/_internal.pyi:LL:1
            |
         LL | Unknown: _SpecialForm
            | -------
@@ -1142,7 +1144,7 @@ mod tests {
         LL | x: """'list["MyClass" | "str"]' | None"""
            |             ^^^^^^^^^ Clicking here
         info: Found 1 type definition
-          --> stdlib/ty_extensions/__init__.pyi:LL:1
+          --> stdlib/ty_extensions/_internal.pyi:LL:1
            |
         LL | Unknown: _SpecialForm
            | -------
@@ -1902,7 +1904,7 @@ def function():
         LL | x = submod
            |     ^^^^^^ Clicking here
         info: Found 1 type definition
-          --> stdlib/ty_extensions/__init__.pyi:LL:1
+          --> stdlib/ty_extensions/_internal.pyi:LL:1
            |
         LL | Unknown: _SpecialForm
            | -------
@@ -2051,7 +2053,11 @@ def function():
     impl CursorTest {
         fn goto_type_definition(&self) -> String {
             let Some(targets) = salsa::attach(&self.db, || {
-                goto_type_definition(&self.db, self.cursor.file, self.cursor.offset)
+                goto_type_definition(
+                    &self.db,
+                    self.python_file(self.cursor.file),
+                    self.cursor.offset,
+                )
             }) else {
                 return "No goto target found".to_string();
             };

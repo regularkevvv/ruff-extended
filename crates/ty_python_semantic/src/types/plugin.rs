@@ -6,6 +6,7 @@
 //! protocol conversion helpers that both sets of hooks share.
 
 use ruff_db::{
+    PythonFile,
     files::File,
     source::{line_index, source_text},
 };
@@ -16,7 +17,7 @@ use ruff_text_size::{Ranged, TextRange};
 use ty_module_resolver::{ModuleName, all_modules, file_to_module, resolve_module_confident};
 use ty_plugin_protocol as protocol;
 use ty_python_core::global_scope;
-use ty_python_core::program::{SemanticPlugin, SemanticPluginRuntime};
+use ty_python_core::program::{Program, SemanticPlugin, SemanticPluginRuntime};
 use ty_python_core::scope::ScopeId;
 
 use crate::place::imported_symbol;
@@ -33,7 +34,7 @@ use crate::types::{
     ClassBase, ClassLiteral, ClassType, FunctionType, KnownClass, KnownInstanceType, Parameter,
     Parameters, Signature, SubclassOfType, Type, TypedDictType, UnionType,
 };
-use crate::{Db, Program, SemanticPluginRuntimeError};
+use crate::{Db, ProgramEnvironment, SemanticPluginRuntimeError};
 
 use super::display::qualified_name_components_from_scope;
 
@@ -57,10 +58,25 @@ pub(crate) fn plugin_file_path(db: &dyn Db, file: File) -> String {
     }
 }
 
+/// The environment plugin queries evaluate types in.
+///
+/// Plugin requests are project-wide rather than anchored to a single file, so they resolve types
+/// with the program's configured Python version — the one version this code saw before upstream
+/// introduced per-file environments.
+pub(crate) fn plugin_program_environment(db: &dyn Db) -> ProgramEnvironment<'_> {
+    ProgramEnvironment::from_program(Program::get(db).python_version(db))
+}
+
+/// Pairs `file` with the program's Python version for the file-keyed upstream queries.
+pub(crate) fn plugin_python_file(db: &dyn Db, file: File) -> PythonFile<'_> {
+    PythonFile::new(db, file, Program::get(db).python_version(db))
+}
+
 pub(crate) fn plugin_type_expr_from_type<'db>(
     db: &'db dyn Db,
     ty: Type<'db>,
 ) -> protocol::TypeExpr {
+    let env = &plugin_program_environment(db);
     if let Type::ClassLiteral(class) = ty {
         return protocol::TypeExpr {
             expression: class.qualified_name(db).to_string(),
@@ -71,7 +87,7 @@ pub(crate) fn plugin_type_expr_from_type<'db>(
     }
 
     protocol::TypeExpr {
-        expression: ty.display(db).to_string(),
+        expression: ty.display(db, env).to_string(),
         imports: Vec::new(),
         mode: protocol::TypeExprMode::Annotation,
         snapshot: Some(Box::new(plugin_type_snapshot_from_type(db, ty))),
@@ -79,7 +95,8 @@ pub(crate) fn plugin_type_expr_from_type<'db>(
 }
 
 fn plugin_type_snapshot_from_type<'db>(db: &'db dyn Db, ty: Type<'db>) -> protocol::TypeSnapshot {
-    if let Some(class) = ty.nominal_class(db)
+    let env = &plugin_program_environment(db);
+    if let Some(class) = ty.nominal_class(db, env)
         && let ClassLiteral::DynamicNamedTuple(named_tuple) = class.class_literal(db)
         && let Some(identity) = named_tuple.plugin_virtual_identity(db)
     {
@@ -88,7 +105,7 @@ fn plugin_type_snapshot_from_type<'db>(db: &'db dyn Db, ty: Type<'db>) -> protoc
         };
     }
 
-    if let Some(tuple) = ty.tuple_instance_spec(db) {
+    if let Some(tuple) = ty.tuple_instance_spec(db, env) {
         let (prefix, variadic, suffix) = match tuple.as_ref() {
             Tuple::Fixed(tuple) => (
                 tuple
@@ -170,7 +187,7 @@ fn plugin_type_snapshot_from_type<'db>(db: &'db dyn Db, ty: Type<'db>) -> protoc
             protocol::TypeSnapshot::SelfType {
                 bound: typevar
                     .typevar(db)
-                    .upper_bound(db)
+                    .upper_bound(db, env)
                     .map(|bound| Box::new(plugin_type_snapshot_from_type(db, bound))),
             }
         }
@@ -185,7 +202,7 @@ fn plugin_type_snapshot_from_type<'db>(db: &'db dyn Db, ty: Type<'db>) -> protoc
             }
         }
         _ => {
-            if let Some(class) = ty.nominal_class(db) {
+            if let Some(class) = ty.nominal_class(db, env) {
                 if let ClassLiteral::Dynamic(dynamic_class) = class.class_literal(db)
                     && let Some(identity) = dynamic_class.plugin_virtual_identity(db)
                 {
@@ -209,7 +226,7 @@ fn plugin_type_snapshot_from_type<'db>(db: &'db dyn Db, ty: Type<'db>) -> protoc
             }
 
             let fallback = protocol::TypeExpr {
-                expression: ty.display(db).to_string(),
+                expression: ty.display(db, env).to_string(),
                 imports: Vec::new(),
                 mode: protocol::TypeExprMode::Annotation,
                 snapshot: None,
@@ -223,6 +240,7 @@ fn plugin_type_snapshot_metadata_from_type(
     db: &dyn Db,
     ty: Type<'_>,
 ) -> protocol::TypeSnapshotMetadata {
+    let env = &plugin_program_environment(db);
     if let Type::GenericAlias(alias) = ty {
         return protocol::TypeSnapshotMetadata {
             qualified_name: ClassLiteral::Static(alias.origin(db))
@@ -249,7 +267,7 @@ fn plugin_type_snapshot_metadata_from_type(
             arguments: Vec::new(),
         },
         snapshot => protocol::TypeSnapshotMetadata {
-            qualified_name: ty.display(db).to_string(),
+            qualified_name: ty.display(db, env).to_string(),
             arguments: vec![snapshot],
         },
     }
@@ -293,7 +311,7 @@ pub(crate) fn plugin_type_expr_to_type_in_class_with_virtual_types<'db>(
         type_expr,
         PluginTypeExprContext {
             self_class: Some(class),
-            scope: Some(global_scope(db, class.file(db))),
+            scope: Some(global_scope(db, plugin_python_file(db, class.file(db)))),
             virtual_types,
             ..PluginTypeExprContext::default()
         },
@@ -328,6 +346,7 @@ fn plugin_virtual_type_definition_to_patch<'db>(
     definition: protocol::VirtualTypeDefinition,
     scope: Option<ScopeId<'db>>,
 ) -> Option<PluginVirtualTypePatch<'db>> {
+    let env = &plugin_program_environment(db);
     let ty = match definition.shape {
         protocol::VirtualTypeShape::TypedDict { fields, total } => {
             let mut schema = TypedDictSchema::default();
@@ -374,7 +393,7 @@ fn plugin_virtual_type_definition_to_patch<'db>(
                     spec,
                 },
             );
-            named_tuple.to_instance(db)
+            named_tuple.to_instance(db, env)
         }
         protocol::VirtualTypeShape::Class { bases, members } => {
             let scope = scope?;
@@ -413,6 +432,7 @@ fn plugin_virtual_type_definition_to_patch<'db>(
             );
             Type::instance(
                 db,
+                env,
                 ClassType::NonGeneric(ClassLiteral::Dynamic(dynamic_class)),
             )
         }
@@ -517,12 +537,12 @@ fn parse_plugin_class_base_expr<'db>(
 }
 
 fn plugin_virtual_type_scope(db: &dyn Db) -> Option<ScopeId<'_>> {
-    all_modules(db)
+    all_modules(db, Program::get(db).python_version(db))
         .into_iter()
         .filter_map(|module| module.file(db))
         .filter(|file| db.should_check_file(*file))
         .min_by_key(|file| file.path(db).to_string())
-        .map(|file| global_scope(db, file))
+        .map(|file| global_scope(db, plugin_python_file(db, file)))
 }
 
 #[derive(Clone, Copy, Default)]
@@ -545,7 +565,7 @@ fn plugin_type_expr_to_type_in_file<'db>(
         type_expr,
         PluginTypeExprContext {
             self_class: None,
-            scope: Some(global_scope(db, file)),
+            scope: Some(global_scope(db, plugin_python_file(db, file))),
             ..PluginTypeExprContext::default()
         },
     )
@@ -562,7 +582,7 @@ fn plugin_type_expr_to_type_in_file_with_virtual_types<'db>(
         type_expr,
         PluginTypeExprContext {
             self_class: None,
-            scope: Some(global_scope(db, file)),
+            scope: Some(global_scope(db, plugin_python_file(db, file))),
             virtual_types,
             ..PluginTypeExprContext::default()
         },
@@ -591,6 +611,7 @@ fn plugin_type_snapshot_to_type<'db>(
     snapshot: &protocol::TypeSnapshot,
     context: PluginTypeExprContext<'db, '_>,
 ) -> Option<Type<'db>> {
+    let env = &plugin_program_environment(db);
     match snapshot {
         protocol::TypeSnapshot::Expression(expression) => {
             let type_expr = expression.to_type_expr();
@@ -608,7 +629,7 @@ fn plugin_type_snapshot_to_type<'db>(
                 return None;
             };
             if arguments.is_empty() {
-                return Some(Type::instance(db, class.default_specialization(db)));
+                return Some(Type::instance(db, env, class.default_specialization(db)));
             }
             let generic_context = class.generic_context(db)?;
             if generic_context.len(db) != arguments.len() {
@@ -625,6 +646,7 @@ fn plugin_type_snapshot_to_type<'db>(
                 .collect::<Vec<_>>();
             Some(Type::instance(
                 db,
+                env,
                 class.apply_specialization(db, |generic_context| {
                     generic_context.specialize_recursive(db, arguments)
                 }),
@@ -650,10 +672,13 @@ fn plugin_type_snapshot_to_type<'db>(
             if let Some(variadic) = variadic {
                 let variadic = plugin_type_snapshot_to_type(db, variadic, context)
                     .unwrap_or_else(Type::unknown);
-                Some(Type::tuple(TupleType::mixed(db, prefix, variadic, suffix)))
+                Some(Type::tuple(TupleType::mixed(
+                    db, env, prefix, variadic, suffix,
+                )))
             } else {
                 Some(Type::heterogeneous_tuple(
                     db,
+                    env,
                     prefix.into_iter().chain(suffix),
                 ))
             }
@@ -693,6 +718,7 @@ fn plugin_type_snapshot_to_type<'db>(
         }
         protocol::TypeSnapshot::Union { elements } => Some(UnionType::from_elements(
             db,
+            env,
             elements.iter().map(|element| {
                 plugin_type_snapshot_to_type(db, element, context).unwrap_or_else(Type::unknown)
             }),
@@ -705,7 +731,7 @@ fn plugin_type_snapshot_to_type<'db>(
             if let Some(self_type) = context.self_type {
                 Some(self_type)
             } else if let Some(class) = context.self_class {
-                Some(Type::instance(db, class.default_specialization(db)))
+                Some(Type::instance(db, env, class.default_specialization(db)))
             } else {
                 bound
                     .as_deref()
@@ -723,6 +749,7 @@ fn parse_plugin_type_expr<'db>(
     expression: &str,
     context: PluginTypeExprContext<'db, '_>,
 ) -> Option<Type<'db>> {
+    let env = &plugin_program_environment(db);
     let expression = strip_wrapping_parentheses(expression.trim());
     if expression.is_empty() {
         return None;
@@ -732,6 +759,7 @@ fn parse_plugin_type_expr<'db>(
     if union_parts.len() > 1 {
         return Some(UnionType::from_elements(
             db,
+            env,
             union_parts.into_iter().map(|part| {
                 parse_plugin_type_expr(db, part, context).unwrap_or_else(Type::unknown)
             }),
@@ -760,24 +788,25 @@ fn parse_plugin_atomic_type_expr<'db>(
     expression: &str,
     context: PluginTypeExprContext<'db, '_>,
 ) -> Option<Type<'db>> {
+    let env = &plugin_program_environment(db);
     if let Some(ty) = resolve_plugin_virtual_type_expr(expression, context) {
         return Some(ty);
     }
 
     Some(match expression {
         "Any" | "typing.Any" | "typing_extensions.Any" => Type::any(),
-        "bool" | "builtins.bool" => KnownClass::Bool.to_instance(db),
-        "bytes" | "builtins.bytes" => KnownClass::Bytes.to_instance(db),
-        "dict" | "builtins.dict" => KnownClass::Dict.to_instance(db),
-        "float" | "builtins.float" => KnownClass::Float.to_instance(db),
-        "int" | "builtins.int" => KnownClass::Int.to_instance(db),
-        "list" | "builtins.list" => KnownClass::List.to_instance(db),
-        "None" | "NoneType" | "types.NoneType" | "builtins.None" => Type::none(db),
-        "object" | "builtins.object" => KnownClass::Object.to_instance(db),
+        "bool" | "builtins.bool" => KnownClass::Bool.to_instance(db, env),
+        "bytes" | "builtins.bytes" => KnownClass::Bytes.to_instance(db, env),
+        "dict" | "builtins.dict" => KnownClass::Dict.to_instance(db, env),
+        "float" | "builtins.float" => KnownClass::Float.to_instance(db, env),
+        "int" | "builtins.int" => KnownClass::Int.to_instance(db, env),
+        "list" | "builtins.list" => KnownClass::List.to_instance(db, env),
+        "None" | "NoneType" | "types.NoneType" | "builtins.None" => Type::none(db, env),
+        "object" | "builtins.object" => KnownClass::Object.to_instance(db, env),
         "Self" | "typing.Self" | "typing_extensions.Self" => {
-            Type::instance(db, context.self_class?.default_specialization(db))
+            Type::instance(db, env, context.self_class?.default_specialization(db))
         }
-        "str" | "builtins.str" => KnownClass::Str.to_instance(db),
+        "str" | "builtins.str" => KnownClass::Str.to_instance(db, env),
         _ => {
             return resolve_plugin_qualified_type_expr(db, expression).or_else(|| {
                 imported_qualified_name(expression, context).and_then(|qualified_name| {
@@ -794,23 +823,26 @@ fn parse_plugin_generic_type_expr<'db>(
     args: Vec<&str>,
     context: PluginTypeExprContext<'db, '_>,
 ) -> Option<Type<'db>> {
+    let env = &plugin_program_environment(db);
     match origin {
         "type" | "builtins.type" | "typing.Type" if args.len() == 1 => {
             let instance = parse_plugin_type_expr(db, args[0], context)?;
-            SubclassOfType::try_from_instance(db, instance)
+            SubclassOfType::try_from_instance(db, env, instance)
         }
         "Optional" | "typing.Optional" | "typing_extensions.Optional" if args.len() == 1 => {
             Some(UnionType::from_elements(
                 db,
+                env,
                 [
                     parse_plugin_type_expr(db, args[0], context).unwrap_or_else(Type::unknown),
-                    Type::none(db),
+                    Type::none(db, env),
                 ],
             ))
         }
         "Union" | "typing.Union" | "typing_extensions.Union" if !args.is_empty() => {
             Some(UnionType::from_elements(
                 db,
+                env,
                 args.into_iter().map(|arg| {
                     parse_plugin_type_expr(db, arg, context).unwrap_or_else(Type::unknown)
                 }),
@@ -819,6 +851,7 @@ fn parse_plugin_generic_type_expr<'db>(
         "Literal" | "typing.Literal" | "typing_extensions.Literal" if !args.is_empty() => {
             Some(UnionType::from_elements(
                 db,
+                env,
                 args.into_iter().map(|arg| {
                     parse_plugin_literal_type_arg(db, arg).unwrap_or_else(Type::unknown)
                 }),
@@ -827,23 +860,25 @@ fn parse_plugin_generic_type_expr<'db>(
         "list" | "builtins.list" | "typing.List" if args.len() == 1 => {
             let specialization =
                 [parse_plugin_type_expr(db, args[0], context).unwrap_or_else(Type::unknown)];
-            Some(KnownClass::List.to_specialized_instance(db, &specialization))
+            Some(KnownClass::List.to_specialized_instance(db, env, &specialization))
         }
         "dict" | "builtins.dict" | "typing.Dict" if args.len() == 2 => {
             let specialization = [
                 parse_plugin_type_expr(db, args[0], context).unwrap_or_else(Type::unknown),
                 parse_plugin_type_expr(db, args[1], context).unwrap_or_else(Type::unknown),
             ];
-            Some(KnownClass::Dict.to_specialized_instance(db, &specialization))
+            Some(KnownClass::Dict.to_specialized_instance(db, env, &specialization))
         }
         "tuple" | "builtins.tuple" | "typing.Tuple" if args.len() == 2 && args[1] == "..." => {
             Some(Type::homogeneous_tuple(
                 db,
+                env,
                 parse_plugin_type_expr(db, args[0], context).unwrap_or_else(Type::unknown),
             ))
         }
         "tuple" | "builtins.tuple" | "typing.Tuple" => Some(Type::heterogeneous_tuple(
             db,
+            env,
             args.into_iter()
                 .map(|arg| parse_plugin_type_expr(db, arg, context).unwrap_or_else(Type::unknown)),
         )),
@@ -858,9 +893,10 @@ fn parse_plugin_literal_type_arg<'db>(db: &'db dyn Db, expression: &str) -> Opti
 }
 
 fn parse_plugin_literal_expr<'db>(db: &'db dyn Db, expression: &ast::Expr) -> Option<Type<'db>> {
+    let env = &plugin_program_environment(db);
     Some(match expression {
         ast::Expr::BooleanLiteral(boolean) => Type::bool_literal(boolean.value),
-        ast::Expr::NoneLiteral(_) => Type::none(db),
+        ast::Expr::NoneLiteral(_) => Type::none(db, env),
         ast::Expr::StringLiteral(string) => Type::string_literal(db, string.value.to_str()),
         ast::Expr::BytesLiteral(bytes) => {
             let value = bytes.value.bytes().collect::<Vec<_>>();
@@ -954,6 +990,7 @@ fn parse_plugin_named_tuple_type_expr<'db>(
     expression: &str,
     context: PluginTypeExprContext<'db, '_>,
 ) -> Option<Type<'db>> {
+    let env = &plugin_program_environment(db);
     let arguments = named_tuple_call_arguments(expression)?;
     let parts = split_top_level(arguments, ',');
     let (name, fields_expression) = match parts.as_slice() {
@@ -996,7 +1033,7 @@ fn parse_plugin_named_tuple_type_expr<'db>(
             spec,
         },
     );
-    Some(named_tuple.to_instance(db))
+    Some(named_tuple.to_instance(db, env))
 }
 
 fn named_tuple_call_arguments(expression: &str) -> Option<&str> {
@@ -1016,6 +1053,7 @@ fn parse_plugin_class_type_expr<'db>(
     expression: &str,
     context: PluginTypeExprContext<'db, '_>,
 ) -> Option<Type<'db>> {
+    let env = &plugin_program_environment(db);
     let arguments = class_call_arguments(expression)?;
     let parts = split_top_level(arguments, ',');
     let [name_expression, members_expression, base_expression] = parts.as_slice() else {
@@ -1067,6 +1105,7 @@ fn parse_plugin_class_type_expr<'db>(
     );
     Some(Type::instance(
         db,
+        env,
         ClassType::NonGeneric(ClassLiteral::Dynamic(dynamic_class)),
     ))
 }
@@ -1085,6 +1124,7 @@ fn parse_plugin_project_generic_type_expr<'db>(
     args: Vec<&str>,
     context: PluginTypeExprContext<'db, '_>,
 ) -> Option<Type<'db>> {
+    let env = &plugin_program_environment(db);
     let origin = imported_qualified_name(origin, context).unwrap_or_else(|| origin.to_string());
     let Type::ClassLiteral(class) = resolve_plugin_qualified_type_expr_value(db, &origin)? else {
         return None;
@@ -1102,6 +1142,7 @@ fn parse_plugin_project_generic_type_expr<'db>(
 
     Some(Type::instance(
         db,
+        env,
         class.apply_specialization(db, |generic_context| {
             generic_context.specialize_recursive(db, specialization_args)
         }),
@@ -1144,6 +1185,7 @@ fn resolve_plugin_qualified_type_expr_value<'db>(
     db: &'db dyn Db,
     expression: &str,
 ) -> Option<Type<'db>> {
+    let env = &plugin_program_environment(db);
     let components = expression.split('.').collect::<Vec<_>>();
     if components.len() < 2 || components.iter().any(|component| component.is_empty()) {
         return None;
@@ -1151,15 +1193,22 @@ fn resolve_plugin_qualified_type_expr_value<'db>(
 
     for symbol_start in (1..components.len()).rev() {
         let module_name = ModuleName::new(&components[..symbol_start].join("."))?;
-        let Some(module) = resolve_module_confident(db, &module_name) else {
+        let Some(module) = resolve_module_confident(db, env.python_version(db), &module_name)
+        else {
             continue;
         };
 
-        let mut ty = imported_symbol(db, module.file(db), components[symbol_start], None)
-            .ignore_possibly_undefined()?;
+        let mut ty = imported_symbol(
+            db,
+            env,
+            module.file(db).map(|file| plugin_python_file(db, file)),
+            components[symbol_start],
+            None,
+        )
+        .ignore_possibly_undefined()?;
 
         for member in &components[symbol_start + 1..] {
-            ty = ty.member(db, member).ignore_possibly_undefined()?;
+            ty = ty.member(db, env, member).ignore_possibly_undefined()?;
         }
 
         return Some(ty);
@@ -1169,9 +1218,10 @@ fn resolve_plugin_qualified_type_expr_value<'db>(
 }
 
 fn plugin_annotation_type_from_value<'db>(db: &'db dyn Db, ty: Type<'db>) -> Type<'db> {
+    let env = &plugin_program_environment(db);
     match ty {
-        Type::ClassLiteral(class) => Type::instance(db, class.default_specialization(db)),
-        Type::GenericAlias(alias) => Type::instance(db, ClassType::from(alias)),
+        Type::ClassLiteral(class) => Type::instance(db, env, class.default_specialization(db)),
+        Type::GenericAlias(alias) => Type::instance(db, env, ClassType::from(alias)),
         _ => ty,
     }
 }
@@ -1298,7 +1348,7 @@ pub(crate) fn plugin_semantic_context(
     file: File,
     speculative: bool,
 ) -> protocol::SemanticContext {
-    let module = file_to_module(db, file)
+    let module = file_to_module(db, plugin_python_file(db, file))
         .map(|module| module.name(db).to_string())
         .unwrap_or_default();
 
@@ -1355,6 +1405,7 @@ impl<'db> PluginCallee<'db> {
 /// Only functions, bound methods, and class constructors are routed; other callables are left
 /// untouched.
 fn plugin_callee<'db>(db: &'db dyn Db, callable_type: Type<'db>) -> Option<PluginCallee<'db>> {
+    let env = &plugin_program_environment(db);
     match callable_type {
         Type::FunctionLiteral(function) => Some(PluginCallee::Callable {
             qualified_name: function_qualified_name(db, function),
@@ -1368,7 +1419,7 @@ fn plugin_callee<'db>(db: &'db dyn Db, callable_type: Type<'db>) -> Option<Plugi
         }),
         Type::ClassLiteral(class) => Some(PluginCallee::Constructor {
             qualified_name: class.qualified_name(db).to_string(),
-            instance_ty: class.to_non_generic_instance(db),
+            instance_ty: class.to_non_generic_instance(db, env),
         }),
         _ => None,
     }
@@ -1378,7 +1429,8 @@ fn plugin_callee<'db>(db: &'db dyn Db, callable_type: Type<'db>) -> Option<Plugi
 fn function_qualified_name<'db>(db: &'db dyn Db, function: FunctionType<'db>) -> String {
     let file = function.file(db);
     let file_scope_id = function.last_definition(db).scope(db).file_scope_id(db);
-    let mut components = qualified_name_components_from_scope(db, file, file_scope_id, 0);
+    let mut components =
+        qualified_name_components_from_scope(db, plugin_python_file(db, file), file_scope_id, 0);
     components.push(function.name(db).to_string());
     components.join(".")
 }
@@ -1467,9 +1519,10 @@ fn callee_receiver_is_subclass_of(
     callee: &PluginCallee<'_>,
     base_qualified_name: &str,
 ) -> bool {
+    let env = &plugin_program_environment(db);
     let Some(receiver_class) = callee
         .receiver_ty()
-        .and_then(|receiver| receiver.nominal_class(db))
+        .and_then(|receiver| receiver.nominal_class(db, env))
     else {
         return false;
     };
@@ -1624,7 +1677,7 @@ pub(crate) fn plugin_adjusted_call_return<'db>(
             &patch.return_type,
             PluginTypeExprContext {
                 self_type: callee.receiver_ty(),
-                scope: Some(global_scope(db, file)),
+                scope: Some(global_scope(db, plugin_python_file(db, file))),
                 virtual_types,
                 ..PluginTypeExprContext::default()
             },
@@ -1645,8 +1698,9 @@ pub(crate) fn plugin_mutation_diagnostics<'db>(
     source_range: TextRange,
     speculative: bool,
 ) -> Result<Vec<protocol::PluginDiagnostic>, PluginRuntimeDiagnostic> {
+    let env = &plugin_program_environment(db);
     let semantic_plugins = Program::get(db).semantic_plugins(db);
-    let Some(receiver_class) = receiver_ty.nominal_class(db) else {
+    let Some(receiver_class) = receiver_ty.nominal_class(db, env) else {
         return Ok(Vec::new());
     };
     let receiver_qualified_name = receiver_class.qualified_name(db).to_string();
@@ -1764,7 +1818,8 @@ fn plugin_receiver_summary_class<'db>(
     db: &'db dyn Db,
     receiver_ty: Type<'db>,
 ) -> Option<ClassType<'db>> {
-    let receiver_class = receiver_ty.nominal_class(db)?;
+    let env = &plugin_program_environment(db);
+    let receiver_class = receiver_ty.nominal_class(db, env)?;
     if receiver_class.is_generic() {
         return Some(receiver_class);
     }
@@ -1780,7 +1835,8 @@ fn plugin_receiver_summary_class<'db>(
 }
 
 fn plugin_qualified_type_expr_from_type<'db>(db: &'db dyn Db, ty: Type<'db>) -> protocol::TypeExpr {
-    if let Some(class) = ty.nominal_class(db) {
+    let env = &plugin_program_environment(db);
+    if let Some(class) = ty.nominal_class(db, env) {
         if let ClassLiteral::Dynamic(dynamic_class) = class.class_literal(db)
             && let Some(identity) = dynamic_class.plugin_virtual_identity(db)
         {
@@ -1936,7 +1992,7 @@ fn plugin_symbol_source(
     let end = index.line_column(range.end(), source.as_str());
 
     protocol::SymbolSource {
-        module: file_to_module(db, file)
+        module: file_to_module(db, plugin_python_file(db, file))
             .map(|module| module.name(db).to_string())
             .unwrap_or_default()
             .into(),
@@ -2054,7 +2110,7 @@ pub(crate) fn plugin_callable_type_from_protocol_signature_in_class<'db>(
         signature,
         PluginTypeExprContext {
             self_class: Some(class),
-            scope: Some(global_scope(db, class.file(db))),
+            scope: Some(global_scope(db, plugin_python_file(db, class.file(db)))),
             virtual_types,
             ..PluginTypeExprContext::default()
         },
@@ -2122,7 +2178,7 @@ mod tests {
 
     fn parse_and_display_with_db(db: &TestDb, expression: &str) -> String {
         plugin_type_expr_to_type(db, &protocol::TypeExpr::annotation(expression))
-            .display(db)
+            .display(db, &db.program_environment())
             .to_string()
     }
 
@@ -2177,24 +2233,24 @@ mod tests {
             ),
             file,
         );
-        let display = ty.display(&db).to_string();
+        let display = ty.display(&db, &db.program_environment()).to_string();
         assert!(
             display.contains("BookRow"),
             "expected a named tuple display, got {display}"
         );
         assert_eq!(
-            ty.member(&db, "title")
+            ty.member(&db, &db.program_environment(), "title")
                 .place
                 .expect_type()
-                .display(&db)
+                .display(&db, &db.program_environment())
                 .to_string(),
             "str"
         );
         assert_eq!(
-            ty.member(&db, "pages")
+            ty.member(&db, &db.program_environment(), "pages")
                 .place
                 .expect_type()
-                .display(&db)
+                .display(&db, &db.program_environment())
                 .to_string(),
             "int | None"
         );
@@ -2251,7 +2307,9 @@ mod tests {
             file,
             virtual_types.as_ref(),
         );
-        let display = query_set.display(&db).to_string();
+        let display = query_set
+            .display(&db, &db.program_environment())
+            .to_string();
         assert!(
             display.contains("TypedDict"),
             "expected reusable virtual TypedDict row in {display}"
@@ -2271,10 +2329,10 @@ mod tests {
         );
         assert_eq!(
             named_row
-                .member(&db, "title")
+                .member(&db, &db.program_environment(), "title")
                 .place
                 .expect_type()
-                .display(&db)
+                .display(&db, &db.program_environment())
                 .to_string(),
             "str"
         );
@@ -2334,10 +2392,10 @@ mod tests {
             virtual_types.as_ref(),
         );
         let create = manager
-            .member(&db, "create")
+            .member(&db, &db.program_environment(), "create")
             .place
             .expect_type()
-            .display(&db)
+            .display(&db, &db.program_environment())
             .to_string();
         assert!(
             create.contains("Book"),
@@ -2345,10 +2403,10 @@ mod tests {
         );
         assert_eq!(
             manager
-                .member(&db, "score")
+                .member(&db, &db.program_environment(), "score")
                 .place
                 .expect_type()
-                .display(&db)
+                .display(&db, &db.program_environment())
                 .to_string(),
             "int"
         );
@@ -2387,13 +2445,18 @@ mod tests {
             &protocol::TypeExpr::annotation(r#"Class("AnnotatedBook", {"score": int}, app.Book)"#),
             file,
         );
-        assert_eq!(annotated.display(&db).to_string(), "AnnotatedBook");
         assert_eq!(
             annotated
-                .member(&db, "score")
+                .display(&db, &db.program_environment())
+                .to_string(),
+            "AnnotatedBook"
+        );
+        assert_eq!(
+            annotated
+                .member(&db, &db.program_environment(), "score")
                 .place
                 .expect_type()
-                .display(&db)
+                .display(&db, &db.program_environment())
                 .to_string(),
             "int"
         );
@@ -2407,7 +2470,7 @@ mod tests {
             models_file,
         );
         assert_eq!(
-            queryset.display(&db).to_string(),
+            queryset.display(&db, &db.program_environment()).to_string(),
             "QuerySet[Book, MiniDjangoAnnotatedRow]"
         );
 
@@ -2476,28 +2539,33 @@ mod tests {
             assert!(serialized.snapshot.is_some());
             let restored = plugin_type_expr_to_type_in_file(&db, &serialized, file);
             let (_, specialization) = restored
-                .class_specialization(&db)
+                .class_specialization(&db, &db.program_environment())
                 .expect("specialized QuerySet");
             let row = specialization.types(&db)[1];
 
             if expression.contains("TypedDict") {
                 let Type::TypedDict(row) = row else {
-                    panic!("expected TypedDict row, got {}", row.display(&db));
+                    panic!(
+                        "expected TypedDict row, got {}",
+                        row.display(&db, &db.program_environment())
+                    );
                 };
                 assert_eq!(
                     row.item(&db, "title")
                         .expect("title field")
                         .declared_ty
-                        .display(&db)
+                        .display(&db, &db.program_environment())
                         .to_string(),
                     "str"
                 );
             } else {
-                let tuple = row.tuple_instance_spec(&db).expect("tuple row");
+                let tuple = row
+                    .tuple_instance_spec(&db, &db.program_environment())
+                    .expect("tuple row");
                 assert_eq!(
                     tuple
                         .iter_element_types(&db)
-                        .map(|element| element.display(&db).to_string())
+                        .map(|element| element.display(&db, &db.program_environment()).to_string())
                         .collect::<Vec<_>>(),
                     ["str", "int"]
                 );
@@ -2514,15 +2582,15 @@ mod tests {
         let named_serialized = plugin_qualified_type_expr_from_type(&db, named_original);
         let named_restored = plugin_type_expr_to_type_in_file(&db, &named_serialized, file);
         let (_, specialization) = named_restored
-            .class_specialization(&db)
+            .class_specialization(&db, &db.program_environment())
             .expect("specialized QuerySet");
         let named_row = specialization.types(&db)[1];
         assert_eq!(
             named_row
-                .member(&db, "pages")
+                .member(&db, &db.program_environment(), "pages")
                 .place
                 .expect_type()
-                .display(&db)
+                .display(&db, &db.program_environment())
                 .to_string(),
             "int"
         );

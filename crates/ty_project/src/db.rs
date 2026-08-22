@@ -20,6 +20,7 @@ use ruff_db::diagnostic::Diagnostic;
 use ruff_db::files::{File, Files};
 use ruff_db::system::System;
 use ruff_db::vendored::VendoredFileSystem;
+use ruff_python_ast::PythonVersion;
 use salsa::{Database, Event, Setter};
 use ty_module_resolver::SearchPaths;
 #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
@@ -37,6 +38,9 @@ mod changes;
 
 #[salsa::db]
 pub trait Db: SemanticDb {
+    /// Returns the Python version for files in the primary environment.
+    fn python_version(&self) -> PythonVersion;
+
     fn project(&self) -> Project;
 
     fn dyn_clone(&self) -> Box<dyn Db>;
@@ -319,7 +323,7 @@ impl ProjectDatabase {
         self.files.freeze();
     }
 
-    /// See [`Project::freeze_open_files`].
+    /// Permanently marks the project as never having open files.
     pub fn freeze_open_files(&mut self) {
         let project = self.project();
         project.freeze_open_files(self);
@@ -833,10 +837,6 @@ impl SourceDb for ProjectDatabase {
     fn files(&self) -> &Files {
         &self.files
     }
-
-    fn python_version(&self) -> ruff_python_ast::PythonVersion {
-        Program::get(self).python_version(self)
-    }
 }
 
 #[salsa::db]
@@ -844,6 +844,10 @@ impl salsa::Database for ProjectDatabase {}
 
 #[salsa::db]
 impl Db for ProjectDatabase {
+    fn python_version(&self) -> PythonVersion {
+        Program::get(self).python_version(self)
+    }
+
     fn project(&self) -> Project {
         self.project.unwrap()
     }
@@ -855,7 +859,7 @@ impl Db for ProjectDatabase {
 
 #[cfg(feature = "format")]
 mod format {
-    use crate::ProjectDatabase;
+    use crate::{Db as _, ProjectDatabase};
     use ruff_db::files::File;
     use ruff_python_formatter::{Db as FormatDb, PyFormatOptions};
 
@@ -863,7 +867,7 @@ mod format {
     impl FormatDb for ProjectDatabase {
         fn format_options(&self, file: File) -> PyFormatOptions {
             let source_ty = file.source_type(self);
-            PyFormatOptions::from_source_type(source_ty)
+            PyFormatOptions::from_source_type(source_ty).with_target_version(self.python_version())
         }
     }
 }
@@ -887,7 +891,7 @@ pub(crate) mod testing {
     };
     use ty_python_semantic::lint::{LintRegistry, RuleSelection};
     use ty_python_semantic::{
-        AnalysisSettings, PythonVersionWithSource, SemanticPluginRuntimeError,
+        AnalysisSettings, ProgramEnvironment, PythonVersionWithSource, SemanticPluginRuntimeError,
     };
 
     use crate::db::Db;
@@ -968,6 +972,14 @@ pub(crate) mod testing {
     }
 
     impl TestDb {
+        pub fn python_version(&self) -> PythonVersion {
+            Program::get(self).python_version(self)
+        }
+
+        pub fn program_environment(&self) -> ProgramEnvironment<'_> {
+            ProgramEnvironment::from_program(self.python_version())
+        }
+
         /// Takes the salsa events.
         pub fn take_salsa_events(&mut self) -> Vec<salsa::Event> {
             let mut events = self.events.lock().unwrap();
@@ -998,10 +1010,6 @@ pub(crate) mod testing {
 
         fn files(&self) -> &Files {
             &self.files
-        }
-
-        fn python_version(&self) -> ruff_python_ast::PythonVersion {
-            Program::get(self).python_version(self)
         }
     }
 
@@ -1061,6 +1069,10 @@ pub(crate) mod testing {
 
     #[salsa::db]
     impl Db for TestDb {
+        fn python_version(&self) -> PythonVersion {
+            Program::get(self).python_version(self)
+        }
+
         fn project(&self) -> Project {
             self.project.unwrap()
         }
@@ -1085,7 +1097,7 @@ mod tests {
         CallRequest, PluginRequest, PluginResponse, SemanticContext, TypeExpr,
     };
 
-    use crate::{ProjectDatabase, ProjectMetadata};
+    use crate::{Db as _, ProjectDatabase, ProjectMetadata};
 
     #[test]
     fn frozen_inputs_support_a_one_shot_check() -> anyhow::Result<()> {
@@ -1129,7 +1141,7 @@ mod tests {
         let metadata = ProjectMetadata::discover(&project, &system)?;
         let db = ProjectDatabase::fallible(metadata, system)?;
 
-        let modules = list_modules(&db);
+        let modules = list_modules(&db, db.python_version());
         assert!(
             modules
                 .iter()

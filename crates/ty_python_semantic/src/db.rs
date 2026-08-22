@@ -71,13 +71,13 @@ pub(crate) mod tests {
     use anyhow::Context;
     use ty_python_core::platform::PythonPlatform;
 
-    use crate::{check_file_unwrap, default_lint_registry};
-    use ruff_db::Db as SourceDb;
+    use crate::{ProgramEnvironment, check_file_unwrap, default_lint_registry};
     use ruff_db::files::Files;
     use ruff_db::system::{
         DbWithTestSystem, DbWithWritableSystem as _, System, SystemPath, SystemPathBuf, TestSystem,
     };
     use ruff_db::vendored::VendoredFileSystem;
+    use ruff_db::{Db as SourceDb, PythonFile};
     use ruff_python_ast::PythonVersion;
     use ty_module_resolver::{Db as ModuleResolverDb, SearchPathSettings, SearchPaths};
     use ty_python_core::program::{
@@ -105,7 +105,7 @@ pub(crate) mod tests {
     }
 
     impl TestDb {
-        pub(crate) fn new() -> Self {
+        fn new() -> Self {
             let events = Events::default();
             Self {
                 storage: salsa::Storage::new(Some(Box::new({
@@ -125,6 +125,14 @@ pub(crate) mod tests {
                 semantic_plugin_executors: Arc::default(),
                 open_files: rustc_hash::FxHashSet::default(),
             }
+        }
+
+        pub(crate) fn python_version(&self) -> PythonVersion {
+            Program::get(self).python_version(self)
+        }
+
+        pub(crate) fn program_environment(&self) -> ProgramEnvironment<'_> {
+            ProgramEnvironment::from_program(self.python_version())
         }
 
         /// Marks `file` as open in the editor.
@@ -187,10 +195,6 @@ pub(crate) mod tests {
         fn files(&self) -> &Files {
             &self.files
         }
-
-        fn python_version(&self) -> PythonVersion {
-            Program::get(self).python_version(self)
-        }
     }
 
     #[salsa::db]
@@ -207,7 +211,7 @@ pub(crate) mod tests {
                 return Vec::new();
             }
 
-            check_file_unwrap(self, file)
+            check_file_unwrap(self, PythonFile::new(self, file, self.python_version()))
         }
 
         fn rule_selection(&self, _file: File) -> &RuleSelection {
