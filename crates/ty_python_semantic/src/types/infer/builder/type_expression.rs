@@ -1071,7 +1071,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
     pub(super) fn infer_tuple_type_expression(
         &mut self,
         tuple: &ast::ExprSubscript,
-    ) -> Option<TupleType<'db>> {
+    ) -> TupleType<'db> {
         let db = self.db();
         let env = self.program_environment();
         match &*tuple.slice {
@@ -1099,8 +1099,8 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                         );
                     }
                     let result = TupleType::homogeneous(db, env, element_ty);
-                    self.store_expression_type(&tuple.slice, Type::tuple(Some(result)));
-                    return Some(result);
+                    self.store_expression_type(&tuple.slice, Type::tuple(result));
+                    return result;
                 }
 
                 let mut element_types = TupleSpecBuilder::with_capacity(elements.len());
@@ -1326,8 +1326,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                         if class_literal.is_tuple(self.db()) {
                             let class_type = self
                                 .infer_tuple_type_expression(subscript)
-                                .map(|tuple_type| tuple_type.to_class_type(self.db()))
-                                .unwrap_or_else(|| class_literal.default_specialization(db));
+                                .to_class_type(self.db());
                             SubclassOfType::from(db, env, class_type)
                         } else {
                             match class_literal.generic_context(db) {
@@ -1441,7 +1440,10 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         // instead of two. So until we properly support these, specialize all remaining type
         // variables with a `@Todo` type (since we don't know which of the type arguments
         // belongs to the remaining type variables).
-        if any_over_type(db, env, value_ty, true, |ty| ty.is_divergent()) {
+        //
+        // A lazily inferred class member can contain its own unrelated recursive type, so only
+        // inspect the alias structure and generic arguments when checking whether it is recursive.
+        if any_over_type(db, env, value_ty, false, |ty| ty.is_divergent()) {
             let value_ty = value_ty.apply_specialization(
                 db,
                 generic_context.specialize(

@@ -1,5 +1,6 @@
 use crate::Db;
 use crate::glob::{ExcludeFilter, IncludeExcludeFilter, IncludeFilter, PortableGlobKind};
+use crate::metadata::pyproject::{ResolveRequiresPythonError, resolve_requires_python_lower_bound};
 use crate::metadata::python_version::SupportedPythonVersion;
 use crate::metadata::settings::{
     OverrideSettings, PluginEntrySettings, PluginEnvironmentFingerprint, PluginRuntimeSettings,
@@ -10,6 +11,7 @@ use super::settings::{Override, Settings, TerminalSettings};
 use crate::metadata::value::{RelativeGlobPattern, RelativePathBuf};
 use anyhow::Context;
 use ordermap::OrderMap;
+use pep440_rs::VersionSpecifiers;
 use ruff_cache::{CacheKey, CacheKeyHasher};
 use ruff_db::RustDoc;
 use ruff_db::diagnostic::{
@@ -128,18 +130,33 @@ pub struct Options {
 }
 
 impl Options {
-    pub(super) fn file_options(&self) -> FileOptions {
-        FileOptions {
-            rules: self.rules.clone(),
-            analysis: self.analysis.clone(),
-        }
-    }
-
     pub fn from_toml_str(content: &str, source: ValueSource) -> Result<Self, TyTomlError> {
         let _guard = ValueSourceGuard::new(source, true);
         let mut options: Self = toml::from_str(content)?;
         options.prioritize_all_selectors();
         Ok(options)
+    }
+
+    /// Infers the Python version from `requires-python` unless it was configured explicitly.
+    pub(crate) fn apply_requires_python(
+        &mut self,
+        requires_python: Option<&RangedValue<VersionSpecifiers>>,
+    ) -> Result<(), ResolveRequiresPythonError> {
+        if self
+            .environment
+            .as_ref()
+            .is_some_and(|environment| environment.python_version.is_some())
+        {
+            return Ok(());
+        }
+
+        if let Some(requires_python) = requires_python
+            && let Some(python_version) = resolve_requires_python_lower_bound(requires_python)?
+        {
+            self.environment.get_or_insert_default().python_version = Some(python_version);
+        }
+
+        Ok(())
     }
 
     /// Ensures that the `all` selector is applied before per-rule selectors
@@ -181,9 +198,10 @@ impl Options {
         Self::deserialize(deserializer)
     }
 
+    /// Resolve configured paths and discover defaults according to the project or script context.
     pub(crate) fn to_program_settings<Strategy: MisconfigurationStrategy>(
         &self,
-        project_root: &SystemPath,
+        context: OptionsContext<'_>,
         project_name: &str,
         system: &dyn System,
         vendored: &VendoredFileSystem,
@@ -213,15 +231,20 @@ impl Options {
                 ValueSource::File(path) => {
                     SysPrefixPathOrigin::ConfigFileSetting(path.clone(), python_path.range())
                 }
+                ValueSource::ScriptMetadata(_) => SysPrefixPathOrigin::ScriptMetadataSetting,
                 ValueSource::Editor => SysPrefixPathOrigin::Editor,
                 ValueSource::UvWorkspace => SysPrefixPathOrigin::UvWorkspace,
             };
 
-            PythonEnvironment::new(python_path.absolute(project_root, system), origin, system)
-                .map_err(anyhow::Error::from)
-                .map(Some)
+            PythonEnvironment::new(
+                python_path.absolute(context.configuration_root(), system),
+                origin,
+                system,
+            )
+            .map_err(anyhow::Error::from)
+            .map(Some)
         } else {
-            PythonEnvironment::discover(project_root, system)
+            PythonEnvironment::discover(context.project_root(), system)
                 .context("Failed to discover local Python environment")
         };
 
@@ -296,7 +319,7 @@ impl Options {
 
         // Safe mode is handled inside this function, so we just assume this can't fail
         let search_paths = strategy.to_anyhow(self.to_search_paths(
-            project_root,
+            context,
             project_name,
             site_packages_paths,
             real_stdlib_path,
@@ -312,7 +335,7 @@ impl Options {
 
         let plugins = self.plugins.or_default();
         let semantic_plugins = plugins.semantic_environment_for_program_settings(
-            project_root,
+            context.configuration_root(),
             system,
             &plugin_site_packages,
         );
@@ -331,7 +354,7 @@ impl Options {
     #[expect(clippy::too_many_arguments)]
     fn to_search_paths<Strategy: MisconfigurationStrategy>(
         &self,
-        project_root: &SystemPath,
+        context: OptionsContext<'_>,
         project_name: &str,
         site_packages_paths: SitePackagesPaths,
         real_stdlib_path: Option<SystemPathBuf>,
@@ -344,9 +367,10 @@ impl Options {
         let environment_roots = if let Some(roots) = environment.root.as_deref() {
             roots
                 .iter()
-                .map(|root| root.absolute(project_root, system))
+                .map(|root| root.absolute(context.configuration_root(), system))
                 .collect()
         } else {
+            let project_root = context.configuration_root();
             let mut roots = vec![];
             let is_package = |dir: &SystemPath| {
                 system.is_file(&dir.join("__init__.py"))
@@ -402,7 +426,7 @@ impl Options {
             .as_deref()
             .unwrap_or_default()
             .iter()
-            .map(|path| path.absolute(project_root, system))
+            .map(|path| path.absolute(context.configuration_root(), system))
             .collect();
 
         // read all the paths off the PYTHONPATH environment variable, check
@@ -447,7 +471,7 @@ impl Options {
             .plugins
             .or_default()
             .active_stub_overlay_paths_for_program_settings(
-                project_root,
+                context.configuration_root(),
                 system,
                 &plugin_site_packages,
             );
@@ -459,7 +483,7 @@ impl Options {
             custom_typeshed: environment
                 .typeshed
                 .as_ref()
-                .map(|path| path.absolute(project_root, system)),
+                .map(|path| path.absolute(context.configuration_root(), system)),
             site_packages_paths: site_packages_paths.into_vec(),
             real_stdlib_path,
         };
@@ -470,7 +494,7 @@ impl Options {
     pub(crate) fn to_settings<Strategy: MisconfigurationStrategy>(
         &self,
         db: &dyn Db,
-        project_root: &SystemPath,
+        context: OptionsContext<'_>,
         strategy: &Strategy,
     ) -> Result<(Settings, Vec<OptionDiagnostic>), Strategy::Error<ToSettingsError>> {
         let mut diagnostics = Vec::new();
@@ -489,7 +513,7 @@ impl Options {
         let src_options = self.src.or_default();
 
         let src = src_options
-            .to_settings(db, project_root, &mut diagnostics)
+            .to_settings(db, context.configuration_root(), &mut diagnostics)
             .map_err(|err| ToSettingsError {
                 diagnostic: err,
                 output_format: terminal.output_format,
@@ -515,17 +539,18 @@ impl Options {
             };
         let analysis = strategy.fallback(analysis_result, |_| AnalysisSettings::default())?;
 
-        let plugin_site_packages = self.plugin_site_packages(project_root, db.system());
+        let plugin_site_packages =
+            self.plugin_site_packages(context.configuration_root(), db.system());
         let plugins = self.plugins.or_default().to_settings(
             db,
-            project_root,
+            context.configuration_root(),
             db.system(),
             &plugin_site_packages,
             &mut diagnostics,
         );
 
         let overrides = self
-            .to_overrides_settings(db, project_root, &mut diagnostics)
+            .to_overrides_settings(db, context.configuration_root(), &mut diagnostics)
             .map_err(|err| ToSettingsError {
                 diagnostic: err,
                 output_format: terminal.output_format,
@@ -557,12 +582,13 @@ impl Options {
                 ValueSource::File(path) => {
                     SysPrefixPathOrigin::ConfigFileSetting(path.clone(), python_path.range())
                 }
+                ValueSource::ScriptMetadata(_) => SysPrefixPathOrigin::ScriptMetadataSetting,
                 ValueSource::Editor => SysPrefixPathOrigin::Editor,
                 ValueSource::UvWorkspace => SysPrefixPathOrigin::UvWorkspace,
             };
             PythonEnvironment::new(python_path.absolute(project_root, system), origin, system).ok()
         } else {
-            PythonEnvironment::discover(project_root, system)
+            PythonEnvironment::discover(Some(project_root), system)
                 .ok()
                 .flatten()
         };
@@ -610,6 +636,29 @@ impl Options {
     }
 }
 
+/// The project or standalone script whose options are being resolved.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum OptionsContext<'a> {
+    Project(&'a SystemPath),
+    /// The directory containing a standalone script, or the working directory for a virtual script.
+    Script(&'a SystemPath),
+}
+
+impl<'a> OptionsContext<'a> {
+    fn configuration_root(self) -> &'a SystemPath {
+        match self {
+            Self::Project(root) | Self::Script(root) => root,
+        }
+    }
+
+    fn project_root(self) -> Option<&'a SystemPath> {
+        match self {
+            Self::Project(root) => Some(root),
+            Self::Script(_) => None,
+        }
+    }
+}
+
 fn python_version_from_config(
     ranged_version: &RangedValue<SupportedPythonVersion>,
 ) -> PythonVersionWithSource {
@@ -619,6 +668,9 @@ fn python_version_from_config(
             ValueSource::Cli => PythonVersionSource::Cli,
             ValueSource::File(path) => PythonVersionSource::ConfigFile(
                 PythonVersionFileSource::new(path.clone(), ranged_version.range()),
+            ),
+            ValueSource::ScriptMetadata(file) => PythonVersionSource::ScriptMetadata(
+                Span::from(*file).with_optional_range(ranged_version.range()),
             ),
             ValueSource::Editor => PythonVersionSource::Editor,
             ValueSource::UvWorkspace => PythonVersionSource::UvWorkspace,
@@ -712,6 +764,12 @@ fn unsupported_inferred_python_version_diagnostic(
             .sub(SubDiagnostic::new(
                 SubDiagnosticSeverity::Info,
                 "The version was inferred from a configuration file.",
+            )),
+        source @ PythonVersionSource::ScriptMetadata(_) => diagnostic
+            .with_annotation(inferred_python_version_source_annotation(db, source))
+            .sub(SubDiagnostic::new(
+                SubDiagnosticSeverity::Info,
+                "The version was inferred from script metadata.",
             )),
         source @ PythonVersionSource::PyvenvCfgFile(_) => diagnostic
             .with_annotation(inferred_python_version_source_annotation(db, source))
@@ -827,6 +885,9 @@ pub struct EnvironmentOptions {
     /// * `./src`
     /// * `./<project-name>` (if a `./<project-name>/<project-name>` directory exists)
     /// * `./python`
+    ///
+    /// Scripts with inline metadata have no first-party roots by default because they are
+    /// single-file programs. Set `root = ["."]` to allow importing local modules.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[option(
         default = r#"null"#,
@@ -855,6 +916,9 @@ pub struct EnvironmentOptions {
     /// 2. Check for an activated or configured Python environment
     ///    and attempt to infer the Python version of that environment
     /// 3. Fall back to the default value (see below)
+    ///
+    /// Scripts with inline metadata use their `requires-python` field instead of
+    /// `project.requires-python`. They do not inherit the Python version of the enclosing project.
     ///
     /// For some language features, ty can also understand conditionals based on comparisons
     /// with `sys.version_info`. These are commonly found in typeshed, for example,
@@ -939,6 +1003,10 @@ pub struct EnvironmentOptions {
     /// your environment from an activated Conda environment, and will look for a `.venv` directory
     /// in the project root if none of the above apply. Failing that, ty will look for a `python3`
     /// or `python` binary available in `PATH`.
+    ///
+    /// Scripts with inline metadata use their own Python environment. They can use an explicitly
+    /// configured environment, an activated environment, or an environment selected by the editor.
+    /// Unlike projects, they do not automatically use a `.venv` directory.
     ///
     /// [`sys.prefix`]: https://docs.python.org/3/library/sys.html#sys.prefix
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1155,6 +1223,7 @@ impl Rules {
             let source = rule_name.source();
             let lint_source = match source {
                 ValueSource::File(_) => LintSource::File,
+                ValueSource::ScriptMetadata(_) => LintSource::ScriptMetadata,
                 ValueSource::Cli => LintSource::Cli,
                 ValueSource::Editor => LintSource::Editor,
                 ValueSource::UvWorkspace => LintSource::UvWorkspace,
@@ -1181,12 +1250,9 @@ impl Rules {
                     set_lint_level(lint);
                 }
                 Err(error) => {
-                    // `system_path_to_file` can return `Err` if the file was deleted since the configuration
-                    // was read. This should be rare and it should be okay to default to not showing a configuration
-                    // file in that case.
-                    let file = source
-                        .file()
-                        .and_then(|path| system_path_to_file(db, path).ok());
+                    // The file may have been deleted since its configuration was read. In that
+                    // case, report the diagnostic without a configuration-file annotation.
+                    let file = source.file(db);
 
                     // TODO: Add a note if the value was configured on the CLI
                     let diagnostic = OptionDiagnostic::new(
@@ -1263,14 +1329,12 @@ fn build_include_filter(
             ));
 
             // Add source annotation if we have source information
-            if let Some(source_file) = include_patterns.source().file() {
-                if let Ok(file) = system_path_to_file(db, source_file) {
-                    let annotation = Annotation::primary(
-                        Span::from(file).with_optional_range(include_patterns.range()),
-                    )
-                    .message("This `include` list is empty");
-                    diagnostic = diagnostic.with_annotation(Some(annotation));
-                }
+            if let Some(file) = include_patterns.source().file(db) {
+                let annotation = Annotation::primary(
+                    Span::from(file).with_optional_range(include_patterns.range()),
+                )
+                .message("This `include` list is empty");
+                diagnostic = diagnostic.with_annotation(Some(annotation));
             }
 
             diagnostics.push(diagnostic);
@@ -3161,6 +3225,10 @@ fn plugin_diagnostic_at_value<T>(
             value.range(),
             "plugin configuration",
         )),
+        ValueSource::ScriptMetadata(file) => diagnostic.with_annotation(Some(
+            Annotation::primary(Span::from(*file).with_optional_range(value.range()))
+                .message("plugin configuration"),
+        )),
         ValueSource::Cli => diagnostic.sub(SubDiagnostic::new(
             SubDiagnosticSeverity::Info,
             "The plugin option was specified on the CLI.",
@@ -3188,6 +3256,10 @@ fn plugin_diagnostic_at_relative_path(
         ValueSource::File(file_path) => {
             diagnostic.with_annotation(config_annotation(db, file_path, value.range(), detail))
         }
+        ValueSource::ScriptMetadata(file) => diagnostic.with_annotation(Some(
+            Annotation::primary(Span::from(*file).with_optional_range(value.range()))
+                .message(detail.to_string()),
+        )),
         ValueSource::Cli => diagnostic.sub(SubDiagnostic::new(
             SubDiagnosticSeverity::Info,
             format!("The plugin path was specified on the CLI: {detail}"),
@@ -3469,13 +3541,11 @@ impl ToOverride for RangedValue<OverrideOptions> {
             ));
 
             // Add source annotation if we have source information
-            if let Some(source_file) = self.source().file() {
-                if let Ok(file) = system_path_to_file(db, source_file) {
-                    let annotation =
-                        Annotation::primary(Span::from(file).with_optional_range(self.range()))
-                            .message("This overrides section overrides no settings");
-                    diagnostic = diagnostic.with_annotation(Some(annotation));
-                }
+            if let Some(file) = self.source().file(db) {
+                let annotation =
+                    Annotation::primary(Span::from(file).with_optional_range(self.range()))
+                        .message("This overrides section overrides no settings");
+                diagnostic = diagnostic.with_annotation(Some(annotation));
             }
 
             diagnostics.push(diagnostic);
@@ -3522,13 +3592,11 @@ impl ToOverride for RangedValue<OverrideOptions> {
             ));
 
             // Add source annotation if we have source information
-            if let Some(source_file) = self.source().file() {
-                if let Ok(file) = system_path_to_file(db, source_file) {
-                    let annotation =
-                        Annotation::primary(Span::from(file).with_optional_range(self.range()))
-                            .message("This overrides section applies to all files");
-                    diagnostic = diagnostic.with_annotation(Some(annotation));
-                }
+            if let Some(file) = self.source().file(db) {
+                let annotation =
+                    Annotation::primary(Span::from(file).with_optional_range(self.range()))
+                        .message("This overrides section applies to all files");
+                diagnostic = diagnostic.with_annotation(Some(annotation));
             }
 
             diagnostics.push(diagnostic);
@@ -3593,15 +3661,6 @@ impl ToOverride for RangedValue<OverrideOptions> {
 pub(super) struct InnerOverrideOptions {
     /// Raw rule options as specified in the configuration.
     /// Used when multiple overrides match a file and need to be merged.
-    pub(super) rules: Option<Rules>,
-
-    pub(super) analysis: Option<AnalysisOptions>,
-}
-
-/// The settings that can vary between individual files.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Combine, get_size2::GetSize)]
-pub(super) struct FileOptions {
-    /// Raw rule options, preserved so multiple configuration layers can be merged.
     pub(super) rules: Option<Rules>,
 
     pub(super) analysis: Option<AnalysisOptions>,
@@ -3781,8 +3840,8 @@ impl OptionDiagnostic {
         err: impl Display,
     ) -> Self {
         match value.source() {
-            ValueSource::File(file_path) => {
-                if let Ok(file) = system_path_to_file(db, &**file_path) {
+            ValueSource::File(_) | ValueSource::ScriptMetadata(_) => {
+                if let Some(file) = value.source().file(db) {
                     let concise_message = std::mem::take(&mut self.message);
                     self.with_concise_message(concise_message)
                         .with_message(format_args!("Invalid {value_label}"))
