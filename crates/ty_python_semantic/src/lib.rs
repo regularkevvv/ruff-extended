@@ -59,6 +59,7 @@ mod dunder_all;
 mod fixes;
 pub mod lint;
 pub(crate) mod place;
+pub(crate) mod place_load;
 mod reachability;
 mod semantic_model;
 mod subscript;
