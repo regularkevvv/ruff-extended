@@ -4236,15 +4236,18 @@ impl<'db> Type<'db> {
                     name_str,
                     fallback.ignore_possibly_undefined(),
                 ) {
-                    let result = this.fallback_to_getattr(db, env, name, plugin_field, key.policy(db));
+                    let result =
+                        this.fallback_to_getattr(db, env, name, plugin_field, key.policy(db));
                     let result = result.map_type(|ty| ty.bind_self_typevars(db, env, receiver));
                     return promote_inferred_attribute_class_literals(db, env, result);
                 }
 
                 if fallback.is_undefined()
-                    && let Some(plugin_member) = this.plugin_annotated_instance_member(db, env, name_str)
+                    && let Some(plugin_member) =
+                        this.plugin_annotated_instance_member(db, env, name_str)
                 {
-                    let result = this.fallback_to_getattr(db, env, name, plugin_member, key.policy(db));
+                    let result =
+                        this.fallback_to_getattr(db, env, name, plugin_member, key.policy(db));
                     return promote_inferred_attribute_class_literals(db, env, result);
                 }
 
@@ -4581,7 +4584,8 @@ impl<'db> Type<'db> {
                     .member_lookup_with_policy_and_receiver(db, env, name_str, policy, receiver),
 
                 Type::KnownInstance(KnownInstanceType::Annotated(annotated)) => {
-                    if let Some(plugin_member) = this.plugin_annotated_instance_member(db, env, name_str)
+                    if let Some(plugin_member) =
+                        this.plugin_annotated_instance_member(db, env, name_str)
                     {
                         return promote_inferred_attribute_class_literals(
                             db,

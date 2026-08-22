@@ -9169,9 +9169,9 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             }
         };
 
-        let mut bindings = self
-            .bindings_for_call(call_callable_type)
-            .match_parameters(db, env, &call_arguments);
+        let mut bindings =
+            self.bindings_for_call(call_callable_type)
+                .match_parameters(db, env, &call_arguments);
 
         report_missing_implicit_constructor_call(
             &self.context,

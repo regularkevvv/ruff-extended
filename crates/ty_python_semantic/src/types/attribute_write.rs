@@ -739,7 +739,8 @@ pub(super) fn assignment_attribute_members<'db>(
     } else {
         None
     };
-    let contributed_member = object_ty.plugin_contributed_instance_assignment_member(db, env, attribute);
+    let contributed_member =
+        object_ty.plugin_contributed_instance_assignment_member(db, env, attribute);
     let receiver_fallback = match receiver_fallback {
         Some(member) if member.is_undefined() => contributed_member.or(Some(member)),
         None => contributed_member,

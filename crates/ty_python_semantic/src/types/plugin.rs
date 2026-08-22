@@ -63,12 +63,12 @@ pub(crate) fn plugin_file_path(db: &dyn Db, file: File) -> String {
 /// Plugin requests are project-wide rather than anchored to a single file, so they resolve types
 /// with the program's configured Python version — the one version this code saw before upstream
 /// introduced per-file environments.
-pub(crate) fn plugin_program_environment<'db>(db: &'db dyn Db) -> ProgramEnvironment<'db> {
+pub(crate) fn plugin_program_environment(db: &dyn Db) -> ProgramEnvironment<'_> {
     ProgramEnvironment::from_program(Program::get(db).python_version(db))
 }
 
 /// Pairs `file` with the program's Python version for the file-keyed upstream queries.
-pub(crate) fn plugin_python_file<'db>(db: &'db dyn Db, file: File) -> PythonFile<'db> {
+pub(crate) fn plugin_python_file(db: &dyn Db, file: File) -> PythonFile<'_> {
     PythonFile::new(db, file, Program::get(db).python_version(db))
 }
 
@@ -672,7 +672,9 @@ fn plugin_type_snapshot_to_type<'db>(
             if let Some(variadic) = variadic {
                 let variadic = plugin_type_snapshot_to_type(db, variadic, context)
                     .unwrap_or_else(Type::unknown);
-                Some(Type::tuple(TupleType::mixed(db, env, prefix, variadic, suffix)))
+                Some(Type::tuple(TupleType::mixed(
+                    db, env, prefix, variadic, suffix,
+                )))
             } else {
                 Some(Type::heterogeneous_tuple(
                     db,
@@ -1191,7 +1193,8 @@ fn resolve_plugin_qualified_type_expr_value<'db>(
 
     for symbol_start in (1..components.len()).rev() {
         let module_name = ModuleName::new(&components[..symbol_start].join("."))?;
-        let Some(module) = resolve_module_confident(db, env.python_version(db), &module_name) else {
+        let Some(module) = resolve_module_confident(db, env.python_version(db), &module_name)
+        else {
             continue;
         };
 
@@ -1426,7 +1429,8 @@ fn plugin_callee<'db>(db: &'db dyn Db, callable_type: Type<'db>) -> Option<Plugi
 fn function_qualified_name<'db>(db: &'db dyn Db, function: FunctionType<'db>) -> String {
     let file = function.file(db);
     let file_scope_id = function.last_definition(db).scope(db).file_scope_id(db);
-    let mut components = qualified_name_components_from_scope(db, plugin_python_file(db, file), file_scope_id, 0);
+    let mut components =
+        qualified_name_components_from_scope(db, plugin_python_file(db, file), file_scope_id, 0);
     components.push(function.name(db).to_string());
     components.join(".")
 }
@@ -2303,7 +2307,9 @@ mod tests {
             file,
             virtual_types.as_ref(),
         );
-        let display = query_set.display(&db, &db.program_environment()).to_string();
+        let display = query_set
+            .display(&db, &db.program_environment())
+            .to_string();
         assert!(
             display.contains("TypedDict"),
             "expected reusable virtual TypedDict row in {display}"
@@ -2439,7 +2445,12 @@ mod tests {
             &protocol::TypeExpr::annotation(r#"Class("AnnotatedBook", {"score": int}, app.Book)"#),
             file,
         );
-        assert_eq!(annotated.display(&db, &db.program_environment()).to_string(), "AnnotatedBook");
+        assert_eq!(
+            annotated
+                .display(&db, &db.program_environment())
+                .to_string(),
+            "AnnotatedBook"
+        );
         assert_eq!(
             annotated
                 .member(&db, &db.program_environment(), "score")
@@ -2534,7 +2545,10 @@ mod tests {
 
             if expression.contains("TypedDict") {
                 let Type::TypedDict(row) = row else {
-                    panic!("expected TypedDict row, got {}", row.display(&db, &db.program_environment()));
+                    panic!(
+                        "expected TypedDict row, got {}",
+                        row.display(&db, &db.program_environment())
+                    );
                 };
                 assert_eq!(
                     row.item(&db, "title")
@@ -2545,7 +2559,9 @@ mod tests {
                     "str"
                 );
             } else {
-                let tuple = row.tuple_instance_spec(&db, &db.program_environment()).expect("tuple row");
+                let tuple = row
+                    .tuple_instance_spec(&db, &db.program_environment())
+                    .expect("tuple row");
                 assert_eq!(
                     tuple
                         .iter_element_types(&db)
