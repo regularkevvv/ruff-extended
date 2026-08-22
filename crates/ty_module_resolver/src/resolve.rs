@@ -2186,6 +2186,7 @@ mod tests {
             .with_site_packages_files(&[("foo.py", "")])
             .build();
         let importing_file = system_path_to_file(&db, src.join("main.py")).unwrap();
+        let importing_file = PythonFile::new(&db, importing_file, db.python_version());
 
         let foo = resolve_real_module(&db, importing_file, &ModuleName::new_static("foo").unwrap())
             .unwrap();

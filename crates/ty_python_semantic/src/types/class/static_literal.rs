@@ -6798,7 +6798,7 @@ mod tests {
         class_name: &str,
     ) -> StaticClassLiteral<'db> {
         let file = system_path_to_file(db, path).expect("test file should exist");
-        let module = parsed_module(db, file).load(db);
+        let module = parsed_module(db, PythonFile::new(db, file, db.python_version())).load(db);
         let class_node = module
             .syntax()
             .body
@@ -6808,7 +6808,8 @@ mod tests {
                 (class.name.as_str() == class_name).then_some(class)
             })
             .expect("test class should exist");
-        let definition = semantic_index(db, file).expect_single_definition(class_node);
+        let definition = semantic_index(db, PythonFile::new(db, file, db.python_version()))
+            .expect_single_definition(class_node);
         let ClassLiteral::Static(class) =
             crate::types::infer::original_class_type(db, definition).expect("class type")
         else {
@@ -6979,7 +6980,7 @@ mod tests {
             .iter()
             .find(|field| field.name.as_str() == "title")
             .expect("title field should come from SDK plugin");
-        assert_eq!(title.instance_get_ty.display(&db).to_string(), "str");
+        assert_eq!(title.instance_get_ty.display(&db, &db.program_environment()).to_string(), "str");
         assert!(title.constructor_parameter.is_some());
         assert!(!title.has_default);
 
@@ -6988,7 +6989,7 @@ mod tests {
             .iter()
             .find(|field| field.name.as_str() == "pages")
             .expect("pages field should come from SDK plugin");
-        assert_eq!(pages.instance_get_ty.display(&db).to_string(), "int");
+        assert_eq!(pages.instance_get_ty.display(&db, &db.program_environment()).to_string(), "int");
         assert!(pages.constructor_parameter.is_some());
         assert!(pages.has_default);
 
@@ -7754,11 +7755,11 @@ mod tests {
         )?;
 
         let file = system_path_to_file(&db, "/src/models.py").expect("models.py");
-        let annotated = global_symbol(&db, file, "annotated").place.expect_type();
+        let annotated = global_symbol(&db, PythonFile::new(&db, file, db.python_version()), "annotated").place.expect_type();
         let Type::KnownInstance(KnownInstanceType::Annotated(annotated)) = annotated else {
             panic!("expected an Annotated cast result, got {annotated:?}");
         };
-        assert_eq!(annotated.base(&db).display(&db).to_string(), "Model");
+        assert_eq!(annotated.base(&db).display(&db, &db.program_environment()).to_string(), "Model");
         assert_eq!(annotated.metadata(&db).len(), 1);
         assert!(
             db.check_file(file)
@@ -7941,35 +7942,35 @@ mod tests {
             field
                 .descriptor_class_ty
                 .expect("class descriptor type")
-                .display(&db)
+                .display(&db, &db.program_environment())
                 .to_string(),
             "object"
         );
-        assert_eq!(field.instance_get_ty.display(&db).to_string(), "int");
+        assert_eq!(field.instance_get_ty.display(&db, &db.program_environment()).to_string(), "int");
         assert_eq!(
             field
                 .instance_set_ty
                 .expect("set type")
-                .display(&db)
+                .display(&db, &db.program_environment())
                 .to_string(),
             "str"
         );
         let parameter = plugin_field_constructor_parameter(field).expect("constructor parameter");
-        assert_eq!(parameter.annotated_type().display(&db).to_string(), "str");
+        assert_eq!(parameter.annotated_type().display(&db, &db.program_environment()).to_string(), "str");
 
         let [class_member] = class_members.as_slice() else {
             panic!("expected one class member");
         };
-        assert_eq!(class_member.ty.display(&db).to_string(), "Model");
+        assert_eq!(class_member.ty.display(&db, &db.program_environment()).to_string(), "Model");
         let [instance_member] = instance_members.as_slice() else {
             panic!("expected one instance member");
         };
-        assert_eq!(instance_member.ty.display(&db).to_string(), "list[Model]");
+        assert_eq!(instance_member.ty.display(&db, &db.program_environment()).to_string(), "list[Model]");
         let constructor = constructor.as_ref().expect("constructor patch");
         let [constructor_parameter] = constructor.parameters.as_ref() else {
             panic!("expected one constructor parameter");
         };
-        assert_eq!(constructor_parameter.ty.display(&db).to_string(), "Model");
+        assert_eq!(constructor_parameter.ty.display(&db, &db.program_environment()).to_string(), "Model");
 
         Ok(())
     }
@@ -8061,33 +8062,33 @@ mod tests {
             .iter()
             .find(|field| field.name.as_str() == "value")
             .expect("plugin field");
-        assert_eq!(field.instance_get_ty.display(&db).to_string(), "int");
+        assert_eq!(field.instance_get_ty.display(&db, &db.program_environment()).to_string(), "int");
         assert_eq!(
             field
                 .instance_set_ty
                 .expect("set type")
-                .display(&db)
+                .display(&db, &db.program_environment())
                 .to_string(),
             "str"
         );
         assert_eq!(
             class
-                .class_member(&db, "virtual", MemberLookupPolicy::default())
+                .class_member(&db, &db.program_environment(), "virtual", MemberLookupPolicy::default())
                 .place
                 .raw_type()
                 .expect("virtual class descriptor")
-                .display(&db)
+                .display(&db, &db.program_environment())
                 .to_string(),
             "object"
         );
         let child = static_class_literal(&db, "/src/models.py", "Child");
         assert_eq!(
             child
-                .class_member(&db, "virtual", MemberLookupPolicy::default())
+                .class_member(&db, &db.program_environment(), "virtual", MemberLookupPolicy::default())
                 .place
                 .raw_type()
                 .expect("inherited virtual class descriptor")
-                .display(&db)
+                .display(&db, &db.program_environment())
                 .to_string(),
             "object"
         );
@@ -8364,7 +8365,7 @@ mod tests {
                 .find(|field| field.name.as_str() == name)
                 .unwrap_or_else(|| panic!("expected field `{name}`"))
                 .instance_get_ty
-                .display(&db)
+                .display(&db, &db.program_environment())
                 .to_string()
         };
 
@@ -8386,7 +8387,7 @@ mod tests {
                 .find(|member| member.name.as_str() == name)
                 .unwrap_or_else(|| panic!("expected `{name}` manager"))
                 .ty
-                .display(&db)
+                .display(&db, &db.program_environment())
                 .to_string()
         };
         assert_eq!(manager_type("objects"), "Manager");
@@ -8497,7 +8498,7 @@ mod tests {
                 .find(|field| field.name.as_str() == name)
                 .unwrap_or_else(|| panic!("expected field `{name}`"))
                 .instance_get_ty
-                .display(&db)
+                .display(&db, &db.program_environment())
                 .to_string()
         };
         assert_eq!(field_type("title"), "str");
@@ -8512,7 +8513,7 @@ mod tests {
                 .find(|member| member.name.as_str() == name)
                 .unwrap_or_else(|| panic!("expected `{name}` manager"))
                 .ty
-                .display(&db)
+                .display(&db, &db.program_environment())
                 .to_string()
         };
         assert_eq!(manager_type("objects"), "Manager");
@@ -8520,29 +8521,29 @@ mod tests {
         assert_eq!(manager_type("published"), "Manager");
 
         let file = system_path_to_file(&db, "/src/models.py").expect("models.py");
-        let annotate_method_ty = global_symbol(&db, file, "annotate_method_probe")
+        let annotate_method_ty = global_symbol(&db, PythonFile::new(&db, file, db.python_version()), "annotate_method_probe")
             .place
             .expect_type()
-            .display(&db)
+            .display(&db, &db.program_environment())
             .to_string();
         assert!(
             annotate_method_ty != "Unknown",
             "Book.objects.annotate should resolve to a callable, got {annotate_method_ty}"
         );
-        let annotated_probe_ty = global_symbol(&db, file, "annotated_probe")
+        let annotated_probe_ty = global_symbol(&db, PythonFile::new(&db, file, db.python_version()), "annotated_probe")
             .place
             .expect_type()
-            .display(&db)
+            .display(&db, &db.program_environment())
             .to_string();
         let observed_annotate_returns = annotate_returns.lock().unwrap().clone();
         assert_eq!(
             annotated_probe_ty, "MiniDjangoAnnotatedRow",
             "observed annotate returns: {observed_annotate_returns:#?}"
         );
-        let annotated_score_ty = global_symbol(&db, file, "annotated_score_probe")
+        let annotated_score_ty = global_symbol(&db, PythonFile::new(&db, file, db.python_version()), "annotated_score_probe")
             .place
             .expect_type()
-            .display(&db)
+            .display(&db, &db.program_environment())
             .to_string();
         assert!(
             matches!(annotated_score_ty.as_str(), "int" | "Literal[1]"),

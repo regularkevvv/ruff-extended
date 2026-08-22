@@ -565,7 +565,7 @@ fn plugin_type_expr_to_type_in_file<'db>(
         type_expr,
         PluginTypeExprContext {
             self_class: None,
-            scope: Some(global_scope(db, file)),
+            scope: Some(global_scope(db, plugin_python_file(db, file))),
             ..PluginTypeExprContext::default()
         },
     )
@@ -2174,7 +2174,7 @@ mod tests {
 
     fn parse_and_display_with_db(db: &TestDb, expression: &str) -> String {
         plugin_type_expr_to_type(db, &protocol::TypeExpr::annotation(expression))
-            .display(db)
+            .display(db, &db.program_environment())
             .to_string()
     }
 
@@ -2229,24 +2229,24 @@ mod tests {
             ),
             file,
         );
-        let display = ty.display(&db).to_string();
+        let display = ty.display(&db, &db.program_environment()).to_string();
         assert!(
             display.contains("BookRow"),
             "expected a named tuple display, got {display}"
         );
         assert_eq!(
-            ty.member(&db, "title")
+            ty.member(&db, &db.program_environment(), "title")
                 .place
                 .expect_type()
-                .display(&db)
+                .display(&db, &db.program_environment())
                 .to_string(),
             "str"
         );
         assert_eq!(
-            ty.member(&db, "pages")
+            ty.member(&db, &db.program_environment(), "pages")
                 .place
                 .expect_type()
-                .display(&db)
+                .display(&db, &db.program_environment())
                 .to_string(),
             "int | None"
         );
@@ -2303,7 +2303,7 @@ mod tests {
             file,
             virtual_types.as_ref(),
         );
-        let display = query_set.display(&db).to_string();
+        let display = query_set.display(&db, &db.program_environment()).to_string();
         assert!(
             display.contains("TypedDict"),
             "expected reusable virtual TypedDict row in {display}"
@@ -2323,10 +2323,10 @@ mod tests {
         );
         assert_eq!(
             named_row
-                .member(&db, "title")
+                .member(&db, &db.program_environment(), "title")
                 .place
                 .expect_type()
-                .display(&db)
+                .display(&db, &db.program_environment())
                 .to_string(),
             "str"
         );
@@ -2386,10 +2386,10 @@ mod tests {
             virtual_types.as_ref(),
         );
         let create = manager
-            .member(&db, "create")
+            .member(&db, &db.program_environment(), "create")
             .place
             .expect_type()
-            .display(&db)
+            .display(&db, &db.program_environment())
             .to_string();
         assert!(
             create.contains("Book"),
@@ -2397,10 +2397,10 @@ mod tests {
         );
         assert_eq!(
             manager
-                .member(&db, "score")
+                .member(&db, &db.program_environment(), "score")
                 .place
                 .expect_type()
-                .display(&db)
+                .display(&db, &db.program_environment())
                 .to_string(),
             "int"
         );
@@ -2439,13 +2439,13 @@ mod tests {
             &protocol::TypeExpr::annotation(r#"Class("AnnotatedBook", {"score": int}, app.Book)"#),
             file,
         );
-        assert_eq!(annotated.display(&db).to_string(), "AnnotatedBook");
+        assert_eq!(annotated.display(&db, &db.program_environment()).to_string(), "AnnotatedBook");
         assert_eq!(
             annotated
-                .member(&db, "score")
+                .member(&db, &db.program_environment(), "score")
                 .place
                 .expect_type()
-                .display(&db)
+                .display(&db, &db.program_environment())
                 .to_string(),
             "int"
         );
@@ -2459,7 +2459,7 @@ mod tests {
             models_file,
         );
         assert_eq!(
-            queryset.display(&db).to_string(),
+            queryset.display(&db, &db.program_environment()).to_string(),
             "QuerySet[Book, MiniDjangoAnnotatedRow]"
         );
 
@@ -2528,28 +2528,28 @@ mod tests {
             assert!(serialized.snapshot.is_some());
             let restored = plugin_type_expr_to_type_in_file(&db, &serialized, file);
             let (_, specialization) = restored
-                .class_specialization(&db)
+                .class_specialization(&db, &db.program_environment())
                 .expect("specialized QuerySet");
             let row = specialization.types(&db)[1];
 
             if expression.contains("TypedDict") {
                 let Type::TypedDict(row) = row else {
-                    panic!("expected TypedDict row, got {}", row.display(&db));
+                    panic!("expected TypedDict row, got {}", row.display(&db, &db.program_environment()));
                 };
                 assert_eq!(
                     row.item(&db, "title")
                         .expect("title field")
                         .declared_ty
-                        .display(&db)
+                        .display(&db, &db.program_environment())
                         .to_string(),
                     "str"
                 );
             } else {
-                let tuple = row.tuple_instance_spec(&db).expect("tuple row");
+                let tuple = row.tuple_instance_spec(&db, &db.program_environment()).expect("tuple row");
                 assert_eq!(
                     tuple
                         .iter_element_types(&db)
-                        .map(|element| element.display(&db).to_string())
+                        .map(|element| element.display(&db, &db.program_environment()).to_string())
                         .collect::<Vec<_>>(),
                     ["str", "int"]
                 );
@@ -2566,15 +2566,15 @@ mod tests {
         let named_serialized = plugin_qualified_type_expr_from_type(&db, named_original);
         let named_restored = plugin_type_expr_to_type_in_file(&db, &named_serialized, file);
         let (_, specialization) = named_restored
-            .class_specialization(&db)
+            .class_specialization(&db, &db.program_environment())
             .expect("specialized QuerySet");
         let named_row = specialization.types(&db)[1];
         assert_eq!(
             named_row
-                .member(&db, "pages")
+                .member(&db, &db.program_environment(), "pages")
                 .place
                 .expect_type()
-                .display(&db)
+                .display(&db, &db.program_environment())
                 .to_string(),
             "int"
         );
