@@ -1164,6 +1164,25 @@ def mean(data: DataFrame) -> float:
 x23: Mapping[Hashable, AggregateSpec] = {"col1": ["sum", mean], "col2": mean}
 ```
 
+## Recursive aliases remain stable in invariant collection contexts
+
+An invariant collection context can infer the same recursive type as both bounds. Because recursive
+inference introduces `Divergent`, intersecting those bounds should not discard any element of the
+union.
+
+```py
+from collections.abc import MutableMapping, MutableSequence
+from typing import TypeAlias, TypedDict
+
+class Leaf(TypedDict, total=False):
+    path: str
+
+RecursiveValue: TypeAlias = int | Leaf | MutableSequence["RecursiveValue | None"] | MutableMapping[str, "RecursiveValue | None"]
+RecursiveMapping: TypeAlias = MutableMapping[str, RecursiveValue | None]
+
+recursive: RecursiveMapping = {}
+```
+
 ## Implicit generic class specialization
 
 Callable type context is also used to inform the implicit specialization of a generic class:
@@ -1827,6 +1846,53 @@ _: list[int | str] = f12()  # error: [invalid-assignment]
 reveal_type(f12)  # revealed: () -> list[int]
 ```
 
+## Lambda contextual inference through union type aliases
+
+A lambda parameter is inferred from a callable behind a union-valued type alias, including when that
+alias is itself an element of another union:
+
+```py
+from typing import Callable
+from typing_extensions import TypeAliasType
+
+type IntCallback = Callable[[int], None]
+type IntCallbackOrInt = Callable[[int], None] | int
+IntCallbackOrIntAliasType = TypeAliasType("IntCallbackOrIntAliasType", Callable[[int], None] | int)
+
+def consume(value: int) -> None:
+    pass
+
+x1: Callable[[int], None] | str = lambda value: consume(reveal_type(value))  # revealed: int
+x2: IntCallbackOrInt | str = lambda value: consume(reveal_type(value))  # revealed: int
+x3: IntCallbackOrIntAliasType | str = lambda value: consume(reveal_type(value))  # revealed: int
+
+# TODO: An alias that does not resolve to a union is not expanded here, so the parameter is not
+# inferred from the type context.
+x4: IntCallback = lambda value: consume(reveal_type(value))  # revealed: Unknown
+```
+
+## Lambda contextual inference through `TypeAliasType` on Python 3.11
+
+```toml
+[environment]
+python-version = "3.11"
+```
+
+On Python 3.11, `typing_extensions.TypeAliasType` provides the same alias semantics without the
+`type` statement:
+
+```py
+from typing import Callable
+from typing_extensions import TypeAliasType
+
+IntCallbackOrInt = TypeAliasType("IntCallbackOrInt", Callable[[int], None] | int)
+
+def consume(value: int) -> None:
+    pass
+
+y1: IntCallbackOrInt | str = lambda value: consume(reveal_type(value))  # revealed: int
+```
+
 ## Unified call inference
 
 Generic call arguments are inferred under fixpoint iteration, allowing constraints from call
@@ -2050,6 +2116,23 @@ def _(callback: TakesInt) -> None:
         # TODO: Perform fixpoint iteration when evaluating callable intersections.
         x2 = callback("str", lambda value: reveal_type(value) + "!")  # revealed: Unknown
         reveal_type(x2)  # revealed: str
+```
+
+A structural type context can infer a gradual lower bound and a static upper bound before dictionary
+values contribute their constraints. The preliminary solution should retain the gradual lower bound.
+
+```py
+T_co = TypeVar("T_co", covariant=True)
+
+class DictLike(Protocol[T_co]):
+    def __getitem__(self, key: str, /) -> T_co: ...
+    def __setitem__(self, key: str, value: Any, /) -> None: ...
+
+class Command: ...
+
+def _(command: Any):
+    # revealed: dict[str, Any]
+    mapping: DictLike[type[Command]] = reveal_type({"command": command})
 ```
 
 Note that long chains of callables with constraint dependencies in reverse source-order may require

@@ -594,7 +594,12 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             {
                 Type::FunctionLiteral(function.with_deprecated(db, *deprecated))
             } else {
-                self.apply_decorator(*decorator_ty, inferred_ty, decorator_node)
+                self.apply_decorator(
+                    *decorator_ty,
+                    inferred_ty,
+                    decorator_node,
+                    (!is_decorated_overload_implementation).then_some(function),
+                )
             };
         }
 
@@ -1058,7 +1063,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
                 // Avoid duplicate diagnostics: invalid TypedDict literals already emit specific errors.
                 let suppress_invalid_default =
-                    is_invalid_typed_dict_literal(db, declared_ty, default_expr.into());
+                    is_invalid_typed_dict_literal(db, env, declared_ty, default_expr.into());
                 if !default_ty.is_assignable_to(db, env, declared_ty)
                     && !suppress_invalid_default
                     && !((self.in_stub()
