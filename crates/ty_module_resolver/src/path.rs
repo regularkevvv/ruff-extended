@@ -31,7 +31,7 @@ pub(crate) struct ModulePath {
 
 impl ModulePath {
     #[must_use]
-    pub(crate) fn is_standard_library(&self) -> bool {
+    fn is_standard_library(&self) -> bool {
         matches!(
             &*self.search_path.0,
             SearchPathInner::StandardLibraryCustom(_) | SearchPathInner::StandardLibraryVendored(_)
@@ -632,12 +632,13 @@ impl SearchPath {
         matches!(&*self.0, SearchPathInner::SitePackages(_))
     }
 
-    /// Is the module on a search path for installed third-party code?
-    pub(crate) fn is_third_party(&self) -> bool {
+    /// Is it plausible that this search path contains third-party code?
+    pub(crate) fn can_contain_third_party_code(&self) -> bool {
         match &*self.0 {
-            SearchPathInner::SitePackages(_) | SearchPathInner::Editable(_) => true,
-            SearchPathInner::Extra(_)
-            | SearchPathInner::FirstParty(_)
+            SearchPathInner::SitePackages(_)
+            | SearchPathInner::Editable(_)
+            | SearchPathInner::Extra(_) => true,
+            SearchPathInner::FirstParty(_)
             | SearchPathInner::PluginStubOverlay(_)
             | SearchPathInner::StandardLibraryCustom(_)
             | SearchPathInner::StandardLibraryVendored(_)
@@ -730,12 +731,12 @@ impl SearchPath {
     }
 
     #[must_use]
-    pub fn as_system_path(&self) -> Option<&SystemPath> {
+    pub(crate) fn as_system_path(&self) -> Option<&SystemPath> {
         self.as_path().as_system_path()
     }
 
     #[must_use]
-    pub(crate) fn as_vendored_path(&self) -> Option<&VendoredPath> {
+    fn as_vendored_path(&self) -> Option<&VendoredPath> {
         self.as_path().as_vendored_path()
     }
 

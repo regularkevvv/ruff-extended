@@ -44,7 +44,7 @@ pub struct ProjectMetadata {
     /// When [`Self::config_file_override`] is `None`, then these are the options from the
     /// project's `ty.toml` or `pyproject.toml`. The options come from
     /// the file specified by [`Self::config_file_override`] if it is `Some` (e.g. when using `--config-file <path>`).
-    pub(super) options: Options,
+    options: Options,
 
     /// The Python version and interpreter path derived from uv workspace metadata.
     ///
@@ -120,7 +120,7 @@ impl ProjectMetadata {
     }
 
     /// Loads a project from a `pyproject.toml` file.
-    pub(crate) fn from_pyproject(
+    fn from_pyproject(
         pyproject: PyProject,
         root: SystemPathBuf,
     ) -> Result<Self, ResolveRequiresPythonError> {
@@ -405,11 +405,11 @@ impl ProjectMetadata {
         Ok(metadata)
     }
 
-    pub fn root(&self) -> &SystemPath {
+    pub(crate) fn root(&self) -> &SystemPath {
         &self.root
     }
 
-    pub fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &str {
         self.name.as_str()
     }
 
@@ -480,7 +480,7 @@ impl ProjectMetadata {
     ///     merged.combine_with(layer.clone());
     /// }
     /// ```
-    pub(crate) fn options_in_precedence_order<'a>(
+    fn options_in_precedence_order<'a>(
         &'a self,
         options: &'a Options,
     ) -> impl Iterator<Item = &'a Options> {
