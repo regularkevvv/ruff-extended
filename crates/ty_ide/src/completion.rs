@@ -3,7 +3,6 @@ use std::collections::{BinaryHeap, binary_heap};
 use ty_python_semantic::ProgramEnvironment;
 
 use compact_str::{CompactString, CompactStringExt};
-use ruff_db::PythonFile;
 use ruff_db::parsed::{ParsedModuleRef, parsed_module};
 use ruff_db::source::{SourceText, source_text};
 use ruff_diagnostics::Edit;
@@ -16,7 +15,8 @@ use ruff_python_codegen::Stylist;
 use ruff_python_literal::escape::{Escape, UnicodeEscape};
 use ruff_text_size::{Ranged, TextRange, TextSize};
 use rustc_hash::FxHashSet;
-use ty_module_resolver::{KnownModule, Module, ModuleName};
+use ty_module_resolver::{ImportingFile, KnownModule, Module, ModuleName};
+use ty_python_core::ProgramFile;
 use ty_python_semantic::HasType;
 use ty_python_semantic::types::{SpecialFormType, UnionType};
 use ty_python_semantic::{
@@ -34,18 +34,18 @@ pub fn completion<'db>(
     db: &'db dyn Db,
     settings: &CompletionSettings,
     capabilities: CompletionCapabilities,
-    file: PythonFile<'db>,
+    file: ProgramFile<'db>,
     offset: TextSize,
 ) -> Vec<Completion<'db>> {
-    let python_file = file;
-    let parsed = parsed_module(db, file).load(db);
+    let program_file = file;
+    let parsed = parsed_module(db, file.python_file(db)).load(db);
     let file = file.file(db);
     let source = source_text(db, file);
 
-    let Some(context) = Context::new(db, python_file, &parsed, &source, offset) else {
+    let Some(context) = Context::new(db, program_file, &parsed, &source, offset) else {
         return vec![];
     };
-    let model = SemanticModel::new(db, python_file);
+    let model = SemanticModel::new(db, program_file);
 
     if !matches!(context.kind, ContextKind::Keywords(_)) && context.cursor.is_in_string() {
         let Some(string_expr) = context.cursor.enclosing_string_literal_expr() else {
@@ -54,7 +54,7 @@ pub fn completion<'db>(
 
         let mut completions = Completions::new(
             db,
-            python_file,
+            program_file,
             CollectionContext::none(),
             UserQuery::fuzzy(None),
         );
@@ -72,7 +72,7 @@ pub fn completion<'db>(
     let query = UserQuery::fuzzy(context.cursor.typed);
     let mut completions = Completions::new(
         db,
-        python_file,
+        program_file,
         context.collection_context(db, &model, settings, capabilities),
         query,
     );
@@ -84,7 +84,7 @@ pub fn completion<'db>(
             }
         }
         ContextKind::Import(ref import) => {
-            import.add_completions(db, python_file, &mut completions);
+            import.add_completions(db, program_file, &mut completions);
         }
         ContextKind::NonImport(ref non_import) => match non_import.target {
             CompletionTargetAst::ObjectDot { expr } => {
@@ -106,7 +106,7 @@ pub fn completion<'db>(
                 add_keyword_completions(db, &env, &mut completions);
                 add_argument_completions(
                     db,
-                    python_file,
+                    program_file,
                     &model,
                     &context.cursor,
                     &mut completions,
@@ -114,7 +114,7 @@ pub fn completion<'db>(
                 if settings.auto_import {
                     add_unimported_completions(
                         db,
-                        python_file,
+                        program_file,
                         &parsed,
                         scoped,
                         |module_name: &ModuleName, symbol: &str| {
@@ -146,7 +146,7 @@ impl CompletionCapabilities {
 /// A collection of completions built up from various sources.
 struct Completions<'db> {
     db: &'db dyn Db,
-    python_file: PythonFile<'db>,
+    program_file: ProgramFile<'db>,
     context: CollectionContext<'db>,
     items: BinaryHeap<CompletionRanker<'db>>,
     /// The query used to match against candidate completions.
@@ -172,13 +172,13 @@ impl<'db> Completions<'db> {
     /// add completions that match it.
     fn new(
         db: &'db dyn Db,
-        python_file: PythonFile<'db>,
+        program_file: ProgramFile<'db>,
         context: CollectionContext<'db>,
         query: UserQuery,
     ) -> Completions<'db> {
         Completions {
             db,
-            python_file,
+            program_file,
             context,
             items: BinaryHeap::new(),
             query,
@@ -274,7 +274,7 @@ impl<'db> Completions<'db> {
             return false;
         }
         let completion =
-            CompletionRanker(builder.build(self.db, self.python_file, &self.context, &self.query));
+            CompletionRanker(builder.build(self.db, self.program_file, &self.context, &self.query));
         if self.items.len() >= Completions::LIMIT {
             // OK because `self.items` is guaranteed to be non-empty here.
             let worst = self.items.peek_mut().unwrap();
@@ -294,7 +294,7 @@ impl<'db> Extend<SemanticCompletion<'db>> for Completions<'db> {
         T: IntoIterator<Item = SemanticCompletion<'db>>,
     {
         let db = self.db;
-        let env = ProgramEnvironment::from_file(self.python_file);
+        let env = ProgramEnvironment::from_file(self.program_file);
         for c in it {
             self.add_semantic(db, &env, c);
         }
@@ -453,6 +453,7 @@ impl<'db> CompletionBuilder<'db> {
         Completion::builder(semantic.name)
             .ty(semantic.ty)
             .builtin(semantic.builtin)
+            .type_check_only(semantic.is_type_check_only)
             .docstring(documentation)
     }
 
@@ -487,12 +488,12 @@ impl<'db> CompletionBuilder<'db> {
     fn build(
         mut self,
         db: &'db dyn Db,
-        python_file: PythonFile<'db>,
+        program_file: ProgramFile<'db>,
         collection_context: &CollectionContext<'db>,
         query: &UserQuery,
     ) -> Completion<'db> {
         if let Some(ty) = self.ty {
-            self.is_type_check_only = ty.is_type_check_only(db);
+            self.is_type_check_only |= ty.is_type_check_only(db);
             // Tags completions with context-specific if they are
             // known to be usable in an exception context and we have
             // determined an `exception_ty`.
@@ -501,7 +502,7 @@ impl<'db> CompletionBuilder<'db> {
             // but aren't marked here. That is, false negatives are
             // possible but false positives are not.
             if let Some(exception_ty) = collection_context.exception_ty {
-                let env = ProgramEnvironment::from_file(python_file);
+                let env = ProgramEnvironment::from_file(program_file);
                 self.is_context_specific |= ty.is_assignable_to(db, &env, exception_ty);
             }
             if collection_context.is_in_class_def() {
@@ -608,6 +609,11 @@ impl<'db> CompletionBuilder<'db> {
 
     fn builtin(mut self, yes: bool) -> CompletionBuilder<'db> {
         self.builtin = yes;
+        self
+    }
+
+    fn type_check_only(mut self, yes: bool) -> CompletionBuilder<'db> {
+        self.is_type_check_only = yes;
         self
     }
 
@@ -788,7 +794,7 @@ impl<'m> Context<'m> {
     /// Create a new context for finding completions.
     fn new(
         db: &'_ dyn Db,
-        file: PythonFile<'_>,
+        file: ProgramFile<'_>,
         parsed: &'m ParsedModuleRef,
         source: &'m SourceText,
         offset: TextSize,
@@ -802,7 +808,11 @@ impl<'m> Context<'m> {
             ContextKind::Keywords(keywords)
         } else if cursor.is_in_definition_place() {
             return None;
-        } else if let Some(import) = ImportStatement::detect(db, file, &cursor) {
+        } else if let Some(import) = ImportStatement::detect(
+            db,
+            ImportingFile::File(file.file(db), file.resolver_environment(db)),
+            &cursor,
+        ) {
             ContextKind::Import(import)
         } else {
             let target_token = CompletionTargetTokens::find(&cursor)?;
@@ -1964,7 +1974,7 @@ enum Sort {
 /// Detect and add completions for unset arguments.
 fn add_argument_completions<'db>(
     db: &'db dyn Db,
-    file: PythonFile<'db>,
+    file: ProgramFile<'db>,
     model: &SemanticModel<'db>,
     cursor: &ContextCursor<'_>,
     completions: &mut Completions<'db>,
@@ -2052,7 +2062,7 @@ fn add_class_arg_completions<'db>(
 /// set and 2) been defined as positional-only.
 fn add_function_arg_completions<'db>(
     db: &'db dyn Db,
-    file: PythonFile<'db>,
+    file: ProgramFile<'db>,
     cursor: &ContextCursor<'_>,
     completions: &mut Completions<'db>,
 ) {
@@ -2133,7 +2143,7 @@ pub(crate) struct ImportEdit {
 /// Get fixes that would resolve an unresolved reference
 pub(crate) fn unresolved_fixes<'db>(
     db: &'db dyn Db,
-    file: PythonFile<'db>,
+    file: ProgramFile<'db>,
     parsed: &ParsedModuleRef,
     symbol: &str,
     node: AnyNodeRef,
@@ -2276,7 +2286,7 @@ fn add_string_literal_completions<'db>(
 /// when selected into `File`.
 fn add_unimported_completions<'db>(
     db: &'db dyn Db,
-    file: PythonFile<'db>,
+    file: ProgramFile<'db>,
     parsed: &ParsedModuleRef,
     scoped: ScopedTarget<'_>,
     create_import_request: impl for<'a> Fn(&'a ModuleName, &'a str) -> ImportRequest<'a>,
@@ -2295,6 +2305,7 @@ fn add_unimported_completions<'db>(
     let stylist = Stylist::from_tokens(parsed.tokens(), source.as_str());
     let importer = Importer::new(db, &stylist, file, source.as_str(), parsed);
     let members = importer.members_in_scope_at(scoped.node, scoped.node.start());
+    let importing_file = ImportingFile::File(source_file, file.resolver_environment(db));
 
     for symbol in all_symbols(db, file, &completions.query.pattern) {
         if symbol.file() == source_file || symbol.module().is_known(db, KnownModule::Builtins) {
@@ -2311,7 +2322,7 @@ fn add_unimported_completions<'db>(
             });
 
         // Don't suggest symbols that are already imported.
-        if members.satisfies(db, file, &request) {
+        if members.satisfies(db, importing_file, &request) {
             continue;
         }
 
@@ -2576,7 +2587,7 @@ impl<'a> ImportStatement<'a> {
     /// `tokens`.
     fn detect(
         db: &'_ dyn Db,
-        file: PythonFile<'_>,
+        file: ImportingFile<'_>,
         cursor: &ContextCursor<'a>,
     ) -> Option<ImportStatement<'a>> {
         use TokenKind as TK;
@@ -2974,7 +2985,7 @@ impl<'a> ImportStatement<'a> {
     fn add_completions<'db>(
         &self,
         db: &'db dyn Db,
-        file: PythonFile<'db>,
+        file: ProgramFile<'db>,
         completions: &mut Completions<'db>,
     ) {
         let model = SemanticModel::new(db, file);
@@ -3071,7 +3082,7 @@ fn add_import_completions_impl<'db>(
     semantic_completions: impl IntoIterator<Item = SemanticCompletion<'db>>,
     module_dependency_kind: impl Fn(&SemanticCompletion<'db>) -> Option<ModuleDependencyKind>,
 ) {
-    let env = ProgramEnvironment::from_file(completions.python_file);
+    let env = ProgramEnvironment::from_file(completions.program_file);
     for semantic in semantic_completions {
         let module_dependency_kind = module_dependency_kind(&semantic);
         let mut builder = CompletionBuilder::from_semantic_completion(db, &env, semantic);
@@ -3604,25 +3615,95 @@ if TYPE_CHECKING:
         test.contains("__mangled_name");
         test.contains("__dunder_name__");
         test.contains("public_type_var");
-        test.not_contains("_private_type_var");
-        test.not_contains("__mangled_type_var");
         test.contains("public_param_spec");
-        test.not_contains("_private_param_spec");
         test.contains("public_type_var_tuple");
-        test.not_contains("_private_type_var_tuple");
         test.contains("public_explicit_type_alias");
-        test.not_contains("_private_explicit_type_alias");
         test.contains("public_implicit_union_alias");
-        test.not_contains("_private_implicit_union_alias");
         test.contains("_private_runtime_union");
         test.contains("_private_runtime_typevar");
         test.contains("_private_precise_runtime_union");
         test.contains("PublicProtocol");
         test.contains("_PrivateProtocol");
-        test.not_contains("PublicTypeOnlyProtocol");
-        test.not_contains("_PrivateTypeOnlyProtocol");
-        test.not_contains("PublicTypeCheckingProtocol");
-        test.not_contains("_PrivateTypeCheckingProtocol");
+
+        for name in [
+            "_private_type_var",
+            "__mangled_type_var",
+            "_private_param_spec",
+            "_private_type_var_tuple",
+            "_private_explicit_type_alias",
+            "_private_implicit_union_alias",
+            "PublicTypeOnlyProtocol",
+            "_PrivateTypeOnlyProtocol",
+            "PublicTypeCheckingProtocol",
+            "_PrivateTypeCheckingProtocol",
+        ] {
+            assert!(
+                test.completions()
+                    .iter()
+                    .any(|completion| completion.name == name && completion.is_type_check_only),
+                "Expected `{name}` to be marked as typing-only",
+            );
+        }
+    }
+
+    #[test]
+    fn private_stub_symbols_rank_below_runtime_values() {
+        let builder = CursorTest::builder()
+            .source(
+                "package/__init__.pyi",
+                "from typing import TypeVar\n_Alpha = TypeVar(\"_Alpha\")\n_Zeta = 1",
+            )
+            .source("main.py", "import package; package._<CURSOR>")
+            .completion_test_builder()
+            .filter(|completion| matches!(completion.name.as_str(), "_Alpha" | "_Zeta"));
+
+        let test = builder.build();
+        let completions = test
+            .completions()
+            .iter()
+            .map(|completion| (completion.name.as_str(), completion.is_type_check_only))
+            .collect::<Vec<_>>();
+
+        assert_eq!(completions, [("_Zeta", false), ("_Alpha", true)]);
+    }
+
+    #[test]
+    fn type_checking_import_includes_private_stub_symbols() {
+        let builder = CursorTest::builder()
+            .source(
+                "package/__init__.pyi",
+                "from typing import TypeAlias, TypeVar\n_Alias: TypeAlias = int\n_T = TypeVar(\"_T\")",
+            )
+            .source(
+                "main.py",
+                "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    from package import _<CURSOR>",
+            )
+            .completion_test_builder();
+
+        let test = builder.build();
+        for name in ["_Alias", "_T"] {
+            assert!(
+                test.completions()
+                    .iter()
+                    .any(|completion| completion.name == name && completion.is_type_check_only),
+                "Expected `{name}` to be available as a typing-only completion",
+            );
+        }
+    }
+
+    #[test]
+    fn typing_only_project_builtins_not_suggested_implicitly() {
+        let builder = CursorTest::builder()
+            .source(
+                "__builtins__.pyi",
+                "from typing import TypeVar\n_typing_only = TypeVar(\"_typing_only\")\n_runtime: int",
+            )
+            .source("main.py", "_<CURSOR>")
+            .completion_test_builder()
+            .skip_auto_import();
+
+        let test = builder.build();
+        test.contains("_runtime").not_contains("_typing_only");
     }
 
     /// Unlike [`private_symbols_in_stub`], this test doesn't use a `.pyi` file so all of the names
@@ -10877,7 +10958,7 @@ raise <CURSOR>
                 &self.cursor_test.db,
                 &self.settings,
                 self.capabilities,
-                self.cursor_test.python_file(self.cursor_test.cursor.file),
+                self.cursor_test.program_file(self.cursor_test.cursor.file),
                 self.cursor_test.cursor.offset,
             );
             let filtered = original

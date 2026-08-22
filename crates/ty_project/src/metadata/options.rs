@@ -334,14 +334,8 @@ impl Options {
         strategy: &Strategy,
     ) -> Result<SearchPaths, Strategy::Error<SearchPathSettingsError>> {
         let environment = self.environment.or_default();
-        let src = self.src.or_default();
 
-        #[allow(deprecated)]
-        let src_roots = if let Some(roots) = environment
-            .root
-            .as_deref()
-            .or_else(|| Some(std::slice::from_ref(src.root.as_ref()?)))
-        {
+        let environment_roots = if let Some(roots) = environment.root.as_deref() {
             roots
                 .iter()
                 .map(|root| root.absolute(project_root, system))
@@ -447,7 +441,7 @@ impl Options {
 
         let settings = SearchPathSettings {
             extra_paths,
-            src_roots,
+            src_roots: environment_roots,
             plugin_stub_overlay_paths,
             custom_typeshed: environment
                 .typeshed
@@ -480,34 +474,6 @@ impl Options {
         };
 
         let src_options = self.src.or_default();
-
-        #[allow(deprecated)]
-        if let Some(src_root) = src_options.root.as_ref() {
-            let mut diagnostic = OptionDiagnostic::new(
-                DiagnosticId::DeprecatedSetting,
-                "The `src.root` setting is deprecated. Use `environment.root` instead.".to_string(),
-                Severity::Warning,
-            );
-
-            if let Some(file) = src_root
-                .source()
-                .file()
-                .and_then(|path| system_path_to_file(db, path).ok())
-            {
-                diagnostic = diagnostic.with_annotation(Some(Annotation::primary(
-                    Span::from(file).with_optional_range(src_root.range()),
-                )));
-            }
-
-            if self.environment.or_default().root.is_some() {
-                diagnostic = diagnostic.sub(SubDiagnostic::new(
-                    SubDiagnosticSeverity::Info,
-                    "The `src.root` setting was ignored in favor of the `environment.root` setting",
-                ));
-            }
-
-            diagnostics.push(diagnostic);
-        }
 
         let src = src_options
             .to_settings(db, project_root, &mut diagnostics)
@@ -689,7 +655,7 @@ pub enum ProgramSettingsDiagnostic {
 
 impl ProgramSettingsDiagnostic {
     /// Convert this program-settings diagnostic into a diagnostic that can be stored on a project.
-    pub(crate) fn into_diagnostic(self, db: &dyn Db) -> OptionDiagnostic {
+    pub fn into_diagnostic(self, db: &dyn Db) -> OptionDiagnostic {
         match self {
             Self::UnsupportedInferredPythonVersion(python_version) => {
                 unsupported_inferred_python_version_diagnostic(db, &python_version)
@@ -986,26 +952,6 @@ pub struct EnvironmentOptions {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct SrcOptions {
-    /// The root of the project, used for finding first-party modules.
-    ///
-    /// If left unspecified, ty will try to detect common project layouts and initialize `src.root` accordingly.
-    /// The project root (`.`) is always included. Additionally, the following directories are included
-    /// if they exist and are not packages (i.e. they do not contain `__init__.py` or `__init__.pyi` files):
-    ///
-    /// * `./src`
-    /// * `./<project-name>` (if a `./<project-name>/<project-name>` directory exists)
-    /// * `./python`
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[option(
-        default = r#"null"#,
-        value_type = "str",
-        example = r#"
-            root = "./app"
-        "#
-    )]
-    #[deprecated(note = "Use `environment.root` instead.")]
-    pub root: Option<RelativePathBuf>,
-
     /// Whether to automatically exclude files that are ignored by `.ignore`,
     /// `.gitignore`, `.git/info/exclude`, and global `gitignore` files.
     /// Enabled by default.
@@ -3867,7 +3813,7 @@ mod plugin_tests {
     use ruff_ranged_value::ValueSource;
     use serde_json::json;
     use ty_python_core::program::{
-        FallibleStrategy, Program, SemanticPluginMethodClaim, SemanticPluginRuntime,
+        FallibleStrategy, SemanticPluginMethodClaim, SemanticPluginRuntime, SemanticPlugins,
     };
 
     use crate::{Db as _, ProjectDatabase, ProjectMetadata};
@@ -4004,7 +3950,7 @@ mod plugin_tests {
         );
         assert!(plugin.trusted());
 
-        let semantic_plugins = Program::get(&db).semantic_plugins(&db);
+        let semantic_plugins = SemanticPlugins::environment_or_empty(&db);
         let [plugin] = semantic_plugins.plugins() else {
             panic!("expected one discovered semantic plugin");
         };
@@ -4032,7 +3978,11 @@ mod plugin_tests {
 
         assert_plugin_diagnostics(&db, []);
         assert!(!db.project().settings(&db).plugins().enabled());
-        assert!(Program::get(&db).semantic_plugins(&db).plugins().is_empty());
+        assert!(
+            SemanticPlugins::environment_or_empty(&db)
+                .plugins()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -4140,7 +4090,7 @@ mod plugin_tests {
 
         assert_plugin_diagnostics(&db, []);
 
-        let semantic_plugins = Program::get(&db).semantic_plugins(&db);
+        let semantic_plugins = SemanticPlugins::environment_or_empty(&db);
         let [plugin] = semantic_plugins.plugins() else {
             panic!("expected one semantic plugin");
         };
@@ -4187,7 +4137,7 @@ mod plugin_tests {
 
         assert_plugin_diagnostics(&db, []);
 
-        let semantic_plugins = Program::get(&db).semantic_plugins(&db);
+        let semantic_plugins = SemanticPlugins::environment_or_empty(&db);
         let [plugin] = semantic_plugins.plugins() else {
             panic!("expected one semantic plugin");
         };
@@ -4394,7 +4344,7 @@ mod plugin_tests {
 
         assert_plugin_diagnostics(&db, []);
 
-        let semantic_plugins = Program::get(&db).semantic_plugins(&db);
+        let semantic_plugins = SemanticPlugins::environment_or_empty(&db);
         let [plugin] = semantic_plugins.plugins() else {
             panic!("expected one semantic plugin");
         };
@@ -4450,18 +4400,14 @@ mod plugin_tests {
             ],
         );
 
-        let fingerprint = Program::get(&db).semantic_plugins(&db).fingerprint();
+        let fingerprint = SemanticPlugins::environment_or_empty(&db).fingerprint();
         assert_ne!(
             fingerprint,
-            Program::get(&changed_artifact)
-                .semantic_plugins(&changed_artifact)
-                .fingerprint()
+            SemanticPlugins::environment_or_empty(&changed_artifact).fingerprint()
         );
         assert_ne!(
             fingerprint,
-            Program::get(&changed_config)
-                .semantic_plugins(&changed_config)
-                .fingerprint()
+            SemanticPlugins::environment_or_empty(&changed_config).fingerprint()
         );
     }
 

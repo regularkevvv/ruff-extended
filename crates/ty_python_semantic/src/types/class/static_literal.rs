@@ -19,8 +19,8 @@ use ty_plugin_protocol as protocol;
 use crate::types::plugin::{
     PluginVirtualTypePatch, plugin_callable_type_from_protocol_signature_in_class,
     plugin_callable_type_from_protocol_signature_with_virtual_types, plugin_file_path,
-    plugin_program_environment, plugin_python_file, plugin_semantic_context,
-    plugin_type_expr_from_type, plugin_type_expr_to_type_in_class_with_virtual_types,
+    plugin_semantic_context, plugin_type_expr_from_type,
+    plugin_type_expr_to_type_in_class_with_virtual_types,
     plugin_type_expr_to_type_with_virtual_types, plugin_virtual_type_patches_from_protocol,
 };
 use crate::{
@@ -74,10 +74,10 @@ use crate::{
 };
 use crate::{attribute_assignments, attribute_declarations};
 use ty_python_core::{
-    attribute_scopes,
+    ProgramFile, attribute_scopes,
     definition::{Definition, DefinitionKind, DefinitionState, TargetKind},
     place_table,
-    program::{Program, SemanticPlugin, SemanticPluginRuntime},
+    program::{Program, SemanticPlugin, SemanticPluginRuntime, SemanticPlugins},
     scope::{Scope, ScopeId},
     semantic_index,
     symbol::Symbol,
@@ -570,11 +570,12 @@ impl<'db> StaticClassLiteral<'db> {
     )]
     fn pep695_generic_context_inner(self, db: &'db dyn Db) -> Option<GenericContext<'db>> {
         let scope = self.body_scope(db);
-        let python_file = scope.python_file(db);
+        let program_file = scope.program_file(db);
+        let python_file = program_file.python_file(db);
         let parsed = parsed_module(db, python_file).load(db);
         let class_def_node = scope.node(db).expect_class().node(&parsed);
         class_def_node.type_params.as_ref().map(|type_params| {
-            let index = semantic_index(db, python_file);
+            let index = semantic_index(db, program_file);
             let definition = index.expect_single_definition(class_def_node);
             GenericContext::from_type_params(db, index, definition, type_params)
         })
@@ -688,6 +689,10 @@ impl<'db> StaticClassLiteral<'db> {
         self.body_scope(db).python_file(db)
     }
 
+    pub(crate) fn program_file(self, db: &'db dyn Db) -> ProgramFile<'db> {
+        self.body_scope(db).program_file(db)
+    }
+
     /// Return the original [`ast::StmtClassDef`] node associated with this class
     ///
     /// ## Note
@@ -699,7 +704,7 @@ impl<'db> StaticClassLiteral<'db> {
 
     pub(crate) fn definition(self, db: &'db dyn Db) -> Definition<'db> {
         let body_scope = self.body_scope(db);
-        let index = semantic_index(db, body_scope.python_file(db));
+        let index = semantic_index(db, body_scope.program_file(db));
         index.expect_single_definition(body_scope.node(db).expect_class())
     }
 
@@ -791,12 +796,13 @@ impl<'db> StaticClassLiteral<'db> {
                 class.name(db)
             );
 
-            let python_file = class.python_file(db);
+            let program_file = class.program_file(db);
+            let python_file = program_file.python_file(db);
             let module = parsed_module(db, python_file).load(db);
             let class_stmt = class.node(db, &module);
 
             let class_definition =
-                semantic_index(db, python_file).expect_single_definition(class_stmt);
+                semantic_index(db, program_file).expect_single_definition(class_stmt);
             expanded_class_base_entries(db, class.known(db), class_stmt, class_definition)
                 .into_iter()
                 .map(ExpandedClassBaseEntry::ty)
@@ -882,7 +888,8 @@ impl<'db> StaticClassLiteral<'db> {
     fn decorators_inner(self, db: &'db dyn Db) -> Box<[Type<'db>]> {
         tracing::trace!("StaticClassLiteral::decorators: {}", self.name(db));
 
-        let python_file = self.python_file(db);
+        let program_file = self.program_file(db);
+        let python_file = program_file.python_file(db);
         let module = parsed_module(db, python_file).load(db);
 
         let class_stmt = self.node(db, &module);
@@ -891,7 +898,7 @@ impl<'db> StaticClassLiteral<'db> {
         }
 
         let class_definition =
-            semantic_index(db, self.python_file(db)).expect_single_definition(class_stmt);
+            semantic_index(db, self.program_file(db)).expect_single_definition(class_stmt);
 
         class_stmt
             .decorator_list
@@ -915,10 +922,12 @@ impl<'db> StaticClassLiteral<'db> {
     /// Iterate through the decorators on this class, returning the index of the first one
     /// that is either `@dataclass` or `@dataclass(...)`.
     pub(crate) fn find_dataclass_decorator_position(self, db: &'db dyn Db) -> Option<usize> {
-        let python_file = self.python_file(db);
+        let program_file = self.program_file(db);
+        let python_file = program_file.python_file(db);
         let module = parsed_module(db, python_file).load(db);
         let class_stmt = self.node(db, &module);
-        let class_definition = semantic_index(db, python_file).expect_single_definition(class_stmt);
+        let class_definition =
+            semantic_index(db, program_file).expect_single_definition(class_stmt);
 
         class_stmt.decorator_list.iter().position(|decorator| {
             let decorator_callable = decorator
@@ -1239,8 +1248,9 @@ impl<'db> StaticClassLiteral<'db> {
             db: &'db dyn Db,
             class: StaticClassLiteral<'db>,
         ) -> Result<(Type<'db>, Option<MetaclassTransformInfo<'db>>), MetaclassError<'db>> {
-            let python_file = class.python_file(db);
-            let env = ProgramEnvironment::from_file(python_file);
+            let program_file = class.program_file(db);
+            let python_file = program_file.python_file(db);
+            let env = ProgramEnvironment::from_file(program_file);
             tracing::trace!("StaticClassLiteral::try_metaclass: {}", class.name(db));
 
             // Identify the class's own metaclass (or take the first base class's metaclass).
@@ -1477,7 +1487,8 @@ impl<'db> StaticClassLiteral<'db> {
         heap_size=get_size2::GetSize::get_heap_size
     )]
     fn plugin_class_transform_patch(self, db: &'db dyn Db) -> PluginClassTransformPatch<'db> {
-        let semantic_plugins = Program::get(db).semantic_plugins(db);
+        let env = &ProgramEnvironment::from_scope(self.body_scope(db));
+        let semantic_plugins = SemanticPlugins::environment_or_empty(db);
         if semantic_plugins.is_empty() {
             return PluginClassTransformPatch::default();
         }
@@ -1502,7 +1513,7 @@ impl<'db> StaticClassLiteral<'db> {
             return PluginClassTransformPatch::default();
         }
 
-        let class_summary = plugin_class_summary(db, self);
+        let class_summary = plugin_class_summary(db, env, self);
         let mut fields = Vec::new();
         let mut class_members = Vec::new();
         let mut instance_members = Vec::new();
@@ -1517,14 +1528,16 @@ impl<'db> StaticClassLiteral<'db> {
             );
             let request = plugin_analyze_class_request(
                 db,
+                env,
                 self,
                 &class_summary,
-                plugin_project_index_json(db, plugin),
+                plugin_project_index_json(db, env, plugin),
             );
-            let virtual_types = plugin_project_index_virtual_types(db, plugin);
+            let virtual_types = plugin_project_index_virtual_types(db, env, plugin);
             let response = execute_class_transform_plugin(db, plugin, &request);
             merge_plugin_class_response(
                 db,
+                env,
                 self,
                 response,
                 virtual_types,
@@ -1545,48 +1558,54 @@ impl<'db> StaticClassLiteral<'db> {
 
     #[salsa::tracked(
         returns(as_ref),
-        cycle_initial=|_, _, _, _| None,
+        cycle_initial=|_, _, _, _, _| None,
         heap_size=ruff_memory_usage::heap_size,
     )]
     fn plugin_class_member_patch(
         self,
         db: &'db dyn Db,
+        program: Program<'db>,
         name: Name,
     ) -> Option<PluginMemberPatch<'db>> {
-        self.plugin_member_patch(db, &name, PluginMemberScope::Class)
+        let env = &ProgramEnvironment::from_program(program);
+        self.plugin_member_patch(db, env, &name, PluginMemberScope::Class)
     }
 
     #[salsa::tracked(
         returns(as_ref),
-        cycle_initial=|_, _, _, _| None,
+        cycle_initial=|_, _, _, _, _| None,
         heap_size=ruff_memory_usage::heap_size,
     )]
     fn plugin_instance_member_patch(
         self,
         db: &'db dyn Db,
+        program: Program<'db>,
         name: Name,
     ) -> Option<PluginMemberPatch<'db>> {
-        self.plugin_member_patch(db, &name, PluginMemberScope::Instance)
+        let env = &ProgramEnvironment::from_program(program);
+        self.plugin_member_patch(db, env, &name, PluginMemberScope::Instance)
     }
 
     fn plugin_member_patch(
         self,
         db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
         name: &Name,
         scope: PluginMemberScope,
     ) -> Option<PluginMemberPatch<'db>> {
-        self.plugin_member_patch_with_existing(db, name, scope, None, None)
+        self.plugin_member_patch_with_existing(db, env, name, scope, None, None)
     }
 
     fn plugin_member_patch_with_existing(
         self,
         db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
         name: &Name,
         scope: PluginMemberScope,
         existing_ty: Option<Type<'db>>,
         owner_override: Option<Type<'db>>,
     ) -> Option<PluginMemberPatch<'db>> {
-        let semantic_plugins = Program::get(db).semantic_plugins(db);
+        let semantic_plugins = SemanticPlugins::environment_or_empty(db);
         if semantic_plugins.is_empty() {
             return None;
         }
@@ -1640,13 +1659,14 @@ impl<'db> StaticClassLiteral<'db> {
                 scope,
                 existing_ty,
                 owner_override,
-                plugin_project_index_json(db, plugin),
+                plugin_project_index_json(db, env, plugin),
             );
             let candidate = plugin_member_response_to_patch(
                 db,
+                env,
                 execute_member_plugin(db, plugin, &request),
                 name,
-                plugin_project_index_virtual_types(db, plugin),
+                plugin_project_index_virtual_types(db, env, plugin),
             );
             if candidate.is_some() && resolved_member.is_some() {
                 tracing::warn!(
@@ -1683,9 +1703,10 @@ impl<'db> StaticClassLiteral<'db> {
     }
 
     fn own_plugin_dynamic_class_member(self, db: &'db dyn Db, name: &str) -> Option<Member<'db>> {
-        self.plugin_class_member_patch(db, Name::new(name))
+        let env = &ProgramEnvironment::from_scope(self.body_scope(db));
+        self.plugin_class_member_patch(db, env.program(db), Name::new(name))
             .map(plugin_member_to_member)
-            .or_else(|| self.own_plugin_contributed_member(db, name, PluginMemberScope::Class))
+            .or_else(|| self.own_plugin_contributed_member(db, env, name, PluginMemberScope::Class))
     }
 
     fn own_plugin_class_transform_instance_member(
@@ -1713,6 +1734,7 @@ impl<'db> StaticClassLiteral<'db> {
     fn own_plugin_replacement_instance_member(
         self,
         db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
         name: &str,
         existing_ty: Option<Type<'db>>,
     ) -> Option<Member<'db>> {
@@ -1733,6 +1755,7 @@ impl<'db> StaticClassLiteral<'db> {
             .or_else(|| {
                 self.plugin_member_patch_with_existing(
                     db,
+                    env,
                     &Name::new(name),
                     PluginMemberScope::Instance,
                     existing_ty,
@@ -1742,7 +1765,7 @@ impl<'db> StaticClassLiteral<'db> {
                 .map(|member| plugin_member_to_member(&member))
             })
             .or_else(|| {
-                self.own_plugin_contributed_member_patch(db, name, PluginMemberScope::Instance)
+                self.own_plugin_contributed_member_patch(db, env, name, PluginMemberScope::Instance)
                     .filter(|patch| patch.replaces_existing())
                     .and_then(|patch| {
                         plugin_contribution_to_member(patch, PluginMemberScope::Instance)
@@ -1753,6 +1776,7 @@ impl<'db> StaticClassLiteral<'db> {
     pub(super) fn plugin_replacement_instance_member(
         self,
         db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
         specialization: Option<Specialization<'db>>,
         name: &str,
         existing_ty: Option<Type<'db>>,
@@ -1769,7 +1793,7 @@ impl<'db> StaticClassLiteral<'db> {
             let member = match class {
                 ClassType::NonGeneric(ClassLiteral::Static(class)) => {
                     let Some(member) =
-                        class.own_plugin_replacement_instance_member(db, name, existing_ty)
+                        class.own_plugin_replacement_instance_member(db, env, name, existing_ty)
                     else {
                         continue;
                     };
@@ -1778,6 +1802,7 @@ impl<'db> StaticClassLiteral<'db> {
                 ClassType::Generic(generic) => {
                     let Some(member) = generic.origin(db).own_plugin_replacement_instance_member(
                         db,
+                        env,
                         name,
                         existing_ty,
                     ) else {
@@ -1804,11 +1829,13 @@ impl<'db> StaticClassLiteral<'db> {
     pub(super) fn plugin_annotated_instance_member(
         self,
         db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
         name: &str,
         owner: Type<'db>,
     ) -> Option<PlaceAndQualifiers<'db>> {
         self.plugin_member_patch_with_existing(
             db,
+            env,
             &Name::new(name),
             PluginMemberScope::Instance,
             None,
@@ -1833,9 +1860,10 @@ impl<'db> StaticClassLiteral<'db> {
     fn own_plugin_contributed_instance_assignment_member(
         self,
         db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
         name: &str,
     ) -> Option<Member<'db>> {
-        let semantic_plugins = Program::get(db).semantic_plugins(db);
+        let semantic_plugins = SemanticPlugins::environment_or_empty(db);
         if semantic_plugins.is_empty() {
             return None;
         }
@@ -1846,25 +1874,28 @@ impl<'db> StaticClassLiteral<'db> {
             .iter()
             .filter(|plugin| plugin.project_index_enabled())
             .find_map(|plugin| {
-                plugin_project_index(db, SemanticPluginId::new(db, plugin.id().to_string()))
-                    .contributions
-                    .iter()
-                    .find_map(|contribution| {
-                        if !contribution
-                            .target
-                            .matches(PluginMemberScope::Instance, &owner_qualified_name)
-                        {
-                            return None;
-                        }
-                        let PluginContributionMemberPatch::Field(field) = &contribution.patch
-                        else {
-                            return None;
-                        };
-                        if field.name.as_str() != name {
-                            return None;
-                        }
-                        field.instance_set_ty.map(Member::definitely_declared)
-                    })
+                plugin_project_index(
+                    db,
+                    SemanticPluginId::new(db, plugin.id().to_string()),
+                    env.program(db),
+                )
+                .contributions
+                .iter()
+                .find_map(|contribution| {
+                    if !contribution
+                        .target
+                        .matches(PluginMemberScope::Instance, &owner_qualified_name)
+                    {
+                        return None;
+                    }
+                    let PluginContributionMemberPatch::Field(field) = &contribution.patch else {
+                        return None;
+                    };
+                    if field.name.as_str() != name {
+                        return None;
+                    }
+                    field.instance_set_ty.map(Member::definitely_declared)
+                })
             })
     }
 
@@ -1913,6 +1944,7 @@ impl<'db> StaticClassLiteral<'db> {
     pub(super) fn plugin_contributed_instance_assignment_member(
         self,
         db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
         specialization: Option<Specialization<'db>>,
         name: &str,
     ) -> Option<PlaceAndQualifiers<'db>> {
@@ -1928,12 +1960,12 @@ impl<'db> StaticClassLiteral<'db> {
             let member = match class {
                 ClassType::NonGeneric(ClassLiteral::Static(class)) => {
                     class
-                        .own_plugin_contributed_instance_assignment_member(db, name)?
+                        .own_plugin_contributed_instance_assignment_member(db, env, name)?
                         .inner
                 }
                 ClassType::Generic(generic) => generic
                     .origin(db)
-                    .own_plugin_contributed_instance_assignment_member(db, name)?
+                    .own_plugin_contributed_instance_assignment_member(db, env, name)?
                     .inner
                     .map_type(|ty| {
                         ty.apply_optional_specialization(db, Some(generic.specialization(db)))
@@ -1955,39 +1987,45 @@ impl<'db> StaticClassLiteral<'db> {
     fn own_plugin_dynamic_instance_member(
         self,
         db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
         name: &str,
     ) -> Option<Member<'db>> {
-        self.plugin_instance_member_patch(db, Name::new(name))
+        self.plugin_instance_member_patch(db, env.program(db), Name::new(name))
             .map(plugin_member_to_member)
     }
 
     fn own_plugin_instance_member_after_miss(
         self,
         db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
         name: &str,
     ) -> Option<Member<'db>> {
         self.own_plugin_class_transform_instance_member(db, name)
-            .or_else(|| self.own_plugin_dynamic_instance_member(db, name))
-            .or_else(|| self.own_plugin_contributed_member(db, name, PluginMemberScope::Instance))
+            .or_else(|| self.own_plugin_dynamic_instance_member(db, env, name))
+            .or_else(|| {
+                self.own_plugin_contributed_member(db, env, name, PluginMemberScope::Instance)
+            })
     }
 
     fn own_plugin_contributed_member(
         self,
         db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
         name: &str,
         scope: PluginMemberScope,
     ) -> Option<Member<'db>> {
-        self.own_plugin_contributed_member_patch(db, name, scope)
+        self.own_plugin_contributed_member_patch(db, env, name, scope)
             .and_then(|patch| plugin_contribution_to_member(patch, scope))
     }
 
     fn own_plugin_contributed_member_patch(
         self,
         db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
         name: &str,
         scope: PluginMemberScope,
     ) -> Option<&'db PluginContributionMemberPatch<'db>> {
-        let semantic_plugins = Program::get(db).semantic_plugins(db);
+        let semantic_plugins = SemanticPlugins::environment_or_empty(db);
         if semantic_plugins.is_empty() {
             return None;
         }
@@ -1998,25 +2036,30 @@ impl<'db> StaticClassLiteral<'db> {
             .iter()
             .filter(|plugin| plugin.project_index_enabled())
             .find_map(|plugin| {
-                plugin_project_index(db, SemanticPluginId::new(db, plugin.id().to_string()))
-                    .contributions
-                    .iter()
-                    .find(|contribution| {
-                        contribution.target.matches(scope, &owner_qualified_name)
-                            && contribution
-                                .patch
-                                .member_name()
-                                .is_some_and(|member_name| member_name.as_str() == name)
-                    })
-                    .map(|contribution| &contribution.patch)
+                plugin_project_index(
+                    db,
+                    SemanticPluginId::new(db, plugin.id().to_string()),
+                    env.program(db),
+                )
+                .contributions
+                .iter()
+                .find(|contribution| {
+                    contribution.target.matches(scope, &owner_qualified_name)
+                        && contribution
+                            .patch
+                            .member_name()
+                            .is_some_and(|member_name| member_name.as_str() == name)
+                })
+                .map(|contribution| &contribution.patch)
             })
     }
 
     fn plugin_contributed_constructor_patch(
         self,
         db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
     ) -> Option<PluginConstructorPatch<'db>> {
-        let semantic_plugins = Program::get(db).semantic_plugins(db);
+        let semantic_plugins = SemanticPlugins::environment_or_empty(db);
         if semantic_plugins.is_empty() {
             return None;
         }
@@ -2027,25 +2070,29 @@ impl<'db> StaticClassLiteral<'db> {
             .iter()
             .filter(|plugin| plugin.project_index_enabled())
             .find_map(|plugin| {
-                plugin_project_index(db, SemanticPluginId::new(db, plugin.id().to_string()))
-                    .contributions
-                    .iter()
-                    .find_map(|contribution| {
-                        let PluginContributionTarget::Constructor(qualified_name) =
-                            &contribution.target
-                        else {
-                            return None;
-                        };
-                        if qualified_name != &owner_qualified_name {
-                            return None;
-                        }
-                        let PluginContributionMemberPatch::Constructor(constructor) =
-                            &contribution.patch
-                        else {
-                            return None;
-                        };
-                        Some(constructor.clone())
-                    })
+                plugin_project_index(
+                    db,
+                    SemanticPluginId::new(db, plugin.id().to_string()),
+                    env.program(db),
+                )
+                .contributions
+                .iter()
+                .find_map(|contribution| {
+                    let PluginContributionTarget::Constructor(qualified_name) =
+                        &contribution.target
+                    else {
+                        return None;
+                    };
+                    if qualified_name != &owner_qualified_name {
+                        return None;
+                    }
+                    let PluginContributionMemberPatch::Constructor(constructor) =
+                        &contribution.patch
+                    else {
+                        return None;
+                    };
+                    Some(constructor.clone())
+                })
             })
     }
 
@@ -2063,13 +2110,13 @@ impl<'db> StaticClassLiteral<'db> {
         inherited_generic_context: Option<GenericContext<'db>>,
         name: &str,
     ) -> Option<Type<'db>> {
-        let env = &plugin_program_environment(db);
+        let env = &ProgramEnvironment::from_scope(self.body_scope(db));
         if name != "__init__" {
             return None;
         }
 
         let patch = self.plugin_class_transform_patch(db);
-        let contributed_constructor = self.plugin_contributed_constructor_patch(db);
+        let contributed_constructor = self.plugin_contributed_constructor_patch(db, env);
         if patch.constructor.is_none()
             && contributed_constructor.is_none()
             && patch
@@ -3609,8 +3656,9 @@ impl<'db> StaticClassLiteral<'db> {
         let class_body_scope = attribute.class_body_scope(db);
         let name = attribute.name(db).as_str();
         let target_method_decorator = attribute.target_method_decorator(db);
-        let python_file = class_body_scope.python_file(db);
-        let env = &ProgramEnvironment::from_file(python_file);
+        let program_file = class_body_scope.program_file(db);
+        let python_file = program_file.python_file(db);
+        let env = &ProgramEnvironment::from_file(program_file);
 
         // If we do not see any declarations of an attribute, neither in the class body nor in
         // any method, we build a union of the raw types inferred from all bindings of that
@@ -3622,7 +3670,7 @@ impl<'db> StaticClassLiteral<'db> {
         let mut provenance = Provenance::Unknown;
 
         let module = parsed_module(db, python_file).load(db);
-        let index = semantic_index(db, python_file);
+        let index = semantic_index(db, program_file);
         let class_map = use_def_map(db, class_body_scope);
         let class_table = place_table(db, class_body_scope);
         let is_valid_scope = |method_scope: &Scope| {
@@ -4132,7 +4180,7 @@ impl<'db> StaticClassLiteral<'db> {
                     let implicit =
                         Self::implicit_attribute(db, body_scope, name, MethodDecorator::None);
                     if implicit.is_undefined() {
-                        self.own_plugin_instance_member_after_miss(db, name)
+                        self.own_plugin_instance_member_after_miss(db, env, name)
                             .unwrap_or(implicit)
                     } else {
                         implicit
@@ -4145,7 +4193,7 @@ impl<'db> StaticClassLiteral<'db> {
 
             let implicit = Self::implicit_attribute(db, body_scope, name, MethodDecorator::None);
             if implicit.is_undefined() {
-                self.own_plugin_instance_member_after_miss(db, name)
+                self.own_plugin_instance_member_after_miss(db, env, name)
                     .unwrap_or(implicit)
             } else {
                 implicit
@@ -4436,14 +4484,17 @@ fn plugin_class_transform_route_candidates<'db>(
 
 #[salsa::tracked(
     returns(ref),
-    cycle_initial=|_, _, _| PluginProjectIndex::default(),
+    cycle_initial=|_, _, _, _| PluginProjectIndex::default(),
     heap_size=get_size2::GetSize::get_heap_size
 )]
 fn plugin_project_index<'db>(
     db: &'db dyn Db,
     plugin_id: SemanticPluginId<'db>,
+    program: Program<'db>,
 ) -> PluginProjectIndex<'db> {
-    let semantic_plugins = Program::get(db).semantic_plugins(db);
+    let program_environment = ProgramEnvironment::from_program(program);
+    let env = &program_environment;
+    let semantic_plugins = SemanticPlugins::environment_or_empty(db);
     let Some(plugin) = semantic_plugins
         .plugins()
         .iter()
@@ -4452,7 +4503,7 @@ fn plugin_project_index<'db>(
         return PluginProjectIndex::default();
     };
 
-    let settings = plugin_settings_summaries(db, plugin);
+    let settings = plugin_settings_summaries(db, env, plugin);
     let settings_diagnostics = settings
         .iter()
         .flat_map(|settings| settings.diagnostics.iter().cloned())
@@ -4470,13 +4521,13 @@ fn plugin_project_index<'db>(
     let request = protocol::PluginRequest::BuildProjectIndex(protocol::BuildProjectIndexRequest {
         context: protocol::ProjectContext {
             root: String::new(),
-            python_version: Program::get(db).python_version(db).to_string(),
-            platform: Program::get(db).python_platform(db).to_string(),
+            python_version: env.python_version(db).to_string(),
+            platform: env.program(db).python_platform(db).to_string(),
             config,
         },
-        classes: plugin_project_class_summaries(db),
+        classes: plugin_project_class_summaries(db, env),
         settings,
-        assignments: plugin_project_assignment_summaries(db),
+        assignments: plugin_project_assignment_summaries(db, env),
         previous_index_fingerprint: None,
     });
     tracing::trace!(
@@ -4495,12 +4546,12 @@ fn plugin_project_index<'db>(
         return PluginProjectIndex::default();
     };
 
-    let virtual_types = plugin_virtual_type_patches_from_protocol(db, response.virtual_types);
+    let virtual_types = plugin_virtual_type_patches_from_protocol(db, env, response.virtual_types);
     let mut contributions = response
         .contributions
         .into_iter()
         .filter_map(|contribution| {
-            plugin_contribution_to_patch(db, contribution, virtual_types.as_ref())
+            plugin_contribution_to_patch(db, env, contribution, virtual_types.as_ref())
         })
         .collect::<Vec<_>>();
     contributions.sort_by(|left, right| {
@@ -4530,9 +4581,10 @@ fn plugin_project_index<'db>(
 
 pub(crate) fn plugin_project_index_diagnostics_for_file(
     db: &dyn Db,
+    env: &ProgramEnvironment<'_>,
     file: File,
 ) -> Vec<Diagnostic> {
-    let semantic_plugins = Program::get(db).semantic_plugins(db);
+    let semantic_plugins = SemanticPlugins::environment_or_empty(db);
     if semantic_plugins.is_empty() {
         return Vec::new();
     }
@@ -4542,13 +4594,15 @@ pub(crate) fn plugin_project_index_diagnostics_for_file(
         .iter()
         .filter(|plugin| plugin.project_index_enabled())
         .flat_map(|plugin| {
-            plugin_project_index(db, SemanticPluginId::new(db, plugin.id().to_string()))
-                .diagnostics
-                .iter()
-                .filter_map(|diagnostic| {
-                    plugin_project_diagnostic_to_diagnostic(db, file, diagnostic)
-                })
-                .collect::<Vec<_>>()
+            plugin_project_index(
+                db,
+                SemanticPluginId::new(db, plugin.id().to_string()),
+                env.program(db),
+            )
+            .diagnostics
+            .iter()
+            .filter_map(|diagnostic| plugin_project_diagnostic_to_diagnostic(db, file, diagnostic))
+            .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -4628,34 +4682,47 @@ fn plugin_project_diagnostic_to_diagnostic(
 
 pub(crate) fn plugin_project_index_json(
     db: &dyn Db,
+    env: &ProgramEnvironment<'_>,
     plugin: &SemanticPlugin,
 ) -> Option<serde_json::Value> {
     if !plugin.project_index_enabled() {
         return None;
     }
 
-    let plugin_index_json =
-        plugin_project_index(db, SemanticPluginId::new(db, plugin.id().to_string()))
-            .plugin_index_json
-            .as_ref()?;
+    let plugin_index_json = plugin_project_index(
+        db,
+        SemanticPluginId::new(db, plugin.id().to_string()),
+        env.program(db),
+    )
+    .plugin_index_json
+    .as_ref()?;
     serde_json::from_str(plugin_index_json).ok()
 }
 
 pub(crate) fn plugin_project_index_virtual_types<'db>(
     db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
     plugin: &SemanticPlugin,
 ) -> &'db [PluginVirtualTypePatch<'db>] {
     if !plugin.project_index_enabled() {
         return &[];
     }
 
-    &plugin_project_index(db, SemanticPluginId::new(db, plugin.id().to_string())).virtual_types
+    &plugin_project_index(
+        db,
+        SemanticPluginId::new(db, plugin.id().to_string()),
+        env.program(db),
+    )
+    .virtual_types
 }
 
-fn plugin_project_class_summaries(db: &dyn Db) -> Vec<protocol::ClassSummary> {
+fn plugin_project_class_summaries<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+) -> Vec<protocol::ClassSummary> {
     let mut summaries = Vec::new();
 
-    for module in all_modules(db, Program::get(db).python_version(db)) {
+    for module in all_modules(db, env.resolver_environment(db)) {
         let Some(file) = module.file(db) else {
             continue;
         };
@@ -4663,23 +4730,26 @@ fn plugin_project_class_summaries(db: &dyn Db) -> Vec<protocol::ClassSummary> {
             continue;
         }
 
-        let parsed = parsed_module(db, plugin_python_file(db, file)).load(db);
+        let parsed = parsed_module(db, db.program_file(file).python_file(db)).load(db);
         for statement in &parsed.syntax().body {
             let Some(class) = static_class_literal_from_statement(db, file, statement) else {
                 continue;
             };
-            let summary = plugin_class_summary(db, class);
-            summaries.push(plugin_protocol_class_summary(db, class, &summary));
+            let summary = plugin_class_summary(db, env, class);
+            summaries.push(plugin_protocol_class_summary(db, env, class, &summary));
         }
     }
 
     summaries
 }
 
-fn plugin_project_assignment_summaries(db: &dyn Db) -> Vec<protocol::AssignmentSummary> {
+fn plugin_project_assignment_summaries<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+) -> Vec<protocol::AssignmentSummary> {
     let mut summaries = Vec::new();
 
-    for module in all_modules(db, Program::get(db).python_version(db)) {
+    for module in all_modules(db, env.resolver_environment(db)) {
         let Some(file) = module.file(db) else {
             continue;
         };
@@ -4687,8 +4757,8 @@ fn plugin_project_assignment_summaries(db: &dyn Db) -> Vec<protocol::AssignmentS
             continue;
         }
 
-        let parsed = parsed_module(db, plugin_python_file(db, file)).load(db);
-        let index = semantic_index(db, plugin_python_file(db, file));
+        let parsed = parsed_module(db, db.program_file(file).python_file(db)).load(db);
+        let index = semantic_index(db, db.program_file(file));
         let module_name = plugin_module_name(db, file);
         for statement in &parsed.syntax().body {
             let (target, value, definition) = match statement {
@@ -4722,11 +4792,12 @@ fn plugin_project_assignment_summaries(db: &dyn Db) -> Vec<protocol::AssignmentS
                 qualified_name: format!("{module_name}.{name}"),
                 assigned_value: plugin_assigned_value_summary(
                     db,
+                    env,
                     definition,
                     value,
                     Some(inferred_ty),
                 ),
-                inferred_type: Some(plugin_type_expr_from_type(db, inferred_ty)),
+                inferred_type: Some(plugin_type_expr_from_type(db, env, inferred_ty)),
                 source: plugin_symbol_source(
                     db,
                     file,
@@ -4740,25 +4811,27 @@ fn plugin_project_assignment_summaries(db: &dyn Db) -> Vec<protocol::AssignmentS
     summaries
 }
 
-fn plugin_settings_summaries(
-    db: &dyn Db,
+fn plugin_settings_summaries<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
     plugin: &SemanticPlugin,
 ) -> Vec<protocol::SettingsModuleSummary> {
     plugin
         .settings_module_claims()
         .iter()
         .map(|module_name| {
-            plugin_settings_module_summary(db, module_name, plugin.strict_settings())
+            plugin_settings_module_summary(db, env, module_name, plugin.strict_settings())
         })
         .collect()
 }
 
 fn plugin_settings_module_summary(
     db: &dyn Db,
+    env: &ProgramEnvironment<'_>,
     module_name: &str,
     strict: bool,
 ) -> protocol::SettingsModuleSummary {
-    let Some(file) = plugin_settings_module_file(db, module_name) else {
+    let Some(file) = plugin_settings_module_file(db, env, module_name) else {
         return protocol::SettingsModuleSummary {
             module: module_name.to_string(),
             values: Vec::new(),
@@ -4776,7 +4849,7 @@ fn plugin_settings_module_summary(
         };
     };
 
-    let parsed = parsed_module(db, plugin_python_file(db, file)).load(db);
+    let parsed = parsed_module(db, db.program_file(file).python_file(db)).load(db);
     let mut values = Vec::new();
     let mut diagnostics = Vec::new();
     let mut dependencies = BTreeSet::from([plugin_file_path(db, file)]);
@@ -4793,6 +4866,7 @@ fn plugin_settings_module_summary(
     for statement in &parsed.syntax().body {
         if let Some(value) = setting_summary_from_statement(
             db,
+            env,
             file,
             module_name,
             statement,
@@ -4822,8 +4896,12 @@ fn plugin_settings_module_summary(
     }
 }
 
-fn plugin_settings_module_file(db: &dyn Db, module_name: &str) -> Option<File> {
-    for module in all_modules(db, Program::get(db).python_version(db)) {
+fn plugin_settings_module_file<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    module_name: &str,
+) -> Option<File> {
+    for module in all_modules(db, env.resolver_environment(db)) {
         if module.name(db) == module_name {
             return module.file(db);
         }
@@ -4901,8 +4979,9 @@ fn setting_assignment_from_statement(
 }
 
 #[expect(clippy::too_many_arguments)]
-fn setting_summary_from_statement(
-    db: &dyn Db,
+fn setting_summary_from_statement<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
     file: File,
     module_name: &str,
     statement: &ast::Stmt,
@@ -4926,6 +5005,7 @@ fn setting_summary_from_statement(
     );
     let value = plugin_settings_literal_value_from_expr(
         db,
+        env,
         module_name,
         value,
         settings_bindings,
@@ -4998,8 +5078,7 @@ fn static_class_literal_from_statement<'db>(
     statement: &ast::Stmt,
 ) -> Option<StaticClassLiteral<'db>> {
     let class_node = statement.as_class_def_stmt()?;
-    let definition =
-        semantic_index(db, plugin_python_file(db, file)).expect_single_definition(class_node);
+    let definition = semantic_index(db, db.program_file(file)).expect_single_definition(class_node);
     let ClassLiteral::Static(class) = crate::types::infer::original_class_type(db, definition)?
     else {
         return None;
@@ -5009,6 +5088,7 @@ fn static_class_literal_from_statement<'db>(
 
 fn plugin_contribution_to_patch<'db>(
     db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
     contribution: protocol::Contribution,
     virtual_types: &[PluginVirtualTypePatch<'db>],
 ) -> Option<PluginContributionPatch<'db>> {
@@ -5030,6 +5110,7 @@ fn plugin_contribution_to_patch<'db>(
                 replace_existing: member.mode == protocol::MemberPatchMode::ReplaceExisting,
                 ty: plugin_member_access_to_type_with_virtual_types(
                     db,
+                    env,
                     &member.access,
                     virtual_types,
                 ),
@@ -5037,7 +5118,7 @@ fn plugin_contribution_to_patch<'db>(
             })
         }
         protocol::ContributionPatch::Field(field) => PluginContributionMemberPatch::Field(
-            plugin_contribution_field_to_patch(db, &field, virtual_types),
+            plugin_contribution_field_to_patch(db, env, &field, virtual_types),
         ),
         protocol::ContributionPatch::Constructor(signature) => {
             PluginContributionMemberPatch::Constructor(PluginConstructorPatch {
@@ -5047,6 +5128,7 @@ fn plugin_contribution_to_patch<'db>(
                     .map(|parameter| {
                         plugin_constructor_parameter_from_protocol_type_expr(
                             db,
+                            env,
                             parameter,
                             virtual_types,
                         )
@@ -5062,20 +5144,21 @@ fn plugin_contribution_to_patch<'db>(
 
 fn plugin_contribution_field_to_patch<'db>(
     db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
     field: &protocol::FieldPatch,
     virtual_types: &[PluginVirtualTypePatch<'db>],
 ) -> PluginContributionFieldPatch<'db> {
     let descriptor_class_ty = match field.descriptor.as_ref() {
         Some(protocol::MemberAccessPatch::Value { type_expr }) => Some(
-            plugin_type_expr_to_type_with_virtual_types(db, type_expr, virtual_types),
+            plugin_type_expr_to_type_with_virtual_types(db, env, type_expr, virtual_types),
         ),
         Some(protocol::MemberAccessPatch::Descriptor { class_type, .. }) => {
             class_type.as_ref().map(|type_expr| {
-                plugin_type_expr_to_type_with_virtual_types(db, type_expr, virtual_types)
+                plugin_type_expr_to_type_with_virtual_types(db, env, type_expr, virtual_types)
             })
         }
         Some(protocol::MemberAccessPatch::Callable { fallback_type, .. }) => Some(
-            plugin_type_expr_to_type_with_virtual_types(db, fallback_type, virtual_types),
+            plugin_type_expr_to_type_with_virtual_types(db, env, fallback_type, virtual_types),
         ),
         None => None,
     };
@@ -5086,11 +5169,12 @@ fn plugin_contribution_field_to_patch<'db>(
         descriptor_class_ty,
         instance_get_ty: plugin_type_expr_to_type_with_virtual_types(
             db,
+            env,
             &field.instance_get_type,
             virtual_types,
         ),
         instance_set_ty: field.instance_set_type.as_ref().map(|type_expr| {
-            plugin_type_expr_to_type_with_virtual_types(db, type_expr, virtual_types)
+            plugin_type_expr_to_type_with_virtual_types(db, env, type_expr, virtual_types)
         }),
     }
 }
@@ -5112,20 +5196,23 @@ fn plugin_contribution_sort_key(
 
 fn plugin_class_summary<'db>(
     db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
     class: StaticClassLiteral<'db>,
 ) -> PluginClassSummary<'db> {
     let file = class.file(db);
-    let module = parsed_module(db, plugin_python_file(db, file)).load(db);
+    let module = parsed_module(db, db.program_file(file).python_file(db)).load(db);
     let class_node = class.node(db, &module);
     let class_definition =
-        semantic_index(db, plugin_python_file(db, file)).expect_single_definition(class_node);
+        semantic_index(db, db.program_file(file)).expect_single_definition(class_node);
     let qualified_name = ClassLiteral::Static(class).qualified_name(db).to_string();
 
     let fields = plugin_class_field_summaries(db, class, &module);
     let decorators = class_node
         .decorator_list
         .iter()
-        .map(|decorator| plugin_call_or_symbol_summary(db, class_definition, &decorator.expression))
+        .map(|decorator| {
+            plugin_call_or_symbol_summary(db, env, class_definition, &decorator.expression)
+        })
         .collect();
     let metaclass = class_node.arguments.as_ref().and_then(|arguments| {
         arguments
@@ -5137,13 +5224,15 @@ fn plugin_class_summary<'db>(
     let nested_classes = class_node
         .body
         .iter()
-        .filter_map(|statement| nested_class_summary(db, file, &module, &qualified_name, statement))
+        .filter_map(|statement| {
+            nested_class_summary(db, env, file, &module, &qualified_name, statement)
+        })
         .collect();
     let methods = class_node
         .body
         .iter()
         .filter_map(|statement| {
-            plugin_method_summary(db, file, &module, statement, &qualified_name)
+            plugin_method_summary(db, env, file, &module, statement, &qualified_name)
         })
         .collect();
     let class_constants = class_node
@@ -5168,7 +5257,7 @@ fn plugin_class_field_summaries<'db>(
     class: StaticClassLiteral<'db>,
     module: &ParsedModuleRef,
 ) -> Vec<PluginClassFieldSummary<'db>> {
-    let env = &plugin_program_environment(db);
+    let env = &ProgramEnvironment::from_scope(class.body_scope(db));
     let class_body_scope = class.body_scope(db);
     let file = class.file(db);
     let class_definition = class.definition(db);
@@ -5261,7 +5350,7 @@ fn plugin_class_field_summaries<'db>(
             name: symbol.name().clone(),
             annotation: annotation_ty,
             assigned_value: value.map(|value| {
-                plugin_assigned_value_summary(db, class_definition, value, binding_place)
+                plugin_assigned_value_summary(db, env, class_definition, value, binding_place)
             }),
             inferred_type: binding_place.or(annotation_ty),
             has_default: value.is_some(),
@@ -5274,6 +5363,7 @@ fn plugin_class_field_summaries<'db>(
 
 fn plugin_analyze_class_request<'db>(
     db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
     class: StaticClassLiteral<'db>,
     summary: &PluginClassSummary<'db>,
     project_index: Option<serde_json::Value>,
@@ -5281,14 +5371,15 @@ fn plugin_analyze_class_request<'db>(
     let file = class.file(db);
 
     protocol::PluginRequest::AnalyzeClass(protocol::AnalyzeClassRequest {
-        context: plugin_semantic_context(db, file, false),
-        class: plugin_protocol_class_summary(db, class, summary),
+        context: plugin_semantic_context(db, env, file, false),
+        class: plugin_protocol_class_summary(db, env, class, summary),
         project_index,
     })
 }
 
 fn plugin_protocol_class_summary<'db>(
     db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
     class: StaticClassLiteral<'db>,
     summary: &PluginClassSummary<'db>,
 ) -> protocol::ClassSummary {
@@ -5297,12 +5388,12 @@ fn plugin_protocol_class_summary<'db>(
         bases: class
             .explicit_bases(db)
             .iter()
-            .map(|base| plugin_class_base_type_expr_from_type(db, *base))
+            .map(|base| plugin_class_base_type_expr_from_type(db, env, *base))
             .collect(),
         decorators: summary.decorators.clone(),
         metaclass: summary
             .metaclass
-            .map(|metaclass| plugin_type_expr_from_type(db, metaclass)),
+            .map(|metaclass| plugin_type_expr_from_type(db, env, metaclass)),
         fields: summary
             .fields
             .iter()
@@ -5310,11 +5401,11 @@ fn plugin_protocol_class_summary<'db>(
                 name: field.name.to_string(),
                 annotation: field
                     .annotation
-                    .map(|ty| plugin_type_expr_from_type(db, ty)),
+                    .map(|ty| plugin_type_expr_from_type(db, env, ty)),
                 assigned_value: field.assigned_value.clone(),
                 inferred_type: field
                     .inferred_type
-                    .map(|ty| plugin_type_expr_from_type(db, ty)),
+                    .map(|ty| plugin_type_expr_from_type(db, env, ty)),
                 has_default: field.has_default,
                 source: field.source.clone(),
             })
@@ -5328,14 +5419,14 @@ fn plugin_protocol_class_summary<'db>(
 
 fn plugin_method_summary(
     db: &dyn Db,
+    env: &ProgramEnvironment<'_>,
     file: File,
     _module: &ParsedModuleRef,
     statement: &ast::Stmt,
     owner_qualified_name: &str,
 ) -> Option<protocol::MethodSummary> {
     let function = statement.as_function_def_stmt()?;
-    let definition =
-        semantic_index(db, plugin_python_file(db, file)).expect_single_definition(function);
+    let definition = semantic_index(db, db.program_file(file)).expect_single_definition(function);
     let parameters = &function.parameters;
     let mut summarized_parameters = Vec::with_capacity(parameters.len());
 
@@ -5347,6 +5438,7 @@ fn plugin_method_summary(
                 type_expr: parameter.annotation.as_deref().map(|annotation| {
                     plugin_type_expr_from_type(
                         db,
+                        env,
                         definition_expression_type(db, definition, annotation),
                     )
                 }),
@@ -5388,7 +5480,9 @@ fn plugin_method_summary(
         decorators: function
             .decorator_list
             .iter()
-            .map(|decorator| plugin_call_or_symbol_summary(db, definition, &decorator.expression))
+            .map(|decorator| {
+                plugin_call_or_symbol_summary(db, env, definition, &decorator.expression)
+            })
             .collect(),
         parameters: summarized_parameters,
         return_type: function.returns.as_deref().map(|returns| {
@@ -5403,7 +5497,11 @@ fn plugin_method_summary(
                     },
                 )
             } else {
-                plugin_type_expr_from_type(db, definition_expression_type(db, definition, returns))
+                plugin_type_expr_from_type(
+                    db,
+                    env,
+                    definition_expression_type(db, definition, returns),
+                )
             }
         }),
         is_public: !function.name.starts_with('_'),
@@ -5413,10 +5511,11 @@ fn plugin_method_summary(
 
 fn plugin_class_base_type_expr_from_type<'db>(
     db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
     ty: Type<'db>,
 ) -> protocol::TypeExpr {
     let Type::GenericAlias(alias) = ty else {
-        return plugin_type_expr_from_type(db, ty);
+        return plugin_type_expr_from_type(db, env, ty);
     };
     let origin = ClassLiteral::Static(alias.origin(db))
         .qualified_name(db)
@@ -5425,15 +5524,16 @@ fn plugin_class_base_type_expr_from_type<'db>(
         .specialization(db)
         .types(db)
         .iter()
-        .map(|argument| plugin_type_expr_from_type(db, *argument).expression)
+        .map(|argument| plugin_type_expr_from_type(db, env, *argument).expression)
         .collect::<Vec<_>>();
-    let mut summary = plugin_type_expr_from_type(db, ty);
+    let mut summary = plugin_type_expr_from_type(db, env, ty);
     summary.expression = format!("{origin}[{}]", arguments.join(", "));
     summary
 }
 
-fn nested_class_summary(
-    db: &dyn Db,
+fn nested_class_summary<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
     file: File,
     module: &ParsedModuleRef,
     owner_qualified_name: &str,
@@ -5441,8 +5541,7 @@ fn nested_class_summary(
 ) -> Option<protocol::NestedClassSummary> {
     let class = statement.as_class_def_stmt()?;
     let qualified_name = format!("{owner_qualified_name}.{}", class.name);
-    let definition =
-        semantic_index(db, plugin_python_file(db, file)).expect_single_definition(class);
+    let definition = semantic_index(db, db.program_file(file)).expect_single_definition(class);
 
     Some(protocol::NestedClassSummary {
         name: class.name.to_string(),
@@ -5457,6 +5556,7 @@ fn nested_class_summary(
                     .map(|base| {
                         plugin_class_base_type_expr_from_type(
                             db,
+                            env,
                             definition_expression_type(db, definition, base),
                         )
                     })
@@ -5514,6 +5614,7 @@ fn constant_summary_from_statement(
 
 fn plugin_assigned_value_summary<'db>(
     db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
     definition: Definition<'db>,
     value: &ast::Expr,
     inferred_type: Option<Type<'db>>,
@@ -5523,9 +5624,9 @@ fn plugin_assigned_value_summary<'db>(
     {
         return protocol::AssignedValueSummary::Call(protocol::CallValueSummary {
             callee,
-            receiver: plugin_call_receiver_summary(db, definition, &call.func),
-            arguments: plugin_argument_summaries(db, definition, &call.arguments),
-            return_type: inferred_type.map(|ty| plugin_type_expr_from_type(db, ty)),
+            receiver: plugin_call_receiver_summary(db, env, definition, &call.func),
+            arguments: plugin_argument_summaries(db, env, definition, &call.arguments),
+            return_type: inferred_type.map(|ty| plugin_type_expr_from_type(db, env, ty)),
         });
     }
 
@@ -5539,18 +5640,19 @@ fn plugin_assigned_value_summary<'db>(
             ast::Expr::Attribute(_) => protocol::AssignedValueSummary::Attribute(symbol),
             ast::Expr::Name(_) => protocol::AssignedValueSummary::Name(symbol),
             _ => protocol::AssignedValueSummary::Other {
-                inferred_type: inferred_type.map(|ty| plugin_type_expr_from_type(db, ty)),
+                inferred_type: inferred_type.map(|ty| plugin_type_expr_from_type(db, env, ty)),
             },
         };
     }
 
     protocol::AssignedValueSummary::Other {
-        inferred_type: inferred_type.map(|ty| plugin_type_expr_from_type(db, ty)),
+        inferred_type: inferred_type.map(|ty| plugin_type_expr_from_type(db, env, ty)),
     }
 }
 
 fn plugin_call_or_symbol_summary<'db>(
     db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
     definition: Definition<'db>,
     expression: &ast::Expr,
 ) -> protocol::CallOrSymbolSummary {
@@ -5559,10 +5661,11 @@ fn plugin_call_or_symbol_summary<'db>(
     {
         return protocol::CallOrSymbolSummary::Call(protocol::CallValueSummary {
             callee,
-            receiver: plugin_call_receiver_summary(db, definition, &call.func),
-            arguments: plugin_argument_summaries(db, definition, &call.arguments),
+            receiver: plugin_call_receiver_summary(db, env, definition, &call.func),
+            arguments: plugin_argument_summaries(db, env, definition, &call.arguments),
             return_type: Some(plugin_type_expr_from_type(
                 db,
+                env,
                 definition_expression_type(db, definition, expression),
             )),
         });
@@ -5575,6 +5678,7 @@ fn plugin_call_or_symbol_summary<'db>(
     protocol::CallOrSymbolSummary::Other {
         inferred_type: Some(plugin_type_expr_from_type(
             db,
+            env,
             definition_expression_type(db, definition, expression),
         )),
     }
@@ -5582,6 +5686,7 @@ fn plugin_call_or_symbol_summary<'db>(
 
 fn plugin_call_receiver_summary<'db>(
     db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
     definition: Definition<'db>,
     callee: &ast::Expr,
 ) -> Option<protocol::ValueSummary> {
@@ -5592,6 +5697,7 @@ fn plugin_call_receiver_summary<'db>(
         symbol: plugin_symbol_ref_from_expr(&attribute.value),
         type_expr: Some(plugin_type_expr_from_type(
             db,
+            env,
             definition_expression_type(db, definition, &attribute.value),
         )),
     })
@@ -5599,6 +5705,7 @@ fn plugin_call_receiver_summary<'db>(
 
 fn plugin_argument_summaries<'db>(
     db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
     definition: Definition<'db>,
     arguments: &ast::Arguments,
 ) -> Vec<protocol::ArgumentSummary> {
@@ -5615,6 +5722,7 @@ fn plugin_argument_summaries<'db>(
             kind,
             type_expr: Some(plugin_type_expr_from_type(
                 db,
+                env,
                 definition_expression_type(db, definition, argument),
             )),
             value: plugin_literal_value_from_expr(argument),
@@ -5637,6 +5745,7 @@ fn plugin_argument_summaries<'db>(
             },
             type_expr: Some(plugin_type_expr_from_type(
                 db,
+                env,
                 definition_expression_type(db, definition, &keyword.value),
             )),
             value: plugin_literal_value_from_expr(&keyword.value),
@@ -5711,8 +5820,13 @@ fn plugin_literal_value_from_expr(expression: &ast::Expr) -> protocol::LiteralVa
     }
 }
 
-fn plugin_settings_literal_value_from_expr(
-    db: &dyn Db,
+#[expect(
+    clippy::too_many_arguments,
+    reason = "threading the program environment pushes this one over the limit"
+)]
+fn plugin_settings_literal_value_from_expr<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
     module_name: &str,
     expression: &ast::Expr,
     settings_bindings: &BTreeMap<String, &ast::Expr>,
@@ -5730,6 +5844,7 @@ fn plugin_settings_literal_value_from_expr(
                 }
                 let resolved = plugin_settings_literal_value_from_expr(
                     db,
+                    env,
                     module_name,
                     value,
                     settings_bindings,
@@ -5746,6 +5861,7 @@ fn plugin_settings_literal_value_from_expr(
             };
             plugin_imported_settings_literal_value(
                 db,
+                env,
                 imported_module,
                 imported_name,
                 resolving,
@@ -5766,6 +5882,7 @@ fn plugin_settings_literal_value_from_expr(
             }
             plugin_imported_settings_literal_value(
                 db,
+                env,
                 imported_module,
                 imported_name,
                 resolving,
@@ -5779,6 +5896,7 @@ fn plugin_settings_literal_value_from_expr(
                 .map(|item| {
                     plugin_settings_literal_value_from_expr(
                         db,
+                        env,
                         module_name,
                         item,
                         settings_bindings,
@@ -5796,6 +5914,7 @@ fn plugin_settings_literal_value_from_expr(
                 .map(|item| {
                     plugin_settings_literal_value_from_expr(
                         db,
+                        env,
                         module_name,
                         item,
                         settings_bindings,
@@ -5814,6 +5933,7 @@ fn plugin_settings_literal_value_from_expr(
                     Some(protocol::LiteralDictEntry {
                         key: plugin_settings_literal_value_from_expr(
                             db,
+                            env,
                             module_name,
                             item.key.as_ref()?,
                             settings_bindings,
@@ -5823,6 +5943,7 @@ fn plugin_settings_literal_value_from_expr(
                         ),
                         value: plugin_settings_literal_value_from_expr(
                             db,
+                            env,
                             module_name,
                             &item.value,
                             settings_bindings,
@@ -5837,6 +5958,7 @@ fn plugin_settings_literal_value_from_expr(
         ast::Expr::BinOp(binary) if binary.op == ast::Operator::Add => plugin_literal_add(
             plugin_settings_literal_value_from_expr(
                 db,
+                env,
                 module_name,
                 &binary.left,
                 settings_bindings,
@@ -5846,6 +5968,7 @@ fn plugin_settings_literal_value_from_expr(
             ),
             plugin_settings_literal_value_from_expr(
                 db,
+                env,
                 module_name,
                 &binary.right,
                 settings_bindings,
@@ -5860,6 +5983,7 @@ fn plugin_settings_literal_value_from_expr(
 
 fn plugin_imported_settings_literal_value(
     db: &dyn Db,
+    env: &ProgramEnvironment<'_>,
     module_name: &str,
     setting_name: &str,
     resolving: &mut BTreeSet<String>,
@@ -5869,13 +5993,13 @@ fn plugin_imported_settings_literal_value(
     if !resolving.insert(resolving_key.clone()) {
         return protocol::LiteralValue::Unknown;
     }
-    let Some(file) = plugin_settings_module_file(db, module_name) else {
+    let Some(file) = plugin_settings_module_file(db, env, module_name) else {
         resolving.remove(&resolving_key);
         return protocol::LiteralValue::Unknown;
     };
     dependencies.insert(plugin_file_path(db, file));
 
-    let parsed = parsed_module(db, plugin_python_file(db, file)).load(db);
+    let parsed = parsed_module(db, db.program_file(file).python_file(db)).load(db);
     let settings_bindings = parsed
         .syntax()
         .body
@@ -5891,6 +6015,7 @@ fn plugin_imported_settings_literal_value(
     let import_bindings = plugin_settings_import_bindings(parsed.syntax().body.as_slice());
     let resolved = plugin_settings_literal_value_from_expr(
         db,
+        env,
         module_name,
         value,
         &settings_bindings,
@@ -5981,7 +6106,7 @@ fn plugin_symbol_source(
 }
 
 fn plugin_module_name(db: &dyn Db, file: File) -> String {
-    ty_module_resolver::file_to_module(db, plugin_python_file(db, file))
+    ty_module_resolver::file_to_module(db, db.program_file(file).resolver_file(db))
         .map(|module| module.name(db).to_string())
         .unwrap_or_default()
 }
@@ -5995,19 +6120,19 @@ fn plugin_resolve_member_request<'db>(
     owner_override: Option<Type<'db>>,
     project_index: Option<serde_json::Value>,
 ) -> protocol::PluginRequest {
-    let env = &plugin_program_environment(db);
+    let env = &ProgramEnvironment::from_scope(class.body_scope(db));
     let file = class.file(db);
     let owner = owner_override.unwrap_or_else(|| match scope {
         PluginMemberScope::Class => Type::ClassLiteral(ClassLiteral::Static(class)),
         PluginMemberScope::Instance => ClassLiteral::Static(class).to_non_generic_instance(db, env),
     });
     let request = protocol::ResolveMemberRequest {
-        context: plugin_semantic_context(db, file, false),
-        owner: plugin_type_expr_from_type(db, owner),
+        context: plugin_semantic_context(db, env, file, false),
+        owner: plugin_type_expr_from_type(db, env, owner),
         member_name: member_name.to_string(),
         existing_member: existing_ty.map(|ty| protocol::MemberSummary {
             name: member_name.to_string(),
-            access: protocol::MemberAccessPatch::value(plugin_type_expr_from_type(db, ty)),
+            access: protocol::MemberAccessPatch::value(plugin_type_expr_from_type(db, env, ty)),
             is_read_only: false,
         }),
         project_index,
@@ -6159,6 +6284,7 @@ fn execute_member_plugin(
 #[expect(clippy::too_many_arguments)]
 fn merge_plugin_class_response<'db>(
     db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
     class: StaticClassLiteral<'db>,
     response: protocol::PluginResponse,
     virtual_types: &[PluginVirtualTypePatch<'db>],
@@ -6180,6 +6306,7 @@ fn merge_plugin_class_response<'db>(
             Some(protocol::MemberAccessPatch::Value { type_expr }) => {
                 Some(plugin_type_expr_to_type_in_class_with_virtual_types(
                     db,
+                    env,
                     type_expr,
                     class,
                     virtual_types,
@@ -6189,6 +6316,7 @@ fn merge_plugin_class_response<'db>(
                 class_type.as_ref().map(|type_expr| {
                     plugin_type_expr_to_type_in_class_with_virtual_types(
                         db,
+                        env,
                         type_expr,
                         class,
                         virtual_types,
@@ -6198,6 +6326,7 @@ fn merge_plugin_class_response<'db>(
             Some(protocol::MemberAccessPatch::Callable { fallback_type, .. }) => {
                 Some(plugin_type_expr_to_type_in_class_with_virtual_types(
                     db,
+                    env,
                     fallback_type,
                     class,
                     virtual_types,
@@ -6211,6 +6340,7 @@ fn merge_plugin_class_response<'db>(
             descriptor_class_ty,
             instance_get_ty: plugin_type_expr_to_type_in_class_with_virtual_types(
                 db,
+                env,
                 &field.instance_get_type,
                 class,
                 virtual_types,
@@ -6218,6 +6348,7 @@ fn merge_plugin_class_response<'db>(
             instance_set_ty: field.instance_set_type.as_ref().map(|type_expr| {
                 plugin_type_expr_to_type_in_class_with_virtual_types(
                     db,
+                    env,
                     type_expr,
                     class,
                     virtual_types,
@@ -6225,7 +6356,7 @@ fn merge_plugin_class_response<'db>(
             }),
             has_default: field.has_default,
             constructor_parameter: field.constructor_parameter.map(|parameter| {
-                plugin_constructor_parameter_from_protocol(db, class, parameter, virtual_types)
+                plugin_constructor_parameter_from_protocol(db, env, class, parameter, virtual_types)
             }),
         });
     }
@@ -6238,7 +6369,13 @@ fn merge_plugin_class_response<'db>(
         class_members.push(PluginMemberPatch {
             name,
             replace_existing: member.mode == protocol::MemberPatchMode::ReplaceExisting,
-            ty: plugin_member_access_to_type_in_class(db, &member.access, class, virtual_types),
+            ty: plugin_member_access_to_type_in_class(
+                db,
+                env,
+                &member.access,
+                class,
+                virtual_types,
+            ),
             read_only: member.read_only,
         });
     }
@@ -6254,7 +6391,13 @@ fn merge_plugin_class_response<'db>(
         instance_members.push(PluginMemberPatch {
             name,
             replace_existing: member.mode == protocol::MemberPatchMode::ReplaceExisting,
-            ty: plugin_member_access_to_type_in_class(db, &member.access, class, virtual_types),
+            ty: plugin_member_access_to_type_in_class(
+                db,
+                env,
+                &member.access,
+                class,
+                virtual_types,
+            ),
             read_only: member.read_only,
         });
     }
@@ -6265,7 +6408,13 @@ fn merge_plugin_class_response<'db>(
                 .parameters
                 .into_iter()
                 .map(|parameter| {
-                    plugin_constructor_parameter_from_protocol(db, class, parameter, virtual_types)
+                    plugin_constructor_parameter_from_protocol(
+                        db,
+                        env,
+                        class,
+                        parameter,
+                        virtual_types,
+                    )
                 })
                 .collect(),
         });
@@ -6274,6 +6423,7 @@ fn merge_plugin_class_response<'db>(
 
 fn plugin_constructor_parameter_from_protocol<'db>(
     db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
     class: StaticClassLiteral<'db>,
     parameter: protocol::Parameter,
     virtual_types: &[PluginVirtualTypePatch<'db>],
@@ -6297,6 +6447,7 @@ fn plugin_constructor_parameter_from_protocol<'db>(
             .map_or_else(Type::unknown, |type_expr| {
                 plugin_type_expr_to_type_in_class_with_virtual_types(
                     db,
+                    env,
                     type_expr,
                     class,
                     virtual_types,
@@ -6308,6 +6459,7 @@ fn plugin_constructor_parameter_from_protocol<'db>(
 
 fn plugin_constructor_parameter_from_protocol_type_expr<'db>(
     db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
     parameter: protocol::Parameter,
     virtual_types: &[PluginVirtualTypePatch<'db>],
 ) -> PluginConstructorParameter<'db> {
@@ -6328,7 +6480,7 @@ fn plugin_constructor_parameter_from_protocol_type_expr<'db>(
             .type_expr
             .as_ref()
             .map_or_else(Type::unknown, |type_expr| {
-                plugin_type_expr_to_type_with_virtual_types(db, type_expr, virtual_types)
+                plugin_type_expr_to_type_with_virtual_types(db, env, type_expr, virtual_types)
             }),
         required: parameter.required,
     }
@@ -6336,6 +6488,7 @@ fn plugin_constructor_parameter_from_protocol_type_expr<'db>(
 
 fn plugin_member_response_to_patch<'db>(
     db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
     response: protocol::PluginResponse,
     expected_name: &Name,
     virtual_types: &[PluginVirtualTypePatch<'db>],
@@ -6351,13 +6504,14 @@ fn plugin_member_response_to_patch<'db>(
     Some(PluginMemberPatch {
         name: Name::new(&member.name),
         replace_existing: member.mode == protocol::MemberPatchMode::ReplaceExisting,
-        ty: plugin_member_access_to_type_with_virtual_types(db, &member.access, virtual_types),
+        ty: plugin_member_access_to_type_with_virtual_types(db, env, &member.access, virtual_types),
         read_only: member.read_only,
     })
 }
 
 fn plugin_member_access_to_type_in_class<'db>(
     db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
     access: &protocol::MemberAccessPatch,
     class: StaticClassLiteral<'db>,
     virtual_types: &[PluginVirtualTypePatch<'db>],
@@ -6366,6 +6520,7 @@ fn plugin_member_access_to_type_in_class<'db>(
         protocol::MemberAccessPatch::Callable { signature, .. } => {
             plugin_callable_type_from_protocol_signature_in_class(
                 db,
+                env,
                 signature,
                 class,
                 virtual_types,
@@ -6373,6 +6528,7 @@ fn plugin_member_access_to_type_in_class<'db>(
         }
         _ => plugin_type_expr_to_type_in_class_with_virtual_types(
             db,
+            env,
             access.instance_get_type(),
             class,
             virtual_types,
@@ -6382,6 +6538,7 @@ fn plugin_member_access_to_type_in_class<'db>(
 
 fn plugin_member_access_to_type_with_virtual_types<'db>(
     db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
     access: &protocol::MemberAccessPatch,
     virtual_types: &[PluginVirtualTypePatch<'db>],
 ) -> Type<'db> {
@@ -6389,12 +6546,14 @@ fn plugin_member_access_to_type_with_virtual_types<'db>(
         protocol::MemberAccessPatch::Callable { signature, .. } => {
             plugin_callable_type_from_protocol_signature_with_virtual_types(
                 db,
+                env,
                 signature,
                 virtual_types,
             )
         }
         _ => plugin_type_expr_to_type_with_virtual_types(
             db,
+            env,
             access.instance_get_type(),
             virtual_types,
         ),
@@ -6546,10 +6705,10 @@ impl<'db> StaticClassLiteral<'db> {
             return TypeVarVariance::Bivariant;
         }
         let class_body_scope = self.body_scope(db);
-        let python_file = class_body_scope.python_file(db);
+        let program_file = class_body_scope.program_file(db);
         let python_version = env.python_version(db);
 
-        let index = semantic_index(db, python_file);
+        let index = semantic_index(db, program_file);
 
         let explicit_bases_variances = self
             .explicit_bases(db)
@@ -6632,9 +6791,12 @@ impl<'db> StaticClassLiteral<'db> {
                 place_and_qual.ignore_possibly_undefined().map(|ty| {
                     let variance = if place_and_qual
                         .qualifiers
-                        // `CLASS_VAR || FINAL` is really `all()`, but
-                        // we want to be robust against new qualifiers
-                        .intersects(TypeQualifiers::CLASS_VAR | TypeQualifiers::FINAL)
+                        // None of these fields can be mutated through an instance.
+                        .intersects(
+                            TypeQualifiers::CLASS_VAR
+                                | TypeQualifiers::FINAL
+                                | TypeQualifiers::READ_ONLY,
+                        )
                         // We don't allow mutation of methods or properties
                         || ty.is_function_literal()
                         || ty.is_property_instance()
@@ -6645,7 +6807,7 @@ impl<'db> StaticClassLiteral<'db> {
                         // type variable, but they could if it's a
                         // callable type. They can't be mutated on instances.
                         //
-                        // FINAL: final attributes are immutable, and thus covariant
+                        // FINAL and READ_ONLY: immutable fields are covariant.
                         TypeVarVariance::Covariant
                     } else {
                         default_attribute_variance
@@ -6744,7 +6906,7 @@ impl get_size2::GetSize for ImplicitAttributeName<'_> {}
 
 #[salsa::tracked(returns(deref), heap_size=ruff_memory_usage::heap_size)]
 fn implicit_attribute_names<'db>(db: &'db dyn Db, class_body_scope: ScopeId<'db>) -> Box<[Name]> {
-    let index = semantic_index(db, class_body_scope.python_file(db));
+    let index = semantic_index(db, class_body_scope.program_file(db));
     let mut names = Vec::new();
 
     for function_scope_id in attribute_scopes(db, class_body_scope) {
@@ -6793,8 +6955,7 @@ mod tests {
     };
     use ty_plugin_sdk::Plugin as _;
     use ty_python_core::program::{
-        ProgramSettings, SemanticPluginEnvironment, SemanticPluginMemberClaim,
-        SemanticPluginMethodClaim,
+        SemanticPluginEnvironment, SemanticPluginMemberClaim, SemanticPluginMethodClaim,
     };
     use ty_python_core::semantic_index;
 
@@ -6804,7 +6965,7 @@ mod tests {
         class_name: &str,
     ) -> StaticClassLiteral<'db> {
         let file = system_path_to_file(db, path).expect("test file should exist");
-        let module = parsed_module(db, PythonFile::new(db, file, db.python_version())).load(db);
+        let module = parsed_module(db, db.program_file(file).python_file(db)).load(db);
         let class_node = module
             .syntax()
             .body
@@ -6814,8 +6975,8 @@ mod tests {
                 (class.name.as_str() == class_name).then_some(class)
             })
             .expect("test class should exist");
-        let definition = semantic_index(db, PythonFile::new(db, file, db.python_version()))
-            .expect_single_definition(class_node);
+        let definition =
+            semantic_index(db, db.program_file(file)).expect_single_definition(class_node);
         let ClassLiteral::Static(class) =
             crate::types::infer::original_class_type(db, definition).expect("class type")
         else {
@@ -6831,9 +6992,9 @@ mod tests {
     ) -> protocol::AnalyzeClassRequest {
         let class = static_class_literal(db, path, class_name);
 
-        let summary = plugin_class_summary(db, class);
+        let summary = plugin_class_summary(db, &db.program_environment(), class);
         let protocol::PluginRequest::AnalyzeClass(request) =
-            plugin_analyze_class_request(db, class, &summary, None)
+            plugin_analyze_class_request(db, &db.program_environment(), class, &summary, None)
         else {
             panic!("expected AnalyzeClass request");
         };
@@ -6841,14 +7002,7 @@ mod tests {
     }
 
     fn install_semantic_plugin(db: &mut TestDb, plugin: SemanticPlugin) {
-        let current_program = Program::get(db);
-        let settings = ProgramSettings {
-            python_version: current_program.python_version_with_source(db).clone(),
-            python_platform: current_program.python_platform(db).clone(),
-            search_paths: current_program.search_paths(db).clone(),
-            semantic_plugins: SemanticPluginEnvironment::new(1, [plugin]),
-        };
-        Program::init_or_update(db, settings);
+        SemanticPlugins::init_or_update(db, SemanticPluginEnvironment::new(1, [plugin]));
     }
 
     fn write_minidjango_harness(db: &mut TestDb) -> anyhow::Result<()> {
@@ -7773,13 +7927,9 @@ mod tests {
         )?;
 
         let file = system_path_to_file(&db, "/src/models.py").expect("models.py");
-        let annotated = global_symbol(
-            &db,
-            PythonFile::new(&db, file, db.python_version()),
-            "annotated",
-        )
-        .place
-        .expect_type();
+        let annotated = global_symbol(&db, db.program_file(file), "annotated")
+            .place
+            .expect_type();
         let Type::KnownInstance(KnownInstanceType::Annotated(annotated)) = annotated else {
             panic!("expected an Annotated cast result, got {annotated:?}");
         };
@@ -7956,6 +8106,7 @@ mod tests {
 
         merge_plugin_class_response(
             &db,
+            &db.program_environment(),
             class,
             response,
             &[],
@@ -8597,42 +8748,30 @@ mod tests {
         assert_eq!(manager_type("published"), "Manager");
 
         let file = system_path_to_file(&db, "/src/models.py").expect("models.py");
-        let annotate_method_ty = global_symbol(
-            &db,
-            PythonFile::new(&db, file, db.python_version()),
-            "annotate_method_probe",
-        )
-        .place
-        .expect_type()
-        .display(&db, &db.program_environment())
-        .to_string();
+        let annotate_method_ty = global_symbol(&db, db.program_file(file), "annotate_method_probe")
+            .place
+            .expect_type()
+            .display(&db, &db.program_environment())
+            .to_string();
         assert!(
             annotate_method_ty != "Unknown",
             "Book.objects.annotate should resolve to a callable, got {annotate_method_ty}"
         );
-        let annotated_probe_ty = global_symbol(
-            &db,
-            PythonFile::new(&db, file, db.python_version()),
-            "annotated_probe",
-        )
-        .place
-        .expect_type()
-        .display(&db, &db.program_environment())
-        .to_string();
+        let annotated_probe_ty = global_symbol(&db, db.program_file(file), "annotated_probe")
+            .place
+            .expect_type()
+            .display(&db, &db.program_environment())
+            .to_string();
         let observed_annotate_returns = annotate_returns.lock().unwrap().clone();
         assert_eq!(
             annotated_probe_ty, "MiniDjangoAnnotatedRow",
             "observed annotate returns: {observed_annotate_returns:#?}"
         );
-        let annotated_score_ty = global_symbol(
-            &db,
-            PythonFile::new(&db, file, db.python_version()),
-            "annotated_score_probe",
-        )
-        .place
-        .expect_type()
-        .display(&db, &db.program_environment())
-        .to_string();
+        let annotated_score_ty = global_symbol(&db, db.program_file(file), "annotated_score_probe")
+            .place
+            .expect_type()
+            .display(&db, &db.program_environment())
+            .to_string();
         assert!(
             matches!(annotated_score_ty.as_str(), "int" | "Literal[1]"),
             "annotate score should retain the keyword argument type, got {annotated_score_ty}"
