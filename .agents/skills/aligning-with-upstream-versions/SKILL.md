@@ -65,8 +65,24 @@ new fork version range `>=0.N.0,<0.(N+1).0`.
 
 ## Merge the Superproject
 
-Create the matching `sync/ty-0.0.N` branch and merge the upstream tag. These files conflict on
-every merge because the fork and upstream both edit them — resolve each the same way every time:
+Create the matching `sync/ty-0.0.N` branch and merge the upstream tag. Check the merge base here
+too: it must be the previous release's upstream tag. If it is an older tag, a previous cycle's
+merge was committed without its second parent, and this merge is replaying the intervening
+upstream changes — expect conflicts in files upstream did not touch this cycle, and confirm the
+tag is an ancestor again once the merge commit exists.
+
+Before committing any merge in either repository, confirm one is actually in progress with
+`git rev-parse -q --verify MERGE_HEAD`, and confirm the resulting commit has two parents. Never
+use `[ -f .git/MERGE_HEAD ]`: in a submodule `.git` is a file, so the path test silently reports
+no merge and invites committing a merge that records only one parent.
+
+Whether upstream changed a conflicted file at all this cycle is the cheapest way to resolve it:
+`git diff <previous tag> <new tag> -- <path>`. An empty diff means the fork's side is provably
+lossless, which is the usual case for `release.yml` and the other files the fork has diverged on
+permanently.
+
+These files conflict on every merge because the fork and upstream both edit them — resolve each
+the same way every time:
 
 - **Version files** (`pyproject.toml`, `dist-workspace.toml`, lockfile): keep the fork's package
     identity, set the new fork version, and regenerate the lockfile (`uv lock --check` must pass).
@@ -91,6 +107,11 @@ extensions, C extensions, and file extensions.
     status payload before treating a run as settled — a transient empty API reply is not "done".
 1. Merge this repository's PR first, re-point the superproject's submodule at the resulting
     default-branch commit, then merge the superproject PR.
+1. Decide whether the plugin crates need a version bump *before* dispatching. `publish-crates.py`
+    skips any crate version that already exists on crates.io, so a fork release does **not**
+    refresh the `ty_plugin_protocol` / `ty_plugin_sdk` pages: their README, description, and
+    compatibility range stay frozen at whatever the last published version carried. Changing only
+    those crates' docs therefore still needs a patch bump to reach readers.
 1. Dispatch the release workflow with the new `v0.N.0` tag **only with explicit maintainer
     approval** — publishing is not reversible.
 1. Verify artifacts: the package index has the expected file count for the new version, the SDK

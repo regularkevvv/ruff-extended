@@ -10,6 +10,7 @@
 
 mod version;
 
+use std::debug_assert_matches;
 use std::hash::{Hash, Hasher};
 use std::io;
 use std::num::NonZeroUsize;
@@ -134,9 +135,10 @@ impl SitePackagesPaths {
             .map(|c| {
                 // This should have all been validated in `site_packages.rs`
                 // when we resolved the search paths for the project.
-                debug_assert!(
-                    matches!(c, Utf8Component::Normal(_)),
-                    "Unexpected component in site-packages path `{c:?}` \
+                debug_assert_matches!(
+                    c,
+                    Utf8Component::Normal(_),
+                    "Unexpected component in site-packages path \
                     (expected `site-packages` to be an absolute path \
                     with symlinks resolved, located at \
                     `<sys.prefix>/lib/pythonX.Y/site-packages`)"
@@ -365,6 +367,14 @@ impl PythonEnvironment {
                 Ok(Self::System(SystemEnvironment { path }))
             }
             Err(err) => Err(err),
+        }
+    }
+
+    /// Returns the canonical, absolute `sys.prefix` of this environment.
+    pub fn sys_prefix(&self) -> &SysPrefixPath {
+        match self {
+            Self::Virtual(env) => &env.root_path,
+            Self::System(env) => env.path.sys_prefix(),
         }
     }
 
@@ -2294,6 +2304,8 @@ impl PartialEq<SystemPathBuf> for PythonHomePath {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use ruff_db::system::TestSystem;
     #[cfg(unix)]
     use ruff_db::system::{OsSystem, SystemPath};
@@ -2441,6 +2453,7 @@ mod tests {
                 .expect("Expected environment construction to succeed");
 
             let expect_virtual_env = self.virtual_env.is_some();
+            assert_eq!(env.sys_prefix().as_std_path(), env_path.as_std_path());
             match &env {
                 PythonEnvironment::Virtual(venv) if expect_virtual_env => {
                     self.assert_virtual_environment(venv, &env_path);
@@ -2697,10 +2710,7 @@ mod tests {
             virtual_env: None,
         };
         let err = test.err();
-        assert!(
-            matches!(err, SitePackagesDiscoveryError::NoPyvenvCfgFile(..)),
-            "Got {err:?}",
-        );
+        assert_matches!(err, SitePackagesDiscoveryError::NoPyvenvCfgFile(..));
     }
 
     #[test]
@@ -2713,10 +2723,7 @@ mod tests {
             virtual_env: None,
         };
         let err = test.err();
-        assert!(
-            matches!(err, SitePackagesDiscoveryError::NoPyvenvCfgFile(..)),
-            "Got {err:?}",
-        );
+        assert_matches!(err, SitePackagesDiscoveryError::NoPyvenvCfgFile(..));
     }
 
     #[test]
@@ -2882,10 +2889,10 @@ mod tests {
     #[test]
     fn reject_env_that_does_not_exist() {
         let system = TestSystem::default();
-        assert!(matches!(
+        assert_matches!(
             PythonEnvironment::new("/env", SysPrefixPathOrigin::PythonCliFlag, &system),
             Err(SitePackagesDiscoveryError::PathNotExecutableOrDirectory(..))
-        ));
+        );
     }
 
     #[test]
@@ -2895,10 +2902,10 @@ mod tests {
             .memory_file_system()
             .write_file_all("/env", "")
             .unwrap();
-        assert!(matches!(
+        assert_matches!(
             PythonEnvironment::new("/env", SysPrefixPathOrigin::PythonCliFlag, &system),
             Err(SitePackagesDiscoveryError::PathNotExecutableOrDirectory(..))
-        ));
+        );
     }
 
     #[test]
@@ -2914,22 +2921,16 @@ mod tests {
             PythonEnvironment::new("/env", SysPrefixPathOrigin::PythonCliFlag, &system).unwrap();
         let site_packages = env.site_packages_paths(&system);
         if cfg!(unix) {
-            assert!(
-                matches!(
-                    site_packages,
-                    Err(SitePackagesDiscoveryError::CouldNotReadLibDirectory(..)),
-                ),
-                "Got {site_packages:?}",
+            assert_matches!(
+                site_packages,
+                Err(SitePackagesDiscoveryError::CouldNotReadLibDirectory(..))
             );
         } else {
             // On Windows, we look for `Lib/site-packages` directly instead of listing the entries
             // of `lib/...` — so we don't see the intermediate failure
-            assert!(
-                matches!(
-                    site_packages,
-                    Err(SitePackagesDiscoveryError::NoSitePackagesDirFound(..)),
-                ),
-                "Got {site_packages:?}",
+            assert_matches!(
+                site_packages,
+                Err(SitePackagesDiscoveryError::NoSitePackagesDirFound(..))
             );
         }
     }
@@ -2952,12 +2953,9 @@ mod tests {
         let env =
             PythonEnvironment::new("/env", SysPrefixPathOrigin::PythonCliFlag, &system).unwrap();
         let site_packages = env.site_packages_paths(&system);
-        assert!(
-            matches!(
-                site_packages,
-                Err(SitePackagesDiscoveryError::NoSitePackagesDirFound(..)),
-            ),
-            "Got {site_packages:?}",
+        assert_matches!(
+            site_packages,
+            Err(SitePackagesDiscoveryError::NoSitePackagesDirFound(..))
         );
     }
 
@@ -2971,14 +2969,14 @@ mod tests {
             .unwrap();
         let venv_result =
             PythonEnvironment::new("/.venv", SysPrefixPathOrigin::VirtualEnvVar, &system);
-        assert!(matches!(
+        assert_matches!(
             venv_result,
             Err(SitePackagesDiscoveryError::PyvenvCfgParseError(
                 path,
                 PyvenvCfgParseErrorKind::MalformedKeyValuePair { line_number }
             ))
             if path == pyvenv_cfg_path && Some(line_number) == NonZeroUsize::new(1)
-        ));
+        );
     }
 
     #[test]
@@ -2991,14 +2989,14 @@ mod tests {
             .unwrap();
         let venv_result =
             PythonEnvironment::new("/.venv", SysPrefixPathOrigin::VirtualEnvVar, &system);
-        assert!(matches!(
+        assert_matches!(
             venv_result,
             Err(SitePackagesDiscoveryError::PyvenvCfgParseError(
                 path,
                 PyvenvCfgParseErrorKind::MalformedKeyValuePair { line_number }
             ))
             if path == pyvenv_cfg_path && Some(line_number) == NonZeroUsize::new(1)
-        ));
+        );
     }
 
     #[test]
@@ -3009,14 +3007,14 @@ mod tests {
         memory_fs.write_file_all(&pyvenv_cfg_path, "").unwrap();
         let venv_result =
             PythonEnvironment::new("/.venv", SysPrefixPathOrigin::VirtualEnvVar, &system);
-        assert!(matches!(
+        assert_matches!(
             venv_result,
             Err(SitePackagesDiscoveryError::PyvenvCfgParseError(
                 path,
                 PyvenvCfgParseErrorKind::NoHomeKey
             ))
             if path == pyvenv_cfg_path
-        ));
+        );
     }
 
     #[test]
@@ -3061,14 +3059,14 @@ mod tests {
         let venv_result =
             PythonEnvironment::new("/.venv", SysPrefixPathOrigin::VirtualEnvVar, &system);
 
-        assert!(matches!(
+        assert_matches!(
             venv_result,
             Err(SitePackagesDiscoveryError::PyvenvCfgParseError(
                 path,
                 PyvenvCfgParseErrorKind::InvalidHomeValue(_)
             ))
             if path == pyvenv_cfg_path
-        ));
+        );
     }
 
     #[test]
