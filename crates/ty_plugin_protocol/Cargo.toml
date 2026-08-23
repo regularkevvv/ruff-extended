@@ -8,9 +8,9 @@ documentation = "https://docs.rs/ty_plugin_protocol"
 repository = "https://github.com/regularkevvv/ruff-extended"
 authors = ["Kevin Castro <hola@kev.pe>"]
 license.workspace = true
-description = "Stable serialized protocol types for ty semantic extensions."
+description = "Stable serialized protocol types for ty semantic plugins."
 readme = "README.md"
-keywords = ["ty", "typing", "extensions"]
+keywords = ["ty", "typing", "plugins"]
 categories = ["development-tools"]
 
 [dependencies]

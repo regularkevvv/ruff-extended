@@ -37,16 +37,12 @@ use crate::{Db, ProgramEnvironment, SemanticPluginRuntimeError};
 
 use super::display::qualified_name_components_from_scope;
 
-/// Convert an internal type into a protocol [`TypeExpr`](protocol::TypeExpr).
-///
-/// This produces a display-form annotation; the host runtime only compares it as an opaque
-/// string, so the exact spelling is not load-bearing.
 /// Render a file's path for the plugin protocol.
 ///
-/// These strings cross the wire to extensions that match on them, so they always use forward
+/// These strings cross the wire to plugins that match on them, so they always use forward
 /// slashes. `SystemPath` renders with the host separator, which would otherwise hand a Windows
-/// extension `\src\models.py` where every other platform sends `/src/models.py`, silently
-/// breaking any extension that compares paths. The replacement is Windows-only because a
+/// plugin `\src\models.py` where every other platform sends `/src/models.py`, silently
+/// breaking any plugin that compares paths. The replacement is Windows-only because a
 /// backslash is a legal filename character elsewhere.
 pub(crate) fn plugin_file_path(db: &dyn Db, file: File) -> String {
     let rendered = file.path(db).to_string();
@@ -66,6 +62,10 @@ pub(crate) fn plugin_program_environment(db: &dyn Db, file: File) -> ProgramEnvi
     ProgramEnvironment::from_file(db.program_file(file))
 }
 
+/// Convert an internal type into a protocol [`TypeExpr`](protocol::TypeExpr).
+///
+/// This produces a display-form annotation; the host runtime only compares it as an opaque
+/// string, so the exact spelling is not load-bearing.
 pub(crate) fn plugin_type_expr_from_type<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,

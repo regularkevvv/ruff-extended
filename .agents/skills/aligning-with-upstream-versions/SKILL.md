@@ -72,13 +72,18 @@ every merge because the fork and upstream both edit them — resolve each the sa
     identity, set the new fork version, and regenerate the lockfile (`uv lock --check` must pass).
 - **`CHANGELOG.md`**: always keep the fork's side. Add a new entry that names the upstream release
     it is built on, states whether the plugin protocol and SDK versions changed, and summarizes
-    behaviour changes that reach extensions. Never restore upstream's changelog text.
+    behaviour changes that reach plugins. Never restore upstream's changelog text.
 - **Installation docs**: keep the fork's installer URLs at the new tag; drop upstream sections
     that install the upstream distribution rather than the fork.
 - **Version maps** in the README and release docs: append the new upstream-to-fork mapping line.
 - **Submodule pointer**: point at the merged fork commit (initially the sync branch; re-point at
     the merged default-branch commit before the superproject merge lands).
-- Update the extension-authoring guide's compatibility range to match the new release.
+- Update the plugin-authoring guide's compatibility range to match the new release.
+
+Write every fork-authored line using **plugin**, never "extension": that is the term the crates
+(`ty_plugin_*`), types (`Plugin`, `PluginManifest`), config (`[[plugins.plugin]]`), and manifest
+filename (`ty-plugin.json`) already use. Reserve "extension" for editor extensions, LSP protocol
+extensions, C extensions, and file extensions.
 
 ## Land and Release
 

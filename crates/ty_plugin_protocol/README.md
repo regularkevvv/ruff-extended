@@ -4,13 +4,13 @@
 [![docs.rs](https://docs.rs/ty_plugin_protocol/badge.svg)](https://docs.rs/ty_plugin_protocol)
 
 The stable serialized contract between
-[ty-extended](https://github.com/regularkevvv/ty-extended) and semantic extensions.
+[ty-extended](https://github.com/regularkevvv/ty-extended) and semantic plugins.
 
 This crate intentionally contains data types only. It does not depend on checker internals, Salsa,
 AST ids, the plugin host, or a WASM engine. Manifests, requests, responses, claims, patches,
 diagnostics, and type expressions can therefore be serialized independently of ty's implementation.
 
-Most extension authors should depend on
+Most plugin authors should depend on
 [`ty_plugin_sdk`](https://crates.io/crates/ty_plugin_sdk), which re-exports this crate as
 `ty_plugin_sdk::protocol` and adds the `Plugin` trait, `ManifestBuilder`, typed patch helpers,
 dispatch, and WASM exports.
@@ -31,28 +31,28 @@ The main types are:
 
 - `PluginManifest`: identity, compatibility, runtime, capabilities, claims, configuration, and stub overlays;
 - `PluginRequest`: the tagged request enum sent by a host;
-- `PluginResponse`: the tagged response enum returned by an extension;
+- `PluginResponse`: the tagged response enum returned by a plugin;
 - request summaries such as `AnalyzeClassRequest`, `CallRequest`, and `ResolveMemberRequest`;
 - declarative outputs such as `ClassPatch`, `MemberPatch`, `CallSignaturePatch`, and `ProjectIndexResponse`;
 - `TypeExpr`: source-level type data with expression, annotation, or stub mode;
-- `ProtocolVersion`: compatibility negotiation between a host and extension.
+- `ProtocolVersion`: compatibility negotiation between a host and plugin.
 
 The wire format is JSON with kebab-case field and variant names. A request is self-contained and a
 response is data; neither side shares memory objects from the checker.
 
 ## Compatibility Negotiation
 
-The protocol is pre-1.0. A host accepts the same protocol major and any extension minor version no
+The protocol is pre-1.0. A host accepts the same protocol major and any plugin minor version no
 newer than its own:
 
 ```rust
 use ty_plugin_protocol::{ProtocolCompatibility, ProtocolVersion};
 
 let host = ProtocolVersion { major: 0, minor: 3 };
-let extension = ProtocolVersion { major: 0, minor: 2 };
+let plugin = ProtocolVersion { major: 0, minor: 2 };
 
 assert_eq!(
-    host.negotiate(extension),
+    host.negotiate(plugin),
     ProtocolCompatibility::Compatible,
 );
 ```
@@ -64,14 +64,14 @@ permission to use unsupported behavior. Always negotiate the version before disp
 
 ```json
 {
-  "id": "my-extension",
-  "name": "My extension",
+  "id": "my-plugin",
+  "name": "My plugin",
   "version": "0.1.0",
   "protocol-version": { "major": 0, "minor": 3 },
   "ty-compatibility": { "requirement": ">=0.73.0,<0.74.0" },
   "runtime": {
     "kind": "wasm",
-    "artifact": "my_extension.wasm"
+    "artifact": "my_plugin.wasm"
   },
   "capabilities": {
     "call-return": true
@@ -87,7 +87,7 @@ permission to use unsupported behavior. Always negotiate the version before disp
 Use `ty_plugin_sdk::ManifestBuilder` instead of hand-writing production manifests; it keeps claims
 and capability flags aligned.
 
-See the [extension authoring
-guide](https://github.com/regularkevvv/ty-extended/blob/main/docs/extension-authoring.md) to build a
-complete WASM extension and the [`ty_plugin_sdk` API documentation](https://docs.rs/ty_plugin_sdk)
+See the [plugin authoring
+guide](https://github.com/regularkevvv/ty-extended/blob/main/docs/plugin-authoring.md) to build a
+complete WASM plugin and the [`ty_plugin_sdk` API documentation](https://docs.rs/ty_plugin_sdk)
 for the author-facing interface.
