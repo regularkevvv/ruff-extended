@@ -4,21 +4,21 @@
 [![docs.rs](https://docs.rs/ty_plugin_sdk/badge.svg)](https://docs.rs/ty_plugin_sdk)
 
 The authoring SDK for sandboxed [ty-extended](https://github.com/regularkevvv/ty-extended)
-semantic extensions.
+semantic plugins.
 
-Use this crate to declare what an extension owns, implement typed semantic hooks, return
+Use this crate to declare what a plugin owns, implement typed semantic hooks, return
 declarative patches, and export the implementation as a WebAssembly module. It re-exports all wire
-types from `ty_plugin_protocol` as `ty_plugin_sdk::protocol`, so an extension normally has only one
+types from `ty_plugin_protocol` as `ty_plugin_sdk::protocol`, so a plugin normally has only one
 ty dependency.
 
 ## Architecture Boundary
 
-An extension does not link to `ty_python_semantic`, Salsa, AST ids, or checker-owned type objects.
-The host sends a serialized request for a manifest claim; the extension returns a serialized patch
+A plugin does not link to `ty_python_semantic`, Salsa, AST ids, or checker-owned type objects.
+The host sends a serialized request for a manifest claim; the plugin returns a serialized patch
 that the host validates and applies.
 
 ```text
-ty semantic query -> typed protocol request -> extension hook -> declarative patch -> ty
+ty semantic query -> typed protocol request -> plugin hook -> declarative patch -> ty
 ```
 
 The same `Plugin` implementation can be unit-tested natively and exported to WASM for production.
@@ -30,7 +30,7 @@ library:
 
 ```toml
 [package]
-name = "my-ty-extension"
+name = "my-ty-plugin"
 version = "0.1.0"
 edition = "2024"
 
@@ -50,14 +50,14 @@ use ty_plugin_sdk::protocol::{
 use ty_plugin_sdk::{dsl, ManifestBuilder, Plugin};
 
 #[derive(Default)]
-struct MyExtension;
+struct MyPlugin;
 
-impl Plugin for MyExtension {
+impl Plugin for MyPlugin {
     fn manifest(&self) -> PluginManifest {
-        ManifestBuilder::new("my-extension", "My extension", env!("CARGO_PKG_VERSION"))
+        ManifestBuilder::new("my-plugin", "My plugin", env!("CARGO_PKG_VERSION"))
             .ty_compatibility(">=0.73.0,<0.74.0")
             .runtime(RuntimeSpec::Wasm(WasmRuntimeSpec {
-                artifact: "my_extension.wasm".to_string(),
+                artifact: "my_plugin.wasm".to_string(),
                 sha256: None,
             }))
             .claim_call_return("my_library.Field")
@@ -69,7 +69,7 @@ impl Plugin for MyExtension {
     }
 }
 
-ty_plugin_sdk::export_plugin!(MyExtension::default());
+ty_plugin_sdk::export_plugin!(MyPlugin::default());
 ```
 
 Every hook has a `PluginResponse::NoChange` default. An implementation only overrides the hooks it
@@ -83,10 +83,10 @@ cargo build --release --target wasm32-unknown-unknown
 ```
 
 The example produces
-`target/wasm32-unknown-unknown/release/my_ty_extension.wasm`.
+`target/wasm32-unknown-unknown/release/my_ty_plugin.wasm`.
 
 `export_plugin!` generates the `ty_plugin_alloc` and `ty_plugin_handle` exports expected by the
-host. The ABI transports JSON through the module's linear memory; the extension has no WASI or
+host. The ABI transports JSON through the module's linear memory; the plugin has no WASI or
 ambient host capabilities.
 
 ## Manifests and Claims
@@ -95,7 +95,7 @@ ambient host capabilities.
 claims. For example, `claim_call_return` adds a function claim and enables the `call-return`
 capability.
 
-Claims keep routing precise: ty invokes an extension only for the classes, functions, methods,
+Claims keep routing precise: ty invokes a plugin only for the classes, functions, methods,
 attributes, settings, or mutations it declared. Useful builder methods include:
 
 - `claim_class_transform` and `claim_subclass_transform`;
@@ -105,7 +105,7 @@ attributes, settings, or mutations it declared. Useful builder methods include:
 - `claim_mutations` and `claim_mutations_on_subclass`;
 - `stub_overlay`, `config_schema`, and `default_config`.
 
-Always set a narrow `ty_compatibility` range for a published extension. The protocol and SDK are
+Always set a narrow `ty_compatibility` range for a published plugin. The protocol and SDK are
 versioned independently from ty-extended.
 
 ## Hook Reference
@@ -142,7 +142,7 @@ assert_eq!(expression.expression, "my_library.Model");
 Choose annotation mode for type syntax, expression mode for runtime symbol expressions, and stub
 mode for a complete generated stub declaration.
 
-## Test an Extension
+## Test a Plugin
 
 Test the same implementation at three levels:
 
@@ -172,15 +172,15 @@ For an explicitly managed artifact:
 enabled = true
 
 [[plugins.plugin]]
-id = "my-extension"
-path = ".ty/plugins/my_extension.wasm"
+id = "my-plugin"
+path = ".ty/plugins/my_plugin.wasm"
 runtime = "wasm"
-manifest-path = ".ty/plugins/my-extension.plugin.json"
+manifest-path = ".ty/plugins/my-plugin.json"
 trusted = true
 ```
 
-See the [ty-extended extension authoring
-guide](https://github.com/regularkevvv/ty-extended/blob/main/docs/extension-authoring.md) for the
+See the [ty-extended plugin authoring
+guide](https://github.com/regularkevvv/ty-extended/blob/main/docs/plugin-authoring.md) for the
 end-to-end packaging workflow and the [runtime
-guide](https://github.com/regularkevvv/ty-extended/blob/main/docs/extension-runtime.md) for host
+guide](https://github.com/regularkevvv/ty-extended/blob/main/docs/plugin-runtime.md) for host
 loading, sandboxing, and failure behavior.

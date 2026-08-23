@@ -15,15 +15,15 @@ use ty_plugin_protocol::{
     PluginManifest, PluginRequest, PluginResponse, ResolveMemberRequest,
 };
 
-/// A semantic extension: a manifest plus the hooks it chooses to implement.
+/// A semantic plugin: a manifest plus the hooks it chooses to implement.
 ///
 /// Implementors provide [`Plugin::manifest`] and override only the hook methods matching the
-/// capabilities they declared. Every hook defaults to [`PluginResponse::NoChange`], so an extension
+/// capabilities they declared. Every hook defaults to [`PluginResponse::NoChange`], so a plugin
 /// only writes code for the behavior it actually contributes. [`Plugin::handle`] then routes an
-/// incoming [`PluginRequest`] to the right hook, giving an extension a single, uniform entry point
+/// incoming [`PluginRequest`] to the right hook, giving a plugin a single, uniform entry point
 /// that mirrors how a runtime backend invokes it.
 pub trait Plugin {
-    /// The extension's manifest, describing its identity, capabilities, and claims.
+    /// The plugin's manifest, describing its identity, capabilities, and claims.
     fn manifest(&self) -> PluginManifest;
 
     /// Hook for the `class-transform` capability: adjust a claimed class's fields, members, or
@@ -33,7 +33,7 @@ pub trait Plugin {
         PluginResponse::NoChange
     }
 
-    /// Hook for the `project-index` capability: build extension-owned project data and cross-symbol
+    /// Hook for the `project-index` capability: build plugin-owned project data and cross-symbol
     /// contributions from host-provided class and settings summaries.
     fn build_project_index(&self, request: &BuildProjectIndexRequest) -> PluginResponse {
         let _ = request;
@@ -118,12 +118,12 @@ pub enum DispatchError {
     EncodeResponse(#[source] serde_json::Error),
 }
 
-/// Export a [`Plugin`] as a WASM extension artifact.
+/// Export a [`Plugin`] as a WASM plugin artifact.
 ///
 /// Invoke this once at the root of a `cdylib` crate, passing an expression that evaluates to a
 /// [`Plugin`]. On `wasm32` targets it generates the two C-ABI exports the host's WASM runtime
 /// calls — `ty_plugin_alloc` and `ty_plugin_handle` — wired to `wasm::alloc` and `wasm::handle`.
-/// On every other target it expands to nothing, so the extension crate still builds for the host.
+/// On every other target it expands to nothing, so the plugin crate still builds for the host.
 ///
 /// ```ignore
 /// ty_plugin_sdk::export_plugin!(my_crate::MyPlugin::default());
