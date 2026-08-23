@@ -956,7 +956,7 @@ jobs:
 
   pgo:
     name: "PGO"
-    runs-on: depot-ubuntu-24.04-8
+    runs-on: ubuntu-latest
     needs: determine_changes
     if: ${{ needs.determine_changes.outputs.release == 'true' && !contains(github.event.pull_request.labels.*.name, 'no-build') }}
     timeout-minutes: 20
