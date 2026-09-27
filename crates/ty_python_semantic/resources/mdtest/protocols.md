@@ -7032,6 +7032,36 @@ def check[T](concrete: Concrete[int], symbolic: Concrete[T]) -> None:
     reveal_type(Concrete().accumulate())  # revealed: Chain[Unknown]
 ```
 
+### Nested symbolic sources with constrained protocol receivers
+
+Type variables nested inside a concrete class's specialization still contribute constraints when
+binding an inherited recursive protocol method. Tuple, union, and aliased specializations preserve
+their element types in the result.
+
+```toml
+[environment]
+python-version = "3.12"
+```
+
+```py
+from __future__ import annotations
+
+from typing import Protocol
+
+class Chain[T](Protocol):
+    def value(self) -> T: ...
+    def accumulate[S](self: Chain[S]) -> Chain[S]: ...
+
+class Concrete[T](Chain[T]): ...
+
+type Wrapped[T] = tuple[T]
+
+def check[T](nested: Concrete[tuple[T]], union: Concrete[T | list[T]], aliased: Concrete[Wrapped[T]]) -> None:
+    reveal_type(nested.accumulate())  # revealed: Chain[tuple[T@check]]
+    reveal_type(union.accumulate())  # revealed: Chain[T@check | list[T@check]]
+    reveal_type(aliased.accumulate())  # revealed: Chain[Wrapped[T@check]]
+```
+
 ### Incompatible explicit receivers on recursive protocols
 
 The `value` and `write` methods make `Chain` invariant. Calling `flatten` on `Chain[list[int]]` is
@@ -7070,6 +7100,35 @@ def valid(value: Chain[Iterable[int]]) -> None:
     reveal_type(value.flatten())  # revealed: Chain[int]
 ```
 
+### Explicit receivers on overloaded recursive protocol methods
+
+An overloaded method can constrain its receiver to a tuple specialization of the same recursive
+protocol. Comparing the fixed-length overload with the gradual fallback terminates without
+repeatedly expanding the recursive requirement, and the call preserves the callback's return type.
+
+```toml
+[environment]
+python-version = "3.12"
+```
+
+```py
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any, Protocol, overload
+
+class Chain[T](Protocol):
+    def value(self) -> T: ...
+    def child(self) -> Chain[tuple[T]]: ...
+    @overload
+    def map_star[A, B, R](self: Chain[tuple[A, B]], callback: Callable[[A, B], R]) -> Chain[R]: ...
+    @overload
+    def map_star[R](self: Chain[tuple[Any, ...]], callback: Callable[..., R]) -> Chain[R]: ...
+
+def check(value: Chain[tuple[int, str]]) -> None:
+    reveal_type(value.map_star(lambda first, second: 1))  # revealed: Chain[Literal[1]]
+```
+
 ### Structural inference from recursive protocol requirements
 
 An inherited protocol specialization can erase a class type parameter. A recursive member can still
@@ -7098,6 +7157,17 @@ class Erased[T, U](Recursive[T, Any]):
     def __init__(self, callback: Callable[[U], object]) -> None: ...
 
 pair: Recursive[int, str] = Erased(lambda value: reveal_type(value))  # revealed: str
+```
+
+The same inference is needed when an erased source argument contains a nested type variable. The
+nominal relation constrains `T`, but only the recursive `value` member can infer `U` through the
+tuple.
+
+```py
+def make[T, U](callback: Callable[[U], object]) -> Erased[T, tuple[U]]:
+    raise NotImplementedError
+
+nested: Recursive[int, tuple[str]] = make(lambda value: reveal_type(value))  # revealed: str
 ```
 
 ### Overridden recursive protocol requirements

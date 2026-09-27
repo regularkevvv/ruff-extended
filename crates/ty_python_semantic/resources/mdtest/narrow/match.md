@@ -195,8 +195,9 @@ strict-generic-narrowing = true
 ```
 
 ```py
-from typing import Any
+from typing import Any, final
 
+@final
 class Box[T: str = str]:
     value: T
 
@@ -208,7 +209,7 @@ def box_with_default[T: str = str](value: Box[T] | T) -> Box[T]:
             reveal_type(value)  # revealed: Box[T@box_with_default]
             return value
         case remaining:
-            reveal_type(remaining)  # revealed: T@box_with_default & ~Top[Box[Unknown]]
+            reveal_type(remaining)  # revealed: T@box_with_default
             return Box[T](remaining)
 ```
 
@@ -2616,6 +2617,30 @@ def runtime_protocol_pattern_is_exhaustive(value: RuntimeProtocolImplementer) ->
     match value:
         case RuntimeProtocolWithX(x=_):
             return 1
+```
+
+## Negative narrowing for protocols with gradual members
+
+The fallback case excludes the fully materialized protocol. `IntReader` is a subtype of the fully
+materialized `Reader` protocol, so the fallback case retains only `None`:
+
+```py
+from typing import Any, Protocol, runtime_checkable
+
+@runtime_checkable
+class Reader(Protocol):
+    def read(self) -> Any: ...
+
+class IntReader:
+    def read(self) -> int:
+        return 1
+
+def f(reader: IntReader | None):
+    match reader:
+        case Reader():
+            reveal_type(reader.read())  # revealed: int & Any
+        case _:
+            reveal_type(reader)  # revealed: None
 ```
 
 ## Members from the subject type

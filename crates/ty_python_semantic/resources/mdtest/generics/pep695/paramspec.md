@@ -318,7 +318,7 @@ def func[**P2](c: Callable[P2, None]):
 
 P2 = ParamSpec("P2")
 
-# error: [invalid-type-arguments] "ParamSpec `P2` is unbound"
+# error: [unbound-type-variable] "Type variable `P2` is not bound to any outer generic context"
 reveal_type(OnlyParamSpec[P2]().attr)  # revealed: (...) -> None
 
 # error: [invalid-type-arguments] "No type argument provided for required type variable `P1` of class `OnlyParamSpec`"
@@ -378,7 +378,7 @@ reveal_type(TypeVarAndParamSpec[int, [str]]().attr)  # revealed: (str, /) -> int
 reveal_type(TypeVarAndParamSpec[int, ...]().attr)  # revealed: (...) -> int
 reveal_type(ParamSpecAndTypeVar[[int, str], str]().attr)  # revealed: (int, str, /) -> str
 
-# error: [invalid-type-arguments] "ParamSpec `P2` is unbound"
+# error: [unbound-type-variable] "Type variable `P2` is not bound to any outer generic context"
 reveal_type(TypeVarAndParamSpec[int, P2]().attr)  # revealed: (...) -> int
 # error: [invalid-type-arguments] "Type argument for `ParamSpec` must be"
 reveal_type(TypeVarAndParamSpec[int, int]().attr)  # revealed: (...) -> int
@@ -461,6 +461,25 @@ def takes_int_job(job: Job[[int]]) -> None:
 takes_int_job(named_job)
 takes_int_job(defaulted_job)
 takes_int_job(wrong_job)  # error: [invalid-argument-type]
+```
+
+A fixed `ParamSpec` can contain required parameters. A wrapper around such a callback cannot be used
+as a wrapper around a callback that accepts no arguments.
+
+```py
+def erase_parameters[**P](job: Job[P]) -> Job[[]]:
+    return job  # error: [invalid-return-type]
+```
+
+The same restriction applies in the other direction when a class consumes callbacks. A consumer of
+callbacks with no parameters cannot accept a callback with arbitrary required parameters.
+
+```py
+class CallbackConsumer[**P]:
+    def consume(self, callback: Callable[P, None]) -> None: ...
+
+def broaden_parameters[**P](consumer: CallbackConsumer[[]]) -> CallbackConsumer[P]:
+    return consumer  # error: [invalid-return-type]
 ```
 
 ## `ParamSpec` cannot specialize a `TypeVar`, and vice versa
@@ -618,6 +637,78 @@ reveal_type(f3(y="a", x=1))  # revealed: bool
 f3(1)
 # error: [invalid-argument-type] "Argument is incorrect: Expected `int`, found `Literal["a"]`"
 f3("a", "b")
+```
+
+### Prefer the declared parameter list
+
+We prefer the declared parameter list of a `ParamSpec` when it is compatible with the callback's
+inferred parameter list:
+
+```py
+from typing import Callable
+
+class Callback[**P]:
+    def __init__(self, callback: Callable[P, None]) -> None: ...
+
+def accepts_object(value: object, /) -> None: ...
+
+x1 = Callback(accepts_object)
+reveal_type(x1)  # revealed: Callback[(value: object, /)]
+
+x2: Callback[[int]] = Callback(accepts_object)
+reveal_type(x2)  # revealed: Callback[(int, /)]
+```
+
+If the parameter lists are incompatible, we ignore the declared type in the invalid assignment
+diagnostic:
+
+```py
+def no_args() -> None: ...
+
+# error: [invalid-assignment] "Object of type `Callback[()]` is not assignable to `Callback[(int, /)]`"
+x3: Callback[[int]] = Callback(no_args)
+reveal_type(x3)  # revealed: Callback[(int, /)]
+```
+
+When no argument constrains the `ParamSpec`, the declared type supplies its parameter list:
+
+```py
+def make[**P]() -> Callback[P]:
+    raise NotImplementedError
+
+reveal_type(make())  # revealed: Callback[(...)]
+
+x4: Callback[[int, str]] = make()
+reveal_type(x4)  # revealed: Callback[(int, str, /)]
+```
+
+### Preserve callback parameters in nested calls
+
+The outer call checks forwarded arguments against the inferred parameter list of the wrapped
+callback:
+
+```py
+from typing import Callable
+
+def wrap[**P](callback: Callable[P, None]) -> Callable[P, None]:
+    return callback
+
+def accept[**P](callback: Callable[P, None], *args: P.args, **kwargs: P.kwargs) -> None: ...
+def no_args() -> None: ...
+
+reveal_type(wrap(no_args))  # revealed: () -> None
+
+accept(wrap(no_args))  # ok
+accept(wrap(no_args), 1)  # error: [too-many-positional-arguments]
+```
+
+Keyword-only parameters are also preserved:
+
+```py
+def keyword_only(*, value: int) -> None: ...
+
+accept(wrap(keyword_only), value=1)
+accept(wrap(keyword_only), value="incorrect")  # error: [invalid-argument-type]
 ```
 
 ### Preserve an unpacked required suffix
