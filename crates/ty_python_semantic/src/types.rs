@@ -5489,8 +5489,13 @@ impl<'db> Type<'db> {
                     name_str,
                     fallback.ignore_possibly_undefined(),
                 ) {
-                    let result =
-                        this.fallback_to_getattr(db, env, name, Ok(plugin_field), key.policy(db));
+                    let result = this.fallback_to_getattr(
+                        db,
+                        env,
+                        name,
+                        Ok(ResolvedMember::Plain(plugin_field)),
+                        key.policy(db),
+                    );
                     let result = map_member_lookup_type(db, result, |ty| {
                         ty.bind_self_typevars(db, env, receiver)
                     });
@@ -5501,8 +5506,13 @@ impl<'db> Type<'db> {
                     && let Some(plugin_member) =
                         this.plugin_annotated_instance_member(db, env, name_str)
                 {
-                    let result =
-                        this.fallback_to_getattr(db, env, name, Ok(plugin_member), key.policy(db));
+                    let result = this.fallback_to_getattr(
+                        db,
+                        env,
+                        name,
+                        Ok(ResolvedMember::Plain(plugin_member)),
+                        key.policy(db),
+                    );
                     return promote_inferred_attribute_class_literals(db, env, result);
                 }
 
@@ -5893,7 +5903,13 @@ impl<'db> Type<'db> {
                         return promote_inferred_attribute_class_literals(
                             db,
                             env,
-                            this.fallback_to_getattr(db, env, name, Ok(plugin_member), policy),
+                            this.fallback_to_getattr(
+                                db,
+                                env,
+                                name,
+                                Ok(ResolvedMember::Plain(plugin_member)),
+                                policy,
+                            ),
                         );
                     }
                     let base = annotated.base(db);

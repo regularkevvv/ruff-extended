@@ -2748,7 +2748,7 @@ impl KnownFunction {
                     && !source_type.is_equivalent_to(db, env, Type::Never)
                     && let Some(builder) = context.report_lint(&DISJOINT_CAST, call_expression)
                 {
-                    let types = [*source_type, casted_type];
+                    let types = [source_type, casted_type];
                     let settings = DisplaySettings::from_possibly_ambiguous_types(db, env, types);
                     let source_display = source_type.display_with(db, env, settings.clone());
                     let casted_display = casted_type.display_with(db, env, settings.clone());
