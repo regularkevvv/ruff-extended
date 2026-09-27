@@ -44,10 +44,10 @@ use crate::types::typevar::{
 };
 use crate::types::{
     ApplyTypeMappingVisitor, BindingContext, BoundTypeVarIdentity, BoundTypeVarInstance,
-    CallableType, ErrorContext, ErrorContextTree, FindLegacyTypeVarsVisitor, KnownClass,
-    MaterializationKind, ParamSpecAttrKind, ParameterDescription, SelfBinding, TypeContext,
-    TypeMapping, TypeVarBoundOrConstraints, TypeVarNonce, TypedDictType, UnionBuilder,
-    VarianceInferable, VarianceTerm, infer_complete_scope_types, todo_type,
+    CallableType, ErrorContext, ErrorContextTree, FindLegacyTypeVarsVisitor, MaterializationKind,
+    ParamSpecAttrKind, ParameterDescription, SelfBinding, TypeContext, TypeMapping,
+    TypeVarBoundOrConstraints, TypeVarNonce, TypedDictType, UnionBuilder, VarianceInferable,
+    VarianceTerm, infer_complete_scope_types, todo_type,
 };
 use crate::{Db, FxOrderSet};
 use ruff_db::parsed::parsed_module;
@@ -474,6 +474,9 @@ impl<'db> CallableSignature<'db> {
     ///
     /// These differ for class methods: the runtime receiver is a class object, while
     /// `typing.Self` denotes an instance of that class.
+    ///
+    /// Most callers should use [`Self::bind_method_receiver`] instead, which also specializes
+    /// type variables determined by the receiver and filters incompatible overloads.
     pub(crate) fn bind_self_with_receiver(
         &self,
         db: &'db dyn Db,
@@ -490,6 +493,57 @@ impl<'db> CallableSignature<'db> {
                 })
                 .collect(),
         }
+    }
+
+    /// Binds a method receiver after specializing type variables determined by it and filtering
+    /// overloads whose explicit receiver annotations are incompatible with it.
+    pub(super) fn bind_method_receiver(
+        &self,
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+        receiver_type: Type<'db>,
+        typing_self_type: Type<'db>,
+    ) -> Self {
+        let specialized = match self.overloads.as_slice() {
+            [signature] => {
+                if signature.has_receiver_determined_method_typevar(db, env) {
+                    signature.specialize_for_bound_receiver(
+                        db,
+                        env,
+                        receiver_type,
+                        typing_self_type,
+                    )
+                } else {
+                    None
+                }
+            }
+            signatures
+                if signatures
+                    .iter()
+                    .any(Signature::has_explicit_positional_receiver_annotation) =>
+            {
+                Some(Self::from_overloads(
+                    signatures
+                        .iter()
+                        .filter(|signature| signature.can_bind_self_to(db, env, receiver_type))
+                        .filter_map(|signature| {
+                            signature.specialize_for_bound_receiver(
+                                db,
+                                env,
+                                receiver_type,
+                                typing_self_type,
+                            )
+                        })
+                        .flat_map(|signature| signature.overloads),
+                ))
+            }
+            _ => None,
+        };
+
+        specialized
+            .as_ref()
+            .unwrap_or(self)
+            .bind_self_with_receiver(db, env, Some(receiver_type), Some(typing_self_type))
     }
 
     pub(crate) fn has_parameters(&self) -> bool {
@@ -886,19 +940,6 @@ impl<'db> Signature<'db> {
         self.parameters
             .paramspec_component_bindings(db)
             .find(|bound| bound.typevar(db).identity(db) == typevar.identity(db))
-    }
-
-    pub(super) fn wrap_coroutine_return_type(
-        self,
-        db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
-    ) -> Self {
-        let return_ty = KnownClass::CoroutineType.to_specialized_instance(
-            db,
-            env,
-            &[Type::any(), Type::any(), self.return_ty],
-        );
-        Self { return_ty, ..self }
     }
 
     /// Returns the signature which accepts any parameters and returns an `Unknown` type.
@@ -1368,7 +1409,8 @@ impl<'db> Signature<'db> {
                 && let Some(upper) = bounds.as_single_upper_bound(db, env)
                 && lower.is_equivalent_to(db, env, upper)
                 && let Some(solution) =
-                    CandidateSolutions::default_solve(db, env, &constraints, bounds).as_type()
+                    CandidateSolutions::default_solve(db, env, &constraints, inferable, bounds)
+                        .as_type()
             {
                 return Some(solution);
             }
@@ -1383,7 +1425,8 @@ impl<'db> Signature<'db> {
                     .evidence_lower()
                     .is_some_and(|lower| !lower.is_never())
                 && let Some(solution) =
-                    CandidateSolutions::default_solve(db, env, &constraints, bounds).as_type()
+                    CandidateSolutions::default_solve(db, env, &constraints, inferable, bounds)
+                        .as_type()
             {
                 return Some(solution);
             }
@@ -1407,30 +1450,6 @@ impl<'db> Signature<'db> {
         }
 
         Some(specialized)
-    }
-
-    /// Returns this signature bound to `receiver_type` if its explicit receiver annotation is
-    /// compatible with the bound receiver.
-    pub(crate) fn bind_self_if_compatible(
-        &self,
-        db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
-        receiver_type: Type<'db>,
-        typing_self_type: Type<'db>,
-    ) -> Option<CallableSignature<'db>> {
-        if !self.can_bind_self_to(db, env, receiver_type) {
-            return None;
-        }
-
-        self.specialize_for_bound_receiver(db, env, receiver_type, typing_self_type)
-            .map(|signature| {
-                signature.bind_self_with_receiver(
-                    db,
-                    env,
-                    Some(receiver_type),
-                    Some(typing_self_type),
-                )
-            })
     }
 
     /// Returns `true` if this signature's first parameter can accept the bound `self` type.
@@ -1564,6 +1583,80 @@ impl<'db> Signature<'db> {
         self.parameters
             .get(0)
             .is_some_and(|parameter| parameter.is_positional() && parameter.inferred_annotation)
+    }
+
+    /// Binds the `Self` receiver if it is unused in the rest of the signature.
+    ///
+    /// This is purely a performance optimization. Eagerly binding the type of `Self` prevents
+    /// unnecessary work from being performed by the constraint solver.
+    pub(super) fn bind_unused_self(
+        &self,
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+        self_type: Type<'db>,
+    ) -> Option<Self> {
+        let context = self.generic_context?;
+        let receiver = self.parameters.get(0)?;
+
+        // Ensure `Self` is not used elsewhere in the signature, in which case eagerly binding it
+        // would be unsound.
+        if !receiver.is_positional() || self.needs_self_mapping(db, env, true) {
+            return None;
+        }
+
+        // Extract the `Self` type variable.
+        let self_typevar = match receiver.annotated_type() {
+            Type::TypeVar(typevar) => typevar,
+            Type::SubclassOf(subclass) => subclass.into_type_var()?,
+            _ => return None,
+        };
+        if !self_typevar.typevar(db).is_self(db) {
+            return None;
+        }
+
+        // Also ensure that the receiver satisfies the upper bound of `Self`.
+        let bound = self_typevar.typevar(db).upper_bound(db, env)?;
+        if !self_type.is_assignable_to(db, env, bound) {
+            return None;
+        }
+
+        // And that `Self` is not referenced by any other type variable, in which case removing it
+        // from the generic context may leave it unspecialized.
+        //
+        // TODO: References to `Self` inside of bounds or defaults should not generally be permitted
+        // in the first place, but we still avoid leaving dangling references to `Self` out of principle.
+        for typevar in context.variables(db) {
+            if typevar.identity(db) == self_typevar.identity(db) {
+                continue;
+            }
+
+            let bound = typevar.typevar(db).bound_or_constraints(db, env);
+            if bound.is_some_and(|bound| match bound {
+                TypeVarBoundOrConstraints::UpperBound(bound) => bound.contains_self(db, env),
+                TypeVarBoundOrConstraints::Constraints(constraints) => constraints
+                    .elements(db)
+                    .iter()
+                    .any(|constraint| constraint.contains_self(db, env)),
+            }) {
+                return None;
+            }
+
+            if typevar
+                .default_type(db)
+                .is_some_and(|ty| ty.contains_self(db, env))
+            {
+                return None;
+            }
+        }
+
+        let mapping =
+            TypeMapping::ApplySpecialization(ApplySpecialization::Single(self_typevar, self_type));
+        Some(self.apply_type_mapping_impl(
+            db,
+            &mapping,
+            TypeContext::default(),
+            &ApplyTypeMappingVisitor::new(env),
+        ))
     }
 
     fn apply_self_with_receiver(
@@ -2826,6 +2919,8 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
             context.push(ErrorContext::IncompatibleReturnTypes {
                 source: source.return_ty,
                 target: target.return_ty,
+                source_definition: source.definition,
+                target_definition: target.definition,
             });
         }
 

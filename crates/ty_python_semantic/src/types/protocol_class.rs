@@ -32,7 +32,7 @@ use crate::{
         context::InferContext,
         diagnostic::{INVALID_PROTOCOL, report_undeclared_protocol_member},
         generics::Specialization,
-        signatures::walk_signature,
+        signatures::{CallableSignature, walk_signature},
         variance::infer_protocol_variance,
     },
 };
@@ -2493,9 +2493,31 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                 .when_some_and(db, self.constraints, |callables| {
                     callables.iter().when_all(db, self.constraints, |callable| {
                         if callable.is_function_like(db) {
+                            // Require a positional receiver before binding: a zero-argument static
+                            // method otherwise loses no parameters while the protocol loses `self`.
+                            let signatures = CallableSignature::from_overloads(
+                                callable
+                                    .signatures(db)
+                                    .iter()
+                                    .filter(|signature| {
+                                        let parameters = signature.parameters();
+                                        parameters.get_positional(0).is_some()
+                                            || parameters.variadic().is_some()
+                                    })
+                                    .map(|signature| {
+                                        signature.bind_self(
+                                            db,
+                                            env,
+                                            Some(implementation_self_binding_ty),
+                                        )
+                                    }),
+                            );
+                            if signatures.overloads.is_empty() {
+                                return self.never();
+                            }
                             self.check_callable_pair(
                                 db,
-                                callable.bind_self(db, env, Some(implementation_self_binding_ty)),
+                                callable.with_signatures(db, signatures),
                                 protocol_bind_self(
                                     db,
                                     env.program(db),
@@ -3357,6 +3379,10 @@ fn proto_interface_cycle_recover<'db>(
 /// This additional upcasting is required in order for protocols with `__call__` method
 /// members to be considered assignable to `Callable` types, since the `Callable` supertype
 /// of the `__call__` method will be function-like but a `Callable` type is not.
+///
+/// Protocol interfaces can be prepared before their receiver is known, so we do not use
+/// [`CallableType::bind_self`] here. Preserve all overloads and record receiver constraints for
+/// later compatibility checks instead of specializing or filtering signatures here.
 #[salsa::tracked(returns(copy), heap_size=ruff_memory_usage::heap_size)]
 fn protocol_bind_self<'db>(
     db: &'db dyn Db,
@@ -3364,8 +3390,19 @@ fn protocol_bind_self<'db>(
     callable: CallableType<'db>,
     self_type: Option<Type<'db>>,
 ) -> CallableType<'db> {
+    if callable.is_dunder_paramspec(db) {
+        return callable.into_regular(db);
+    }
+
     let env = ProgramEnvironment::from_program(program);
-    callable.bind_self(db, &env, self_type).into_regular(db)
+    callable
+        .with_signatures(
+            db,
+            callable
+                .signatures(db)
+                .bind_self_with_receiver(db, &env, self_type, self_type),
+        )
+        .into_regular(db)
 }
 
 /// Cache receiver and `Self` binding only for protocol-member compatibility checks.
@@ -3383,11 +3420,7 @@ fn protocol_apply_self_with_receiver<'db>(
 ) -> CallableType<'db> {
     let env = ProgramEnvironment::from_program(program);
 
-    if receiver_type == self_type {
-        callable.apply_self(db, &env, self_type)
-    } else {
-        callable.apply_self_with_receiver(db, &env, receiver_type, self_type)
-    }
+    callable.apply_self_with_receiver(db, &env, receiver_type, self_type)
 }
 
 /// Return `true` if a callable has at least one overload and none return `Never`.
