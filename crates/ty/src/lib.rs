@@ -27,7 +27,7 @@ use ruff_diagnostics::Applicability;
 use salsa::Database;
 use ty_project::metadata::settings::TerminalSettings;
 use ty_project::watch::ProjectWatcher;
-use ty_project::{CollectReporter, Db, watch};
+use ty_project::{CollectReporter, Db, ScriptEnvironmentAvailability, ScriptSyncProgress, watch};
 use ty_project::{ProjectDatabase, ProjectMetadata};
 use ty_python_semantic::{fix_all_diagnostics, suppress_all_diagnostics};
 use ty_static::EnvVars;
@@ -148,8 +148,8 @@ fn run_check(args: CheckCommand) -> anyhow::Result<ExitStatus> {
             ProjectMetadata::from_config_file(config_file.clone(), &project_path, &system)?
         }
         None if check_paths.iter().any(|path| system.is_file(path)) => {
-            // `uv check --script` passes a file as its check path. Disable uv workspace metadata
-            // for scripts until script integration is implemented in a follow-up.
+            // `uv check --script` passes a file as its check path. Standalone scripts must not
+            // inherit the enclosing workspace; their environments are synchronized lazily.
             ProjectMetadata::discover_without_uv(&project_path, &system)?
         }
         None => ProjectMetadata::discover(&project_path, &system)?,
@@ -277,12 +277,11 @@ struct MainLoop {
     /// Receiver for the messages sent **to** the main loop.
     receiver: crossbeam_channel::Receiver<MainLoopMessage>,
 
-    /// Capacity-one channel used to coalesce pending workspace checks.
-    check_sender: crossbeam_channel::Sender<()>,
-    check_receiver: crossbeam_channel::Receiver<()>,
-
     /// The file system watcher, if running in watch mode.
     watcher: Option<ProjectWatcher>,
+
+    /// Progress bars shared by project checks and background script synchronization.
+    progress: ProgressDisplay,
 
     /// Interface for displaying information to the user.
     printer: Printer,
@@ -296,19 +295,19 @@ struct MainLoop {
 impl MainLoop {
     fn new(mode: MainLoopMode, printer: Printer) -> (Self, MainLoopCancellationToken) {
         let (sender, receiver) = crossbeam_channel::bounded(10);
-        let (check_sender, check_receiver) = crossbeam_channel::bounded(1);
 
         let cancellation_token_source = CancellationTokenSource::new();
         let cancellation_token = cancellation_token_source.token();
+        let progress = ProgressDisplay::new();
+        progress.bars.set_draw_target(printer.progress_target());
 
         (
             Self {
                 mode,
                 sender: sender.clone(),
                 receiver,
-                check_sender,
-                check_receiver,
                 watcher: None,
+                progress,
                 printer,
                 cancellation_token,
             },
@@ -331,8 +330,6 @@ impl MainLoop {
     }
 
     fn run(self, db: &mut ProjectDatabase) -> Result<ExitStatus> {
-        self.request_check();
-
         let result = self.main_loop(db);
 
         tracing::debug!("Exiting main loop");
@@ -340,37 +337,41 @@ impl MainLoop {
         result
     }
 
-    fn request_check(&self) {
-        // A pending request already represents a check of the latest database revision.
-        let _ = self.check_sender.try_send(());
-    }
-
     fn main_loop(mut self, db: &mut ProjectDatabase) -> Result<ExitStatus> {
         tracing::debug!("Starting main loop");
 
         let mut revision = 0u64;
+        let script_sync_wakeups = db.script_environments().sync_wakeups();
+        let (check_sender, check_receiver) = crossbeam_channel::bounded(1);
+        request_check(db, &check_sender);
 
         // Apply all queued changes before starting a pending check because every applied change
         // cancels the running check.
         while let Ok(message) = crossbeam_channel::select_biased! {
+            recv(script_sync_wakeups) -> wakeup => {
+                wakeup.map(|()| MainLoopMessage::PollScriptEnvironments)
+            }
             recv(self.receiver) -> message => message,
-            recv(self.check_receiver) -> request => request.map(|()| MainLoopMessage::CheckWorkspace),
+            recv(check_receiver) -> request => request.map(|()| MainLoopMessage::CheckWorkspace),
         } {
             match message {
                 MainLoopMessage::CheckWorkspace => {
+                    // Synchronization may have started after this request was queued.
+                    if db.script_environments().has_pending_synchronizations() {
+                        tracing::debug!("Deferring check until script synchronization completes");
+                        continue;
+                    }
                     let db = db.clone();
                     let sender = self.sender.clone();
+                    let progress = self.progress.clone();
 
                     // Spawn a new task that checks the project. This needs to be done in a separate thread
                     // to prevent blocking the main loop here.
                     rayon::spawn(move || {
-                        let mut reporter = IndicatifReporter::from(self.printer);
-                        let bar = reporter.bar.clone();
-
                         match salsa::Cancelled::catch(|| {
+                            let mut reporter = IndicatifReporter::new(progress);
                             db.check_with_reporter(&mut reporter);
-                            reporter.bar.finish_and_clear();
-                            reporter.collector.into_sorted(&db)
+                            reporter.into_sorted_diagnostics(&db)
                         }) {
                             Ok(result) => {
                                 // Send the result back to the main loop for printing.
@@ -379,13 +380,13 @@ impl MainLoop {
                                     .unwrap();
                             }
                             Err(cancelled) => {
-                                bar.finish_and_clear();
                                 tracing::debug!("Check has been cancelled: {cancelled:?}");
                             }
                         }
                     });
+                    tracing::debug!("Waiting for next main loop message.");
+                    continue;
                 }
-
                 MainLoopMessage::CheckCompleted {
                     result,
                     revision: check_revision,
@@ -486,21 +487,43 @@ impl MainLoop {
                     return Ok(exit_status);
                 }
 
+                MainLoopMessage::PollScriptEnvironments => {
+                    let environments = db.script_environments().clone();
+                    if !environments.poll_sync(db).is_empty() {
+                        revision += 1;
+                    }
+                    request_check(db, &check_sender);
+                }
+
                 MainLoopMessage::ApplyChanges(changes) => {
-                    Printer::clear_screen()?;
+                    // Another filesystem event can arrive while a script is still synchronizing.
+                    // Keep its progress visible after clearing the previous check's output.
+                    self.progress.bars.suspend(Printer::clear_screen)?;
 
                     revision += 1;
                     // Automatically cancels any pending queries and waits for them to complete.
                     db.apply_changes(&changes);
+
+                    let environments = db.script_environments().clone();
+                    for file in environments.files() {
+                        environments.request_sync(
+                            db,
+                            file,
+                            ScriptEnvironmentAvailability::Pending,
+                            &|db, file| self.progress.for_script(db, file),
+                        );
+                    }
+
                     if let Some(watcher) = self.watcher.as_mut() {
                         watcher.update(db);
                     }
 
-                    self.request_check();
+                    request_check(db, &check_sender);
                 }
                 MainLoopMessage::Exit => {
                     // Cancel any pending queries and wait for them to complete.
                     db.trigger_cancellation();
+                    self.progress.clear();
                     return Ok(ExitStatus::Interrupted);
                 }
             }
@@ -626,23 +649,29 @@ fn exit_status_from_diagnostics(
 struct IndicatifReporter {
     collector: CollectReporter,
 
+    progress: ProgressDisplay,
+
     /// A reporter that is ready, containing a progress bar to report to.
     ///
     /// Initialization of the bar is deferred to [`ty_project::ProgressReporter::set_files`] so we
     /// do not initialize the bar too early as it may take a while to collect the number of files to
     /// process and we don't want to display an empty "0/0" bar.
-    bar: indicatif::ProgressBar,
-
-    printer: Printer,
+    checking_bar: indicatif::ProgressBar,
 }
 
-impl From<Printer> for IndicatifReporter {
-    fn from(printer: Printer) -> Self {
+impl IndicatifReporter {
+    fn new(progress: ProgressDisplay) -> Self {
+        let checking_bar = progress.bars.add(indicatif::ProgressBar::hidden());
+
         Self {
-            bar: indicatif::ProgressBar::hidden(),
+            progress,
+            checking_bar,
             collector: CollectReporter::default(),
-            printer,
         }
+    }
+
+    fn into_sorted_diagnostics(mut self, db: &dyn Db) -> Vec<Diagnostic> {
+        std::mem::take(&mut self.collector).into_sorted(db)
     }
 }
 
@@ -650,25 +679,87 @@ impl ty_project::ProgressReporter for IndicatifReporter {
     fn set_files(&mut self, files: usize) {
         self.collector.set_files(files);
 
-        self.bar.set_length(files as u64);
-        self.bar.set_message("Checking");
-        self.bar.set_style(
+        self.checking_bar.set_length(files as u64);
+        self.checking_bar.set_message("Checking");
+        self.checking_bar.set_style(
             indicatif::ProgressStyle::with_template(
                 "{msg:8.dim} {bar:60.green/dim} {pos}/{len} files",
             )
             .unwrap()
             .progress_chars("--"),
         );
-        self.bar.set_draw_target(self.printer.progress_target());
+        self.checking_bar.tick();
+    }
+
+    fn for_script(&self, db: &dyn Db, file: File) -> Option<Box<dyn ScriptSyncProgress>> {
+        self.progress.for_script(db, file)
     }
 
     fn report_checked_file(&self, db: &ProjectDatabase, file: File, diagnostics: &[Diagnostic]) {
         self.collector.report_checked_file(db, file, diagnostics);
-        self.bar.inc(1);
+        self.checking_bar.inc(1);
     }
 
     fn report_diagnostics(&mut self, db: &ProjectDatabase, diagnostics: Vec<Diagnostic>) {
         self.collector.report_diagnostics(db, diagnostics);
+    }
+}
+
+impl Drop for IndicatifReporter {
+    fn drop(&mut self) {
+        self.progress.finish_checking(&self.checking_bar);
+    }
+}
+
+/// Coordinates the file-checking bar and per-script synchronization messages.
+#[derive(Clone)]
+struct ProgressDisplay {
+    bars: indicatif::MultiProgress,
+}
+
+impl ProgressDisplay {
+    fn new() -> Self {
+        Self {
+            bars: indicatif::MultiProgress::with_draw_target(
+                indicatif::ProgressDrawTarget::hidden(),
+            ),
+        }
+    }
+
+    fn for_script(&self, db: &dyn Db, file: File) -> Option<Box<dyn ScriptSyncProgress>> {
+        if self.bars.is_hidden() {
+            return None;
+        }
+
+        let path = file.path(db).as_system_path()?;
+        let path = path.strip_prefix(db.project().root(db)).unwrap_or(path);
+
+        let bar = self.bars.insert(0, indicatif::ProgressBar::hidden());
+        bar.set_style(indicatif::ProgressStyle::with_template("{wide_msg}").unwrap());
+        bar.set_message(format!("   {} {path}", "Syncing".bold().cyan()));
+
+        Some(Box::new(ScriptSyncProgressBar { bar }))
+    }
+
+    fn finish_checking(&self, bar: &indicatif::ProgressBar) {
+        self.bars.remove(bar);
+        self.clear();
+    }
+
+    fn clear(&self) {
+        let _ = self.bars.clear();
+    }
+}
+
+struct ScriptSyncProgressBar {
+    bar: indicatif::ProgressBar,
+}
+
+impl ScriptSyncProgress for ScriptSyncProgressBar {}
+
+impl Drop for ScriptSyncProgressBar {
+    fn drop(&mut self) {
+        self.bar.finish_and_clear();
     }
 }
 
@@ -694,8 +785,19 @@ enum MainLoopMessage {
         result: Vec<Diagnostic>,
         revision: u64,
     },
+    PollScriptEnvironments,
     ApplyChanges(Vec<watch::ChangeEvent>),
     Exit,
+}
+
+fn request_check(db: &dyn Db, sender: &crossbeam_channel::Sender<()>) {
+    if db.script_environments().has_pending_synchronizations() {
+        return;
+    }
+
+    // A full channel means that a check has already been requested. Keeping one pending request
+    // coalesces bursts of file changes while the main loop drains higher-priority work.
+    let _ = sender.try_send(());
 }
 
 fn current_directory() -> Result<SystemPathBuf> {

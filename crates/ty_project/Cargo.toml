@@ -65,6 +65,7 @@ tracing = { workspace = true }
 ruff_db = { workspace = true, features = ["os", "testing"] }
 
 insta = { workspace = true, features = ["redactions", "ron"] }
+tempfile = { workspace = true }
 
 [features]
 default = ["zstd"]
@@ -80,6 +81,7 @@ schemars = [
 zstd = ["ty_vendored/zstd"]
 junit = ["ruff_db/junit"]
 format = ["ruff_python_formatter"]
+test-uv = []
 testing = []
 # Embed the WASM plugin runtime (native only). Enables the `wasm` plugin runtime; never enabled for
 # the `wasm32` `ty_wasm` build.

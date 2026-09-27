@@ -13,7 +13,7 @@ use crate::CollectReporter;
 use crate::metadata::settings::PluginRuntimeSettings;
 use crate::metadata::settings::Settings;
 use crate::metadata::settings::file_settings;
-use crate::script::Script;
+use crate::script::{Script, ScriptEnvironments};
 use crate::{ProgressReporter, Project, ProjectMetadata};
 use get_size2::StandardTracker;
 use ruff_db::Db as SourceDb;
@@ -39,6 +39,8 @@ mod changes;
 #[salsa::db]
 pub trait Db: SemanticDb {
     fn project(&self) -> Project;
+
+    fn script_environments(&self) -> &ScriptEnvironments;
 
     fn dyn_clone(&self) -> Box<dyn Db>;
 }
@@ -273,6 +275,7 @@ pub struct ProjectDatabase {
     // setters instead of swapping in a freshly constructed handle.
     project: Option<Project>,
     files: Files,
+    script_environments: ScriptEnvironments,
 
     // IMPORTANT: Never return clones of `system` outside `ProjectDatabase` (only return references)
     // or the "trick" to get a mutable `Arc` in `Self::system_mut` is no longer guaranteed to work.
@@ -330,6 +333,7 @@ impl ProjectDatabase {
     where
         S: System + 'static + Send + Sync + RefUnwindSafe,
     {
+        let script_environments = ScriptEnvironments::new(project_metadata.use_uv());
         let mut db = Self {
             project: None,
             storage: salsa::Storage::new(if tracing::enabled!(tracing::Level::TRACE) {
@@ -346,6 +350,7 @@ impl ProjectDatabase {
                 None
             }),
             files: Files::default(),
+            script_environments,
             system: Arc::new(system),
             semantic_plugin_runtime: SemanticPluginRuntimeState::default(),
         };
@@ -844,6 +849,10 @@ impl Db for ProjectDatabase {
         self.project.unwrap()
     }
 
+    fn script_environments(&self) -> &ScriptEnvironments {
+        &self.script_environments
+    }
+
     fn dyn_clone(&self) -> Box<dyn Db> {
         Box::new(self.clone())
     }
@@ -896,7 +905,7 @@ pub(crate) mod testing {
 
     use crate::db::Db;
     use crate::metadata::settings::file_settings;
-    use crate::script::Script;
+    use crate::script::{Script, ScriptEnvironments};
     use crate::{Project, ProjectMetadata};
 
     type Events = Arc<Mutex<Vec<salsa::Event>>>;
@@ -907,6 +916,7 @@ pub(crate) mod testing {
         storage: salsa::Storage<Self>,
         events: Events,
         files: Files,
+        script_environments: ScriptEnvironments,
         system: TestSystem,
         vendored: VendoredFileSystem,
         project: Option<Project>,
@@ -915,6 +925,7 @@ pub(crate) mod testing {
     impl TestDb {
         pub fn new(project: ProjectMetadata) -> Self {
             let events = Events::default();
+            let script_environments = ScriptEnvironments::new(project.use_uv());
             let mut db = Self {
                 storage: salsa::Storage::new(Some(Box::new({
                     let events = events.clone();
@@ -926,6 +937,7 @@ pub(crate) mod testing {
                 system: TestSystem::default(),
                 vendored: ty_vendored::file_system().clone(),
                 files: Files::default(),
+                script_environments,
                 events,
                 project: None,
             };
@@ -1092,6 +1104,10 @@ pub(crate) mod testing {
     impl Db for TestDb {
         fn project(&self) -> Project {
             self.project.unwrap()
+        }
+
+        fn script_environments(&self) -> &ScriptEnvironments {
+            &self.script_environments
         }
 
         fn dyn_clone(&self) -> Box<dyn Db> {
