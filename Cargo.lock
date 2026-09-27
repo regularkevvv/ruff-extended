@@ -3514,6 +3514,7 @@ dependencies = [
  "tracing",
  "ty_module_resolver",
  "ty_project",
+ "ty_python_semantic",
  "ty_static",
 ]
 
@@ -3584,6 +3585,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "colored",
  "ignore",
  "imara-diff",
  "indicatif",
@@ -3591,7 +3593,6 @@ dependencies = [
  "itertools 0.15.0",
  "libcst",
  "markdown",
- "pretty_assertions",
  "rayon",
  "regex",
  "ruff",
@@ -5218,6 +5219,7 @@ dependencies = [
  "shellexpand",
  "strum",
  "strum_macros",
+ "tempfile",
  "thiserror 2.0.19",
  "toml 1.1.4+spec-1.1.0",
  "tracing",
