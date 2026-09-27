@@ -942,7 +942,7 @@ impl<'db> VariableSegment<'db> {
     ///
     /// Preserve the `TypeVarTuple` here so that variance inference and generic-context traversal
     /// can still observe it. Runtime element operations must use [`Self::element_type`] instead.
-    fn tuple_class_type(self) -> Type<'db> {
+    pub(super) fn tuple_class_type(self) -> Type<'db> {
         match self {
             Self::Homogeneous(element) => element,
             Self::TypeVarTuple(typevartuple) => Type::TypeVar(typevartuple),
