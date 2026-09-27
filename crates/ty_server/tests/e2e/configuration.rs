@@ -416,6 +416,9 @@ fn invalid_include_pattern_preserves_rules_and_diagnostics() -> Result<()> {
     let diagnostics = server.document_diagnostic_request(main, None);
     insta::assert_snapshot!(condensed_document_diagnostic_snapshot(diagnostics), @"0:0..0:9[WARNING]: Name `undefined` used when not defined");
 
+    Ok(())
+}
+
 #[test]
 fn configuration_overrides() -> Result<()> {
     let _filter = filter_result_id();
