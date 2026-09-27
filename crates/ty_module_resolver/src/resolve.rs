@@ -722,6 +722,7 @@ impl fmt::Debug for SearchPaths {
             static_paths,
             stdlib_path,
             real_stdlib_path,
+            plugin_stub_overlays,
             site_packages,
             // Omit `typeshed_versions` because its debug representation spans thousands of lines,
             // making even simple `Type` debug representations impractically large.
@@ -732,6 +733,7 @@ impl fmt::Debug for SearchPaths {
             .field("static_paths", static_paths)
             .field("stdlib_path", stdlib_path)
             .field("real_stdlib_path", real_stdlib_path)
+            .field("plugin_stub_overlays", plugin_stub_overlays)
             .field("site_packages", site_packages)
             .finish_non_exhaustive()
     }
