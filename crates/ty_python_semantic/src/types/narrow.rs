@@ -9,8 +9,9 @@ use crate::subscript::PyIndex;
 use crate::types::function::KnownFunction;
 use crate::types::infer::{ExpressionInference, infer_same_file_expression_type};
 use crate::types::special_form::TypeQualifier;
-use crate::types::tuple::{TupleLength, TupleSpec, TupleSpecBuilder, TupleType, TupleUnpacker};
+use crate::types::tuple::{TupleElement, TupleLength, TupleSpec, TupleSpecBuilder, TupleType};
 use crate::types::typed_dict::{TypedDictFieldBuilder, TypedDictSchema, TypedDictType};
+use crate::types::unpacker::collected_list_type;
 use crate::types::{
     CallableType, ClassBase, ClassLiteral, ClassPatternPositionalSource, ClassType,
     IntersectionBuilder, IntersectionType, KnownClass, KnownInstanceType, LiteralValueTypeKind,
@@ -42,13 +43,12 @@ use ruff_python_stdlib::identifiers::is_identifier;
 
 use super::UnionType;
 use super::call::CallArguments;
-use super::constraints::{ConstraintSetBuilder, PathBoundSolution, PathBounds, Solutions};
+use super::constraints::{ConstraintSetBuilder, Solutions};
 use super::equality::{
     ComparisonSoundnessPolicy, equality_exclusion_constraint, equality_truthiness,
     evaluate_type_equality, evaluate_type_inequality,
 };
 use super::match_pattern::is_typed_dict_runtime_domain;
-use super::variance::TypeVarVariance;
 use itertools::Itertools;
 use ruff_python_ast as ast;
 use ruff_python_ast::{BoolOp, ExprBoolOp};
@@ -84,7 +84,9 @@ pub(crate) fn infer_narrowing_constraints<'db>(
     Option<NarrowingConstraint<'db>>,
 ) {
     let constraints = match predicate.node {
-        PredicateNode::Expression(expression) => {
+        PredicateNode::Expression(expression)
+        | PredicateNode::Condition(expression)
+        | PredicateNode::ChainedComparisonCondition(expression) => {
             let constraints = all_narrowing_constraints_for_expression(db, expression);
             (
                 constraints.get(place, true).cloned(),
@@ -1511,7 +1513,9 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
 
     fn finish(mut self) -> Option<FrozenNarrowingConstraints<'db>> {
         let constraints: Option<NarrowingConstraints<'db>> = match self.predicate {
-            PredicateNode::Expression(expression) => {
+            PredicateNode::Expression(expression)
+            | PredicateNode::Condition(expression)
+            | PredicateNode::ChainedComparisonCondition(expression) => {
                 self.evaluate_expression_predicate(expression, self.is_positive)
             }
             PredicateNode::Pattern(pattern) => {
@@ -2285,18 +2289,20 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         kind: &ClassPatternPredicateKind<'db>,
         context: &ClassPatternContext<'db>,
         original_subject_ty: Type<'db>,
-        filtering_subject_ty: Type<'db>,
         subject_ty: Type<'db>,
     ) -> Option<Vec<ClassPatternArgument<'db>>> {
         let db = self.db;
         let subject_is_final = subject_ty
             .nominal_class(db, &self.env)
             .is_some_and(|class| class.is_final(db));
-        let specialized_pattern_class = if context.positional_sources.is_empty()
-            && kind.keywords.is_empty()
+        let use_generic_filtering = self.use_generic_filtering();
+        // Strict narrowing already includes the pattern's constraints in the subject type.
+        // Its full member type must not be replaced by one specialization from an intersection.
+        let specialized_pattern_class = if !use_generic_filtering
+            || (context.positional_sources.is_empty() && kind.keywords.is_empty())
         {
             None
-        } else if self.use_generic_filtering() {
+        } else {
             context
                 .class
                 .filter(|pattern_class| pattern_class.generic_context(db).is_some())
@@ -2316,13 +2322,6 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                             }
                         })
                 })
-        } else {
-            context
-                .class
-                .zip(filtering_subject_ty.nominal_class(db, &self.env))
-                .and_then(|(pattern_class, subject_class)| {
-                    self.specialize_pattern_class_for_subject(pattern_class, subject_class)
-                })
         };
         let member_type = |name: &Name| {
             let original_member_ty = original_subject_ty
@@ -2341,7 +2340,8 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                 && !specialized_member_ty.is_unknown()
             {
                 member_ty = Some(specialized_member_ty);
-            } else if let Some(pattern_class) = context.class
+            } else if use_generic_filtering
+                && let Some(pattern_class) = context.class
                 && pattern_class
                     .generic_context(db)
                     .and_then(|generic_context| {
@@ -2427,84 +2427,6 @@ impl<'db> PatternSuccessAnalyzer<'db> {
             .collect()
     }
 
-    /// Infer an exact specialization of a generic pattern subclass from a specialized base-class
-    /// subject.
-    ///
-    /// This intentionally handles only the case where every pattern-class type variable has one
-    /// exact solution. Variant base classes and pattern classes with unconstrained parameters keep
-    /// the existing conservative member type.
-    ///
-    /// ```python
-    /// class Base[T]:
-    ///     value: T
-    ///
-    /// class Child[T](Base[T]):
-    ///     item: T
-    ///
-    /// def f(value: Base[int]) -> None:
-    ///     match value:
-    ///         case Child(item=item):
-    ///             reveal_type(item)  # int
-    /// ```
-    fn specialize_pattern_class_for_subject(
-        &self,
-        pattern_class: ClassLiteral<'db>,
-        subject_class: ClassType<'db>,
-    ) -> Option<ClassType<'db>> {
-        let db = self.db;
-        let generic_context = pattern_class.generic_context(db)?;
-        let pattern_base = pattern_class
-            .identity_specialization(db)
-            .iter_mro(db)
-            .filter_map(ClassBase::into_class)
-            .find(|base| base.class_literal(db) == subject_class.class_literal(db))?;
-
-        let constraints = ConstraintSetBuilder::new();
-        let solutions = Type::instance(db, &self.env, pattern_base)
-            .assignable_solutions_with_inferable(
-                db,
-                &self.env,
-                Type::instance(db, &self.env, subject_class),
-                generic_context.inferable_typevars(db),
-            )
-            .solve_with(|variance, path_bound| {
-                let Some(lower) = path_bound.evidence_lower else {
-                    return PathBoundSolution::Unsolved;
-                };
-                if variance != TypeVarVariance::Invariant
-                    || path_bound.upper.materialize_exact(db, &self.env) != lower
-                {
-                    return PathBoundSolution::Unsolved;
-                }
-                PathBounds::default_solve(db, &self.env, &constraints, path_bound)
-            });
-        let Solutions::Constrained(solutions) = solutions else {
-            return None;
-        };
-        let [solution] = solutions.as_slice() else {
-            return None;
-        };
-
-        let typevars = generic_context.variables(db);
-        let types = typevars
-            .clone()
-            .map(|typevar| {
-                solution
-                    .iter()
-                    .find(|binding| binding.bound_typevar == typevar)
-                    .map(|binding| binding.solution)
-            })
-            .collect::<Option<Vec<_>>>()?;
-        if types.iter().any(|ty| {
-            typevars.clone().any(|typevar| {
-                ty.references_typevar(db, &self.env, typevar.typevar(db).identity(db))
-            })
-        }) {
-            return None;
-        }
-        Some(pattern_class.apply_specialization(db, |_| generic_context.specialize(db, types)))
-    }
-
     fn class_pattern_contexts(
         &self,
         kind: &ClassPatternPredicateKind<'db>,
@@ -2559,7 +2481,6 @@ impl<'db> PatternSuccessAnalyzer<'db> {
             kind,
             context,
             original_subject_ty,
-            subject_ty,
             narrowed_subject_ty,
         )?;
         Some((narrowed_subject_ty, arguments))
@@ -3086,9 +3007,32 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                     },
                 ))
             });
-        let mut unpacker = TupleUnpacker::new(db, &self.env, target_len);
-        unpacker.unpack_tuple(tuple.as_ref()).ok()?;
-        Some((narrowed_subject_ty, unpacker.into_types().collect()))
+        let unpacked = tuple
+            .unpack(
+                target_len,
+                |segment| vec![segment.element_type(db)],
+                |elements| {
+                    UnionType::from_elements_leave_aliases(db, &self.env, elements.iter().copied())
+                },
+            )
+            .ok()?;
+        let element_types = unpacked
+            .into_all_elements_with_kind()
+            .map(|element| match element {
+                // `case [1, *rest]:` still needs the precise first element to select matching
+                // tuple union members. Only the fresh list for `rest` undergoes promotion.
+                TupleElement::Variable(elements) => {
+                    collected_list_type(db, &self.env, elements.into_iter().map(|ty| (ty, None)))
+                }
+                TupleElement::Fixed(ty) | TupleElement::Prefix(ty) | TupleElement::Suffix(ty) => {
+                    UnionBuilder::new(db, &self.env)
+                        .add(ty)
+                        .try_build()
+                        .unwrap_or_else(Type::unknown)
+                }
+            })
+            .collect();
+        Some((narrowed_subject_ty, element_types))
     }
 
     fn analyze_matched_subject_arms(
@@ -3296,6 +3240,8 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
         let db = self.db;
         match self.predicate {
             PredicateNode::Expression(expression)
+            | PredicateNode::Condition(expression)
+            | PredicateNode::ChainedComparisonCondition(expression)
             | PredicateNode::ContextManagerSuppresses { expression, .. } => expression.scope(db),
             PredicateNode::Pattern(pattern) => pattern.scope(db),
             PredicateNode::FinallyNormalPathImpossible { scope, .. } => scope,

@@ -166,7 +166,7 @@ def publish_workspace(
     command = build_cargo_publish_command(
         cargo, existing, missing, cargo_publish_args, package_filter
     )
-    return subprocess.run(command, cwd=REPO_ROOT).returncode
+    return subprocess.run(command, cwd=REPO_ROOT, check=False).returncode
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

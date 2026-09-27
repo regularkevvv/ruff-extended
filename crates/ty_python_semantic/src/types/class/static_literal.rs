@@ -27,8 +27,9 @@ use crate::types::plugin::{
 use crate::{
     Db, FxIndexMap, FxIndexSet, TypeQualifiers,
     place::{
-        DefinedPlace, Definedness, Place, PlaceAndQualifiers, PublicTypePolicy, TypeOrigin,
-        place_from_bindings, place_from_declarations,
+        ConsideredDefinitions, DefinedPlace, Definedness, Place, PlaceAndQualifiers,
+        PublicTypePolicy, RequiresExplicitReExport, TypeOrigin, place_by_id, place_from_bindings,
+        place_from_declarations,
     },
     reachability::{DeclarationsIteratorExtension, ReachabilityConstraintsExtension},
     types::{
@@ -41,7 +42,7 @@ use crate::{
         UnionBuilder, UnionType,
         bound_super::BoundSuperType,
         call::{CallError, CallErrorKind},
-        callable::{CallableFunctionProvenance, CallableTypeKind},
+        callable::CallableTypeKind,
         class::{
             ClassInstanceFlags, ClassMemberResult, ClassMetaclass, CodeGeneratorKind, DisjointBase,
             DynamicTypedDictLiteral, Field, FieldKind, InstanceMemberResult, MetaclassError,
@@ -73,9 +74,7 @@ use ty_python_core::{
     place_table,
     program::{Program, SemanticPlugin, SemanticPluginRuntime, SemanticPlugins},
     scope::ScopeId,
-    semantic_index,
-    symbol::Symbol,
-    use_def_map,
+    semantic_index, use_def_map,
 };
 
 /// Representation of a class definition statement in the AST: either a non-generic class, or a
@@ -671,7 +670,7 @@ impl<'db> StaticClassLiteral<'db> {
     }
 
     /// Returns the generic context that should be inherited by any constructor methods of this class.
-    pub(super) fn inherited_generic_context(self, db: &'db dyn Db) -> Option<GenericContext<'db>> {
+    fn inherited_generic_context(self, db: &'db dyn Db) -> Option<GenericContext<'db>> {
         self.generic_context(db)
     }
 
@@ -2537,12 +2536,7 @@ impl<'db> StaticClassLiteral<'db> {
                         )
                     }),
                 );
-                CallableType::new(
-                    db,
-                    signatures,
-                    CallableTypeKind::FunctionLike,
-                    CallableFunctionProvenance::None,
-                )
+                CallableType::new(db, signatures, CallableTypeKind::FunctionLike)
             });
 
             return Some(synthesized_callables.into_type(db, env));
@@ -3086,7 +3080,6 @@ impl<'db> StaticClassLiteral<'db> {
             db,
             CallableSignature::from_overloads(overloads),
             CallableTypeKind::FunctionLike,
-            CallableFunctionProvenance::None,
         )))
     }
 
@@ -6538,30 +6531,25 @@ impl<'db> StaticClassLiteral<'db> {
 
         let use_def_map = index.use_def_map(class_body_scope.file_scope_id(db));
         let table = place_table(db, class_body_scope);
-        let attribute_places_and_qualifiers =
-            use_def_map
-                .all_end_of_scope_symbol_declarations()
-                .map(|(symbol_id, declarations)| {
-                    let place_and_qual = place_from_declarations(db, &env, declarations)
-                        .ignore_conflicting_declarations();
-                    (symbol_id, place_and_qual)
-                })
-                .chain(use_def_map.all_end_of_scope_symbol_bindings().map(
-                    |(symbol_id, bindings)| {
-                        (
-                            symbol_id,
-                            place_from_bindings(db, &env, bindings).place.into(),
-                        )
-                    },
-                ))
-                .filter_map(|(symbol_id, place_and_qual)| {
-                    if let Some(name) = table.place(symbol_id).as_symbol().map(Symbol::name) {
-                        (![init_name, new_name].contains(&name))
-                            .then_some((name.to_string(), place_and_qual))
-                    } else {
-                        None
-                    }
-                });
+        // A declaration in a stub also creates a binding with no qualifiers. Resolve
+        // both together so `value: Final[T]` is not also treated as a mutable `T`.
+        let attribute_places_and_qualifiers = use_def_map
+            .all_end_of_scope_symbol_declarations()
+            .filter_map(|(symbol_id, _)| {
+                let name = table.symbol(symbol_id).name();
+                if [init_name, new_name].contains(&name) {
+                    return None;
+                }
+
+                let place_and_qualifiers = place_by_id(
+                    db,
+                    class_body_scope,
+                    symbol_id.into(),
+                    RequiresExplicitReExport::No,
+                    ConsideredDefinitions::EndOfScope,
+                );
+                Some((name.to_string(), place_and_qualifiers))
+            });
 
         // Dataclasses can have some additional synthesized methods (`__eq__`, `__hash__`,
         // `__lt__`, etc.) but none of these will have field types type variables in their signatures, so we

@@ -64,11 +64,12 @@ insta-cmd = { workspace = true }
 regex = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }
+zip = { workspace = true }
 
 [features]
 default = []
 plugins-wasm = ["ty_project/plugins-wasm"]
-test-uv = []
+test-uv = ["ty_server/test-uv"]
 
 [lints]
 workspace = true

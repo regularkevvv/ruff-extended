@@ -10,13 +10,13 @@ use ty_module_resolver::{
 
 use crate::dunder_all::dunder_all_names;
 use crate::reachability::{
-    ReachabilityEvaluationCache, evaluate_reachability, evaluate_reachability_with_cache,
+    NarrowingProjector, ReachabilityEvaluationCache, evaluate_reachability,
+    evaluate_reachability_with_cache,
 };
-use crate::types::narrow::NarrowingEvaluatorExtension;
 use crate::types::{
     DynamicType, KnownClass, MemberLookupPolicy, Type, TypeAndQualifiers, TypeQualifiers,
-    UnionBuilder, UnionType, binding_type, exists_at_runtime, inferred_declaration,
-    is_discarded_dict_key_assignment,
+    UnionBuilder, UnionType, binding_type, inferred_declaration, is_discarded_dict_key_assignment,
+    may_exist_at_runtime,
 };
 use crate::{Db, FxIndexSet, FxOrderSet};
 use ty_python_core::definition::{Definition, DefinitionKind, DefinitionState};
@@ -309,7 +309,7 @@ impl<'db> Place<'db> {
     }
 
     #[must_use]
-    pub(crate) fn map_type(self, f: impl FnOnce(Type<'db>) -> Type<'db>) -> Place<'db> {
+    fn map_type(self, f: impl FnOnce(Type<'db>) -> Type<'db>) -> Place<'db> {
         match self {
             Place::Defined(defined) => Place::Defined(DefinedPlace {
                 ty: f(defined.ty),
@@ -694,7 +694,7 @@ fn builtins_symbol_impl<'db>(
         if matches!(visibility, BuiltinVisibility::RuntimeOnly)
             && let Place::Defined(defined) = found_symbol.place
             && let Some(definition) = defined.provenance.definition()
-            && !exists_at_runtime(db, definition)
+            && !may_exist_at_runtime(db, definition)
         {
             return None;
         }
@@ -1520,6 +1520,7 @@ fn loop_header_reachability_impl<'db>(
     let place = loop_header_definition.place();
 
     let mut deleted_reachability = Truthiness::AlwaysFalse;
+    let mut deleted_narrowing_constraints = FxIndexSet::default();
     let mut reachable_bindings = FxIndexSet::default();
     let live_bindings: Vec<_> = loop_header.bindings_for_place(place).collect();
     let use_exact_reachability = use_def.reachability_constraints().used_interiors().len()
@@ -1542,7 +1543,11 @@ fn loop_header_reachability_impl<'db>(
         }
 
         match use_def.definition(live_binding.binding()) {
-            DefinitionState::Defined(def) => {
+            // Assignment validity can depend on this header, so avoid inferring it while
+            // initializing a cycle.
+            DefinitionState::Defined(def)
+                if is_cycle_initial || !is_discarded_dict_key_assignment(db, def) =>
+            {
                 debug_assert_ne!(
                     def, definition,
                     "loop headers only include bindings from within the loop"
@@ -1555,8 +1560,11 @@ fn loop_header_reachability_impl<'db>(
             // `del` in the loop body is always visible to code after the loop via the
             // normal control flow merge. Updating `deleted_reachability` here is
             // necessary for prior uses in the loop to see it.
-            DefinitionState::Deleted => {
+            // Discarded dictionary-key bindings also require a fallback to the receiver's
+            // value type instead of contributing their assigned value.
+            DefinitionState::Defined(_) | DefinitionState::Deleted => {
                 deleted_reachability = deleted_reachability.or(reachability);
+                deleted_narrowing_constraints.insert(live_binding.narrowing_constraint());
             }
             DefinitionState::Undefined => {
                 unreachable!("loop headers only include bindings from within the loop")
@@ -1566,6 +1574,7 @@ fn loop_header_reachability_impl<'db>(
 
     LoopHeaderReachability {
         deleted_reachability,
+        deleted_narrowing_constraints: deleted_narrowing_constraints.into_iter().collect(),
         reachable_bindings,
     }
 }
@@ -1574,7 +1583,10 @@ fn loop_header_reachability_impl<'db>(
 #[derive(Debug, Clone, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
 pub(crate) struct LoopHeaderReachability<'db> {
     pub(crate) deleted_reachability: Truthiness,
-    /// Reachable loop-back bindings that are not `del`s.
+    /// Constraints established after a deletion, member invalidation, or discarded key assignment.
+    /// These still narrow the fallback type of the member on the next iteration.
+    pub(crate) deleted_narrowing_constraints: Box<[ScopedNarrowingConstraint]>,
+    /// Reachable loop-back bindings whose values contribute to inferred types.
     pub(crate) reachable_bindings: FxIndexSet<ReachableLoopBinding<'db>>,
 }
 
@@ -1586,15 +1598,27 @@ impl<'db> LoopHeaderReachability<'db> {
     ) -> LoopHeaderReachability<'db> {
         // Avoid losing precision for cycles that are soon to converge.
         // See [`Type::cycle_normalized`] for more details.
-        let reachable_bindings = if cycle.iteration() <= crate::TAINTED_CYCLES {
-            self.reachable_bindings
-        } else {
-            let previous_bindings = previous.reachable_bindings.iter().copied();
-            previous_bindings.chain(self.reachable_bindings).collect()
-        };
+        if cycle.iteration() <= crate::TAINTED_CYCLES {
+            return self;
+        }
+
+        let mut reachable_bindings: FxIndexSet<_> = previous
+            .reachable_bindings
+            .iter()
+            .copied()
+            .chain(self.reachable_bindings)
+            .collect();
+        reachable_bindings.shrink_to_fit();
+        let deleted_narrowing_constraints: FxIndexSet<_> = previous
+            .deleted_narrowing_constraints
+            .iter()
+            .copied()
+            .chain(self.deleted_narrowing_constraints)
+            .collect();
 
         LoopHeaderReachability {
             deleted_reachability: self.deleted_reachability,
+            deleted_narrowing_constraints: deleted_narrowing_constraints.into_iter().collect(),
             reachable_bindings,
         }
     }
@@ -1657,6 +1681,7 @@ fn place_from_bindings_impl<'db>(
     let mut provenance = Provenance::Unknown;
     // special handling for synthetic loop header definitions and nested bindings definitions
     let mut only_non_shadowing_bindings = true;
+    let mut narrowing_projector = None;
 
     let mut types = bindings_with_constraints.filter_map(
         |BindingWithConstraints {
@@ -1782,10 +1807,24 @@ fn place_from_bindings_impl<'db>(
             first_definition.get_or_insert(binding);
             provenance = provenance.or(Provenance::SingleDefinition(binding));
             let binding_ty = binding_type(db, binding);
-            Some((
-                narrowing_constraint.narrow(db, env, binding_ty, binding.place(db)),
-                static_reachability,
-            ))
+            let narrowed = match narrowing_constraint.constraint() {
+                ScopedNarrowingConstraint::ALWAYS_TRUE => binding_ty,
+                ScopedNarrowingConstraint::ALWAYS_FALSE => Type::Never,
+                constraint => narrowing_projector
+                    .get_or_insert_with(|| {
+                        NarrowingProjector::new(
+                            db,
+                            env,
+                            narrowing_constraint.narrowing_constraints(),
+                            predicates,
+                            narrowing_constraint.predicate_narrowing_targets(),
+                            binding.place(db),
+                            binding_ty,
+                        )
+                    })
+                    .narrow(constraint, binding_ty),
+            };
+            Some((narrowed, static_reachability))
         },
     );
 
