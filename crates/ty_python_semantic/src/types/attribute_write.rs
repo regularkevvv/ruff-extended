@@ -56,7 +56,9 @@ pub(super) enum AttributeWriteRequirement<'db> {
     ///
     /// `write` is `None` for a read-only member. Qualifiers are retained so assignment inference
     /// can distinguish `Final` and `ClassVar` diagnostics from other non-writable members.
+    /// `receiver_ty` is the receiver used to resolve `write`.
     ProtocolMember {
+        receiver_ty: Type<'db>,
         write: Option<ProtocolMemberWriteRequirement<'db>>,
         qualifiers: TypeQualifiers,
     },
@@ -85,9 +87,21 @@ pub(super) enum ProtocolMemberWriteRequirement<'db> {
     /// cannot be represented precisely.
     Descriptor {
         descriptor_ty: Type<'db>,
-        receiver_ty: Type<'db>,
         domain: Option<Type<'db>>,
     },
+}
+
+impl<'db> ProtocolMemberWriteRequirement<'db> {
+    /// Which type is accepted in a write to this protocol member?
+    ///
+    /// Returns `None` if that type cannot be represented directly (if the protocol
+    /// member is a custom descriptor whose domain cannot be represented directly).
+    pub(super) fn accepted_type(&self) -> Option<Type<'db>> {
+        match self {
+            Self::AssignableTo(ty) => Some(*ty),
+            Self::Descriptor { domain, .. } => *domain,
+        }
+    }
 }
 
 /// The member that governs a write through an instance.
@@ -324,6 +338,7 @@ pub(super) fn attribute_write_requirement<'db>(
             .map_or_else(
                 || instance_attribute_write_requirement(db, env, object_ty, attribute),
                 |(write, qualifiers)| AttributeWriteRequirement::ProtocolMember {
+                    receiver_ty: object_ty,
                     write,
                     qualifiers,
                 },
@@ -358,6 +373,7 @@ pub(super) fn attribute_write_requirement<'db>(
             .map_or_else(
                 || class_attribute_write_requirement(db, env, object_ty, attribute),
                 |(write_ty, qualifiers)| AttributeWriteRequirement::ProtocolMember {
+                    receiver_ty: object_ty,
                     write: write_ty.map(ProtocolMemberWriteRequirement::AssignableTo),
                     qualifiers,
                 },
@@ -661,9 +677,40 @@ fn explicit_attribute_write_requirement<'db>(
         }
     } else {
         ExplicitAttributeWriteRequirement::AssignableTo {
-            ty: effective_write_type(db, env, object_ty, attribute, attr_ty),
+            ty: effective_write_type(
+                db,
+                env,
+                object_ty,
+                attribute,
+                shadowed_descriptor_write_type(db, env, attr_ty),
+            ),
             qualifiers,
         }
+    }
+}
+
+/// A staticmethod found on the receiver's type can be shadowed by its underlying function.
+/// This also applies to a class object shadowing a staticmethod on its metaclass. Replacing a
+/// descriptor in the owner's namespace instead goes through the receiver fallback and retains
+/// the descriptor type.
+fn shadowed_descriptor_write_type<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    attr_ty: Type<'db>,
+) -> Type<'db> {
+    match attr_ty {
+        Type::Union(union) => {
+            union.map_leave_aliases(db, env, |ty| shadowed_descriptor_write_type(db, env, *ty))
+        }
+        Type::TypeAlias(alias) => {
+            let value = alias.value_type(db);
+            let write_ty = shadowed_descriptor_write_type(db, env, value);
+            if write_ty == value { attr_ty } else { write_ty }
+        }
+        _ if attr_ty.function_like_kind(db) == Some(CallableTypeKind::StaticMethodLike) => {
+            attr_ty.underlying_function(db)
+        }
+        _ => attr_ty,
     }
 }
 
@@ -740,12 +787,6 @@ fn effective_write_type<'db>(
     attribute: &str,
     attr_ty: Type<'db>,
 ) -> Type<'db> {
-    // An instance shadows a staticmethod with the function returned by its getter.
-    if matches!(object_ty, Type::NominalInstance(_))
-        && attr_ty.function_like_kind(db) == Some(CallableTypeKind::StaticMethodLike)
-    {
-        return attr_ty.underlying_function(db);
-    }
     if let Type::NominalInstance(instance) = object_ty
         && let Some(converter_ty) = instance
             .class(db, env)

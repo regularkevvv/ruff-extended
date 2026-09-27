@@ -14,8 +14,8 @@ use crate::types::class_base::ClassBase;
 use crate::types::constraints::projection::{ProjectionError, SolutionBudget, SolutionProjection};
 use crate::types::constraints::resolution::{SolutionType, resolve_solution};
 use crate::types::constraints::{
-    CandidateSolutions, ConstraintSet, ConstraintSetBuilder, IteratorConstraintsExtension,
-    PathBound, PathBoundSolution, Solution, SolutionPaths, SolutionViolation,
+    CandidateSolutions, CandidateTypeVarSolution, ConstraintSet, ConstraintSetBuilder,
+    IteratorConstraintsExtension, PathBoundSolution, Solution, SolutionPaths, SolutionViolation,
     SolutionViolationKind, Solutions, TypeVarSolution,
 };
 use crate::types::cyclic::{ActiveRecursionDetector, CycleDetector, HasIdentity, TypeIdentity};
@@ -1908,7 +1908,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
     /// Whether two types encountered in an invariant position
     /// have a relation (subtyping or assignability), taking into account
     /// that the two types may come from a top or bottom materialization.
-    fn check_relation_in_invariant_position(
+    pub(super) fn check_relation_in_invariant_position(
         &self,
         db: &'db dyn Db,
         source_type: Type<'db>,
@@ -2789,10 +2789,13 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
     /// `None` to use the inferred type unchanged.
     pub(crate) fn build_merged_with(
         &mut self,
-        mut choose: impl FnMut(BoundTypeVarInstance<'db>, Option<&PathBound<'db>>) -> Option<Type<'db>>,
+        mut choose: impl FnMut(
+            BoundTypeVarInstance<'db>,
+            Option<&CandidateTypeVarSolution<'db>>,
+        ) -> Option<Type<'db>>,
     ) -> Specialization<'db> {
         let db = self.db;
-        let mut choose_solution = |typevar, bounds: Option<&PathBound<'db>>| {
+        let mut choose_solution = |typevar, bounds: Option<&CandidateTypeVarSolution<'db>>| {
             choose(typevar, bounds).map(PathBoundSolution::Solved)
         };
         let inference = self
@@ -2862,7 +2865,7 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
         &mut self,
         mut choose: impl FnMut(
             BoundTypeVarInstance<'db>,
-            Option<&PathBound<'db>>,
+            Option<&CandidateTypeVarSolution<'db>>,
         ) -> Option<PathBoundSolution<'db>>,
     ) -> Result<TypeVarInference<'db>, ()> {
         self.solve_pending_with(SolutionBudget::default(), &mut choose)
@@ -2878,7 +2881,7 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
         argument_relations: impl IntoIterator<Item = (Type<'db>, Type<'db>)>,
         mut choose: impl FnMut(
             BoundTypeVarInstance<'db>,
-            Option<&PathBound<'db>>,
+            Option<&CandidateTypeVarSolution<'db>>,
         ) -> Option<PathBoundSolution<'db>>,
     ) -> TypeVarInference<'db> {
         let db = self.db;
@@ -2901,7 +2904,7 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
         reason: TypeVarInferenceFallback,
         choose: &mut impl FnMut(
             BoundTypeVarInstance<'db>,
-            Option<&PathBound<'db>>,
+            Option<&CandidateTypeVarSolution<'db>>,
         ) -> Option<PathBoundSolution<'db>>,
     ) -> PendingInference<'db, T> {
         let merged_types = self
@@ -2946,7 +2949,7 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
         budget: SolutionBudget,
         choose: &mut impl FnMut(
             BoundTypeVarInstance<'db>,
-            Option<&PathBound<'db>>,
+            Option<&CandidateTypeVarSolution<'db>>,
         ) -> Option<PathBoundSolution<'db>>,
     ) -> Result<TypeVarInference<'db>, ()> {
         let db = self.db;
@@ -3035,7 +3038,7 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
     where
         Choose: FnMut(
             BoundTypeVarInstance<'db>,
-            Option<&PathBound<'db>>,
+            Option<&CandidateTypeVarSolution<'db>>,
         ) -> Option<PathBoundSolution<'db>>,
     {
         let db = self.db;
@@ -3340,7 +3343,10 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
     fn solve_hash_map_with(
         &mut self,
         generic_context: GenericContext<'db>,
-        choose: &mut impl FnMut(BoundTypeVarInstance<'db>, Option<&PathBound<'db>>) -> Option<Type<'db>>,
+        choose: &mut impl FnMut(
+            BoundTypeVarInstance<'db>,
+            Option<&CandidateTypeVarSolution<'db>>,
+        ) -> Option<Type<'db>>,
     ) -> FxHashMap<BoundTypeVarIdentity<'db>, Type<'db>> {
         let db = self.db;
         let LegacyTypeMappings::Available(types) = &mut self.types else {
@@ -3355,8 +3361,8 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
                     .map(|accumulator| accumulator.get_or_build(db, self.env));
                 let chosen = match mapped_ty {
                     Some(mapped_ty) => {
-                        let path_bound = PathBound::exact(*variable, mapped_ty);
-                        choose(*variable, Some(&path_bound)).unwrap_or(mapped_ty)
+                        let candidate = CandidateTypeVarSolution::exact(*variable, mapped_ty);
+                        choose(*variable, Some(&candidate)).unwrap_or(mapped_ty)
                     }
                     None => choose(*variable, None)?,
                 };
@@ -4103,9 +4109,8 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
             // common cases specially:
             (Type::Union(formal_union), Type::Union(actual_union)) => {
                 // First, if both formal and actual are unions, and precisely one formal union
-                // element _is_ a typevar (not _contains_ a typevar), then we remove any actual
-                // union elements that are a subtype of the formal (as a whole), and map the formal
-                // typevar to any remaining actual union elements.
+                // element contains type variables, infer through that element after removing
+                // actual elements already accepted without specializing the generic element.
                 //
                 // In particular, this handles cases like
                 //
@@ -4119,17 +4124,30 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
                 // def _(y: str | int | None):
                 //     reveal_type(g(x))  # revealed: str | int
                 // ```
-                // We do not handle cases where the `formal` types contain other types that contain type variables
-                // to prevent incorrect specialization: e.g. `T = int | list[int]` for `formal: T | list[T], actual: int | list[int]`
-                // (the correct specialization is `T = int`).
+                // The generic element can be composite, such as `Sequence[T]` in
+                // `Sequence[T] | None`. Multiple generic elements still need a choice of which
+                // one to match: `T | list[T]` against `int | list[int]` should infer `T = int`.
                 let types_have_typevars = formal_union
                     .elements(db)
                     .iter()
                     .filter(|ty| ty.has_typevar(db, self.env));
-                let Ok(Type::TypeVar(formal_bound_typevar)) = types_have_typevars.exactly_one()
-                else {
+                let Ok(generic_element) = types_have_typevars.exactly_one() else {
                     return Ok(());
                 };
+                // Composite members can infer ordinary type variables, but re-inferring `Self`
+                // can widen the receiver's specialization, and variadic inference must preserve
+                // the caller's parameter pack instead of widening it through another union arm.
+                if !generic_element.is_type_var()
+                    && any_over_type(db, self.env, *generic_element, false, |ty| {
+                        ty.as_typevar().is_some_and(|typevar| {
+                            typevar.typevar(db).is_self(db)
+                                || typevar.is_paramspec(db)
+                                || typevar.is_typevartuple(db)
+                        })
+                    })
+                {
+                    return Ok(());
+                }
                 if actual_union.elements(db).iter().any(|ty| ty.is_type_var()) {
                     return Ok(());
                 }
@@ -4138,13 +4156,8 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
                 if remaining_actual.is_never() {
                     return Ok(());
                 }
-                // Infer through the TypeVar arm so its bound or constraints are still enforced.
-                return self.infer_map_impl(
-                    Type::TypeVar(*formal_bound_typevar),
-                    remaining_actual,
-                    polarity,
-                    visitor,
-                );
+                // Recursive inference preserves the element's variance and type variable bounds.
+                return self.infer_map_impl(*generic_element, remaining_actual, polarity, visitor);
             }
             (Type::Union(union_formal), _) => {
                 if let Type::TypeVar(actual_typevar) = actual
@@ -4916,9 +4929,11 @@ mod tests {
 
                 let inference = builder
                     .build_inference_with(|typevar, bounds| {
-                        (typevar == t
-                            && bounds.is_some_and(|bound| bound.evidence_lower() == Some(str)))
-                        .then_some(PathBoundSolution::BudgetExceeded { fallback })
+                        let lower = bounds
+                            .as_ref()
+                            .and_then(|bounds| bounds.inference_lower(db, &env));
+                        (typevar == t && lower == Some(str))
+                            .then_some(PathBoundSolution::BudgetExceeded { fallback })
                     })
                     .map_err(|()| anyhow::anyhow!("incomplete alternatives remain satisfiable"))?;
                 let TypeVarInferenceSolutions::Incomplete(paths) = inference.solutions(db) else {
@@ -5183,7 +5198,10 @@ mod tests {
 
         let inference = builder
             .build_inference_with(|typevar, bounds| {
-                (typevar == t && bounds.is_some_and(|bound| bound.evidence_lower() == Some(str)))
+                let lower = bounds
+                    .as_ref()
+                    .and_then(|bounds| bounds.inference_lower(db, &env));
+                (typevar == t && lower == Some(str))
                     .then_some(PathBoundSolution::Solved(Type::TypeVar(u)))
             })
             .map_err(|()| anyhow::anyhow!("expected satisfiable alternatives"))?;
@@ -5229,7 +5247,8 @@ mod tests {
         // individual path still contains the cycle after merging with object.
         let inference = builder
             .build_inference_with(|typevar, bounds| {
-                let ty = match (typevar, bounds?.evidence_lower()) {
+                let lower = bounds?.inference_lower(db, &env);
+                let ty = match (typevar, lower) {
                     (typevar, Some(lower)) if typevar == t && lower == int => list_of_u,
                     (typevar, Some(lower)) if typevar == u && lower == str => Type::TypeVar(t),
                     _ => Type::object(),

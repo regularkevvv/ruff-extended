@@ -359,6 +359,24 @@ impl<'db> Type<'db> {
         )
     }
 
+    pub(super) fn when_constraint_set_subtype_of<'c>(
+        self,
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+        target: Type<'db>,
+        constraints: &'c ConstraintSetBuilder<'db>,
+    ) -> ConstraintSet<'db, 'c> {
+        self.has_relation_to_with_typevar_evaluation(
+            db,
+            env,
+            target,
+            constraints,
+            TypeVarSet::None,
+            TypeRelation::Subtyping,
+            TypeVarEvaluation::Lazy,
+        )
+    }
+
     /// Return the constraints under which this type is a subtype of type `target`, assuming that
     /// all of the restrictions in `constraints` hold.
     ///
@@ -480,6 +498,35 @@ impl<'db> Type<'db> {
         let constraints = ConstraintSetBuilder::new();
         self.when_constraint_set_assignable_to(db, env, target, &constraints)
             .is_always_satisfied(db, env)
+    }
+
+    /// Return true if this type is a subtype of `target` for every specialization of the type
+    /// variables in either type.
+    pub(super) fn is_constraint_set_subtype_of(
+        self,
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+        target: Type<'db>,
+    ) -> bool {
+        #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| false, heap_size=ruff_memory_usage::heap_size)]
+        fn is_constraint_set_subtype_of_impl<'db>(db: &'db dyn Db, types: TypePair<'db>) -> bool {
+            let env = ProgramEnvironment::from_program(types.program(db));
+            let constraints = ConstraintSetBuilder::new();
+            types
+                .first(db)
+                .has_relation_to_with_typevar_evaluation(
+                    db,
+                    &env,
+                    types.second(db),
+                    &constraints,
+                    TypeVarSet::None,
+                    TypeRelation::Subtyping,
+                    TypeVarEvaluation::Lazy,
+                )
+                .is_always_satisfied(db, &env)
+        }
+
+        is_constraint_set_subtype_of_impl(db, TypePair::new(db, env.program(db), self, target))
     }
 
     pub(super) fn when_assignable_to<'c>(
@@ -2295,7 +2342,21 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
                     && let Some(bound_or_constraints) =
                         bound_typevar.typevar(db).bound_or_constraints(db, env) =>
             {
-                self.check_source_typevar_bounds(db, bound_or_constraints, target)
+                // Upcast the type variable directly rather than promoting it to its upper bound,
+                // such that `Self` in the callable signature refers back to the original type variable.
+                if let Type::Callable(target_callable) = target
+                    && let Some(callables) = source.try_upcast_to_callable_with_policy(
+                        db,
+                        env,
+                        UpcastPolicy::from(self.relation),
+                    )
+                {
+                    self.with_recursion_guard(db, source, target, || {
+                        self.check_callables_vs_callable(db, &callables, target_callable)
+                    })
+                } else {
+                    self.check_source_typevar_bounds(db, bound_or_constraints, target)
+                }
             }
 
             // `Never` is the bottom type, the empty set.
@@ -2714,14 +2775,14 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             }
 
             // `TypeIs` is invariant.
-            (Type::TypeIs(source), Type::TypeIs(target)) => {
-                let source_type = source.type_argument(db);
-                let target_type = target.type_argument(db);
-                self.check_type_pair(db, source_type, target_type)
-                    .and(db, self.constraints, || {
-                        self.check_type_pair(db, target_type, source_type)
-                    })
-            }
+            (Type::TypeIs(source), Type::TypeIs(target)) => self
+                .check_relation_in_invariant_position(
+                    db,
+                    source.type_argument(db),
+                    source.materialization_kind(db),
+                    target.type_argument(db),
+                    target.materialization_kind(db),
+                ),
 
             // `TypeGuard` is covariant.
             (Type::TypeGuard(source), Type::TypeGuard(target)) => {
@@ -3392,24 +3453,6 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
                 })
             }
 
-            // `type[T]` is disjoint from a callable or protocol instance if its upper bound or constraints are.
-            (
-                Type::SubclassOf(subclass_of),
-                other @ (Type::Callable(_) | Type::ProtocolInstance(_)),
-            )
-            | (
-                other @ (Type::Callable(_) | Type::ProtocolInstance(_)),
-                Type::SubclassOf(subclass_of),
-            ) if let Some(type_var) = subclass_of
-                .subclass_of()
-                .with_transposed_type_var(db, env)
-                .into_type_var() =>
-            {
-                nontrivial_check(self, || {
-                    self.check_type_pair(db, Type::TypeVar(type_var), other)
-                })
-            }
-
             // `type[T]` is disjoint from a class object `A` if every instance of `T` is disjoint from an instance of `A`.
             (Type::SubclassOf(subclass_of), other) | (other, Type::SubclassOf(subclass_of))
                 if let Some(type_var) = subclass_of.into_type_var()
@@ -3547,6 +3590,45 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
                     self.check_intersection_pair_via_elements(db, left, right, intersection, other)
                 }
             }),
+
+            // A NewType's concrete base can be a metaclass: `N = NewType("N", Meta)`, where `Meta`
+            // subclasses `type`. Unwrapping it here lets the earlier `to_instance_approximation`
+            // arm reduce `type[T]` versus `Meta` to `T` versus `object`.
+            // If we transposed first (the next arm), a protocol bound on T could instead make us
+            // compare the protocol's own metaclass with Meta, incorrectly concluding that the
+            // types are disjoint. Other NewType comparisons need their specialized checks before
+            // unwrapping; in particular, protocol member lookup must preserve the NewType receiver
+            // for `Self`.
+            (class @ Type::SubclassOf(_), Type::NewTypeInstance(newtype))
+            | (Type::NewTypeInstance(newtype), class @ Type::SubclassOf(_)) => {
+                nontrivial_check(self, || {
+                    self.check_type_pair(db, class, newtype.concrete_base_type(db))
+                })
+            }
+
+            // `type[T]` is disjoint from another type if its transposed upper bound or constraints are.
+            // Transposition preserves T's identity but replaces its bounds. The match arms that
+            // perform the following operations must remain above this branch:
+            // - Unfold aliases and recursive types, which can expose other cases in this list.
+            // - Project class objects and TypeForms to their instance types, including metaclasses
+            //   exposed by unwrapping a NewType.
+            // - Handle bare typevars: T and its transpose share an identity but have different bounds.
+            // - Decompose unions and intersections: their members can refer to T or exclude type[T],
+            //   as in `type[T]` versus `Not[type[T]] | int`.
+            // The cases after this do not rely on the original typevar identity at the outer
+            // level.
+            // Keep transposition before protocol checks: a final bound can expose an exact class
+            // type whose missing members prove disjointness.
+            (Type::SubclassOf(subclass_of), other) | (other, Type::SubclassOf(subclass_of))
+                if let Some(type_var) = subclass_of
+                    .subclass_of()
+                    .with_transposed_type_var(db, env)
+                    .into_type_var() =>
+            {
+                nontrivial_check(self, || {
+                    self.check_type_pair(db, Type::TypeVar(type_var), other)
+                })
+            }
 
             (Type::LiteralValue(left), Type::LiteralValue(right))
                 if left.is_literal_string() && right.is_literal_string()
@@ -3822,12 +3904,6 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
                 })
             }),
 
-            (Type::SubclassOf(subclass_of_ty), _) | (_, Type::SubclassOf(subclass_of_ty))
-                if subclass_of_ty.is_type_var() =>
-            {
-                self.always()
-            }
-
             (Type::GenericAlias(left_alias), Type::GenericAlias(right_alias)) => {
                 ConstraintSet::from_bool(
                     self.constraints,
@@ -3981,6 +4057,12 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
                     };
                     positive_relation_holds.negate(db, self.constraints)
                 })
+            }
+
+            // Guard wrappers describe boolean results. Different narrowed types or guard kinds
+            // do not prove that those results are disjoint.
+            (Type::TypeIs(_) | Type::TypeGuard(_), Type::TypeIs(_) | Type::TypeGuard(_)) => {
+                self.never()
             }
 
             (Type::TypeIs(_) | Type::TypeGuard(_), Type::LiteralValue(literal))
