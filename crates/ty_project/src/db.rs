@@ -49,7 +49,7 @@ pub trait Db: SemanticDb {
 
     /// Rebuilds the semantic-plugin runtime from newly resolved project `settings`.
     ///
-    /// Called from [`Project::rediscover`] so that plugin changes take effect on
+    /// Called from `Project::rediscover` so that plugin changes take effect on
     /// both the direct reload path and the deferred uv-sync path, which both
     /// funnel through `Project::rediscover`.
     fn set_semantic_plugin_runtime(&mut self, settings: &Settings) {
