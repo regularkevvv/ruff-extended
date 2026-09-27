@@ -143,7 +143,7 @@ jobs:
       - name: Install the latest version of uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
-          version: "0.12.6"
+          version: "0.12.18"
           ignore-empty-workdir: true
           # The default of `enable-cache: auto` leads to warnings from setup-uv in this job,
           # since its cache-invalidation keys aren't available until the build artifacts
@@ -204,7 +204,7 @@ jobs:
       - name: Install the latest version of uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
-          version: "0.12.6"
+          version: "0.12.18"
           ignore-empty-workdir: true
           # The default of `enable-cache: auto` leads to warnings from setup-uv in this job,
           # since its cache-invalidation keys aren't available until the build artifacts
