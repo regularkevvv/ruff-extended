@@ -2388,6 +2388,34 @@ static_assert(not is_subtype_of(LeftRecursiveDict[int], RightRecursiveDict[int])
 # A conservative cycle fallback must not accept structurally different recursive TypedDicts.
 static_assert(not is_subtype_of(LeftRecursiveDict[int], DifferentRecursiveDict[int]))
 
+class ShiftingLeftDict[A, B, C](TypedDict):
+    value: A
+    child: ShiftingLeftDict[B, C, None]
+
+class ShiftingRightDict[A, B, C](TypedDict):
+    value: A
+    child: ShiftingRightDict[B, C, None]
+
+# These recursive specializations reach an exact repetition after shifting out every initial
+# argument.
+static_assert(
+    is_subtype_of(
+        ShiftingLeftDict[int, str, bytes],
+        ShiftingRightDict[int, str, bytes],
+    )
+)
+
+class SaturatingLeftDict[T](TypedDict):
+    value: T
+    child: SaturatingLeftDict[T | int]
+
+class SaturatingRightDict[T](TypedDict):
+    value: T
+    child: SaturatingRightDict[T | int]
+
+# Repeatedly adding the same union element also reaches an exact repetition.
+static_assert(is_subtype_of(SaturatingLeftDict[str], SaturatingRightDict[str]))
+
 class FiniteLeftDict[T](TypedDict):
     value: T
 
@@ -3100,7 +3128,7 @@ type Left22 = Left21 | Right21
 def _(item: Left22) -> None:
     reveal_type(dict(item))  # revealed: dict[str, object]
 
-type RecursiveItem = A | RecursiveItem
+type RecursiveItem = A | RecursiveItem  # error: [cyclic-type-alias-definition]
 
 def _(item: RecursiveItem) -> None:
     # The common-constraint check must terminate when an alias refers back to its containing union.
