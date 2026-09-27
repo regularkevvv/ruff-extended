@@ -601,7 +601,7 @@ impl Options {
                 }
                 ValueSource::ScriptMetadata(_) => SysPrefixPathOrigin::ScriptMetadataSetting,
                 ValueSource::Editor => SysPrefixPathOrigin::Editor,
-                ValueSource::UvWorkspace => SysPrefixPathOrigin::UvWorkspace,
+                ValueSource::UvMetadata => SysPrefixPathOrigin::UvMetadata,
             };
             PythonEnvironment::new(python_path.absolute(project_root, system), origin, system).ok()
         } else {
@@ -3254,9 +3254,9 @@ fn plugin_diagnostic_at_value<T>(
             SubDiagnosticSeverity::Info,
             "The plugin option was specified in the editor settings.",
         )),
-        ValueSource::UvWorkspace => diagnostic.sub(SubDiagnostic::new(
+        ValueSource::UvMetadata => diagnostic.sub(SubDiagnostic::new(
             SubDiagnosticSeverity::Info,
-            "The plugin option was provided by uv workspace metadata.",
+            "The plugin option was provided by uv metadata.",
         )),
     }
 }
@@ -3285,9 +3285,9 @@ fn plugin_diagnostic_at_relative_path(
             SubDiagnosticSeverity::Info,
             format!("The plugin path was specified in the editor settings: {detail}"),
         )),
-        ValueSource::UvWorkspace => diagnostic.sub(SubDiagnostic::new(
+        ValueSource::UvMetadata => diagnostic.sub(SubDiagnostic::new(
             SubDiagnosticSeverity::Info,
-            format!("The plugin path was provided by uv workspace metadata: {detail}"),
+            format!("The plugin path was provided by uv metadata: {detail}"),
         )),
     }
 }
