@@ -356,6 +356,12 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: "Install Rust toolchain"
         run: rustup toolchain install 1.98.0
+      - name: "Install wasm32 target"
+        # Fork addition: `--all-features` enables
+        # `ty_plugin_host/test-wasm-fixture`, whose build script compiles the
+        # plugin fixture for `wasm32-unknown-unknown`. Hawk runs under the
+        # 1.98.0 toolchain, so the target must be installed for it explicitly.
+        run: rustup +1.98.0 target add wasm32-unknown-unknown
       - name: "Install Hawk"
         run: |
           curl --proto '=https' --tlsv1.2 -LsSf \
