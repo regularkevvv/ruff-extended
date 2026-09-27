@@ -1841,7 +1841,7 @@ impl<'db> DefinitionInference<'db> {
         }
     }
 
-    fn discards_dict_key_assignments(&self) -> bool {
+    pub(crate) fn discards_dict_key_assignments(&self) -> bool {
         match self.extra.as_deref() {
             Some(DefinitionInferenceExtra::DiscardsDictKeyAssignments) => true,
             Some(DefinitionInferenceExtra::Other(extra)) => extra.discards_dict_key_assignments,
@@ -2119,6 +2119,11 @@ impl<'db> ExpressionInference<'db> {
             .as_ref()?
             .collection_use_constraints
             .get(&collection_def)
+    }
+
+    /// Whether this result depends on provisional types from cycle recovery.
+    pub(super) fn is_provisional(&self) -> bool {
+        self.fallback_type().is_some()
     }
 
     fn fallback_type(&self) -> Option<Type<'db>> {

@@ -720,7 +720,10 @@ class Bad:
 def f[T: A](x: P[T, T], value: T) -> None:
     raise NotImplementedError
 
-# error: [invalid-argument-type] "Argument to function `f` is incorrect: Argument type `C` does not satisfy upper bound `A` of type variable `T`"
+# TODO: This isn't a great error message, since `P[B, B]` doesn't appear anywhere in the source.
+# Rework this to show how we got to that point, and what assumptions were made, that led to the
+# error.
+# error: [invalid-argument-type] "Argument to function `f` is incorrect: Expected `P[B, B]`, found `Bad`"
 f(Bad(), B())
 ```
 
@@ -1878,6 +1881,36 @@ def selects_invalid_overload(value: int | str) -> None:
     assert_type(select(value), bool)
 ```
 
+## A single generic member of a union
+
+Inference through a container in an optional parameter preserves the type variable's bounds and
+constraints. Invariant containers also constrain the other arguments.
+
+```py
+from collections.abc import Sequence
+
+def bounded[T: str](value: Sequence[T] | None) -> T:
+    raise NotImplementedError
+
+def constrained[T: (str, bytes)](value: Sequence[T] | None) -> T:
+    raise NotImplementedError
+
+def invariant[T](value: list[T] | None, other: list[T]) -> T:
+    raise NotImplementedError
+
+def _(strings: list[str] | None, integers: list[int] | None, other: list[int]):
+    reveal_type(bounded(strings))  # revealed: str
+    reveal_type(constrained(strings))  # revealed: str
+    bounded(integers)  # error: [invalid-argument-type]
+    constrained(integers)  # error: [invalid-argument-type]
+    # error: [invalid-argument-type]
+    # error: [invalid-argument-type]
+    invariant(strings, other)
+
+reveal_type(bounded(None))  # revealed: Unknown
+reveal_type(constrained(None))  # revealed: Unknown
+```
+
 ## Gradual bounds in generic union members
 
 A gradual bound does not prevent inference from an invariant union member: `str` satisfies `Any`,
@@ -2369,6 +2402,31 @@ def check(
     reveal_type(ensure_box(box_first))  # revealed: Box[str]
     reveal_type(ensure_box_reversed(box_scalar_first))  # revealed: Box[str]
     reveal_type(ensure_box_reversed(box_first))  # revealed: Box[str]
+```
+
+### Gradual overload alternatives remain compatible with other arguments
+
+An overload returning `Any` can satisfy a concrete callback return type independently of other
+overloads.
+
+```py
+from collections.abc import Callable
+from typing import Any, overload
+
+@overload
+def source(key: int) -> Any: ...
+@overload
+def source(key: object) -> object: ...
+def source(key: object) -> object:
+    raise NotImplementedError
+
+def consume(value: int) -> None:
+    pass
+
+def relay[T](source: Callable[[int], T], consume: Callable[[T], None]) -> None:
+    consume(source(0))
+
+relay(source, consume)
 ```
 
 ### Gradual container constraints preserve inference evidence

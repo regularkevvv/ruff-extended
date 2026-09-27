@@ -2046,7 +2046,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         let db = self.db();
         let value_ty = self.expression_type(value);
         let expanded = value_ty.expand_eagerly(db, self.program_environment());
-        if (expanded.is_divergent() || value_ty.has_unguarded_alias_cycle(db))
+        if (expanded.is_recursive_divergent() || value_ty.has_unguarded_alias_cycle(db))
             && let Some(builder) = self
                 .context
                 .report_lint(&CYCLIC_TYPE_ALIAS_DEFINITION, value)
@@ -7672,7 +7672,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
                 let path_bounds =
                     identity_instance.assignable_solutions_with_inferable(db, env, tcx, inferable);
-                let solutions = path_bounds.solve_with(|variance, path_bound| {
+                let solutions = path_bounds.solve_with(db, env, |variance, path_bound| {
                     let identity = path_bound.bound_typevar.identity(db);
                     elt_tcx_variance
                         .entry(identity)
@@ -8036,7 +8036,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             .origin(self.db())
             .apply_specialization(db, |_| {
                 builder.build_merged_with(|current_typevar, bounds| {
-                    let lower = bounds?.evidence_lower()?;
+                    let lower = bounds?.inference_lower(db, env)?;
 
                     let lower = lower.promote_collection_element_type(
                         db,
@@ -11774,14 +11774,25 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
                 let range = TextRange::new(left.start(), right.end());
 
-                let ty = comparisons::infer_binary_type_comparison(
+                let literal_membership = comparisons::infer_literal_membership_comparison(
                     &builder.context,
                     left_ty,
                     *op,
-                    right_ty,
-                    range,
-                )
-                .unwrap_or_else(|error| {
+                    right,
+                    |element| builder.expression_type(element),
+                );
+
+                let comparison = match literal_membership {
+                    Some(ty) => Ok(ty),
+                    None => comparisons::infer_binary_type_comparison(
+                        &builder.context,
+                        left_ty,
+                        *op,
+                        right_ty,
+                        range,
+                    ),
+                };
+                let ty = comparison.unwrap_or_else(|error| {
                     report_unsupported_comparison(
                         &builder.context,
                         &error,

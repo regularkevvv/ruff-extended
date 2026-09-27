@@ -1284,6 +1284,17 @@ bitflags! {
         /// member, but that does not mean that every subclass should be treated as a descriptor.
         /// Likewise, a divergent marker from cyclic inference does not establish a concrete member.
         const REQUIRE_CONCRETE = 1 << 5;
+
+        /// Do not add the class's generic context to inherited member signatures.
+        ///
+        /// Constructor methods reached through a fixed class-object value such as `type[T]` use
+        /// the class's type variables, but those variables are not inference targets for the call.
+        /// A method's own generic context remains inferable.
+          ///
+        /// TODO: Arguably this does not deserve to be a member lookup policy; instead, we should
+        /// track the owned and inherited generic contexts separately in `Signature` and not
+        /// preemptively merge them.
+        const NO_INHERITED_GENERIC_CONTEXT = 1 << 6;
     }
 }
 
@@ -1322,6 +1333,11 @@ impl MemberLookupPolicy {
     /// Ignore members that are only available through a dynamic type.
     const fn require_concrete(self) -> bool {
         self.contains(Self::REQUIRE_CONCRETE)
+    }
+
+    /// Do not add the class's generic context to inherited member signatures.
+    const fn no_inherited_generic_context(self) -> bool {
+        self.contains(Self::NO_INHERITED_GENERIC_CONTEXT)
     }
 }
 
@@ -1945,7 +1961,7 @@ impl<'db> DataclassParams<'db> {
 pub enum Type<'db> {
     /// The dynamic type: a statically unknown set of values
     Dynamic(DynamicType<'db>),
-    /// A cycle marker used during recursive type inference.
+    /// An unresolved value during cyclic inference, or a recursive type marker.
     Divergent(DivergentType),
     /// A recursive type whose references are bound by its body.
     /// See the module documentation in `recursive.rs` for details.
@@ -2252,6 +2268,34 @@ impl<'db> Type<'db> {
         })
     }
 
+    const fn pending_narrowing() -> Self {
+        Self::Divergent(DivergentType {
+            origin: DivergentOrigin::PendingNarrowing,
+            flags: DivergentFlags::empty(),
+            materialization: None,
+        })
+    }
+
+    const fn is_pending_narrowing(&self) -> bool {
+        matches!(
+            self,
+            Self::Divergent(DivergentType {
+                origin: DivergentOrigin::PendingNarrowing,
+                ..
+            })
+        )
+    }
+
+    const fn is_recursive_divergent(&self) -> bool {
+        matches!(
+            self,
+            Self::Divergent(DivergentType {
+                origin: DivergentOrigin::Recursive(_),
+                ..
+            })
+        )
+    }
+
     const fn is_divergent(&self) -> bool {
         matches!(self, Type::Divergent(_))
     }
@@ -2263,8 +2307,8 @@ impl<'db> Type<'db> {
         }
     }
 
-    /// Returns `true` if both `self` and `other` are `Divergent` types originating from the
-    /// same cycle (i.e., sharing the same query ID), regardless of materialization state.
+    /// Returns `true` if both types reference the same recursive query, or both represent
+    /// pending narrowing, regardless of materialization state.
     fn same_divergent_marker(self, other: Type<'db>) -> bool {
         match (self, other) {
             (Type::Divergent(left), Type::Divergent(right)) => left.same_marker(right),
@@ -3575,10 +3619,79 @@ impl<'db> Type<'db> {
         env: &ProgramEnvironment<'db>,
         cycle: &salsa::Cycle,
     ) -> Self {
-        cycle.head_ids().fold(self, |ty, id| {
+        let normalized =
+            self.pending_narrowing_normalized(db, env, Type::divergent(cycle.id()), &|ty| {
+                cycle
+                    .head_ids()
+                    .any(|id| ty.same_divergent_marker(Type::divergent(id)))
+            });
+        cycle.head_ids().fold(normalized, |ty, id| {
             ty.recursive_type_normalized_impl(db, env, Type::divergent(id), false)
                 .unwrap_or(Type::divergent(id))
         })
+    }
+
+    /// Discard unresolved narrowing while preserving recursive structure around it. A bare
+    /// pending marker carries no recursive identity and must not make a union recursively defined.
+    fn pending_narrowing_normalized(
+        self,
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+        recursive: Self,
+        is_cycle_marker: &impl Fn(Self) -> bool,
+    ) -> Self {
+        let contains_pending = |ty| {
+            any_over_type_including_alias_arguments(db, env, ty, |ty| ty.is_pending_narrowing())
+        };
+        if !contains_pending(self) {
+            return self;
+        }
+        match self {
+            Type::Divergent(_) => self,
+            Type::Union(union) => {
+                let mut builder = UnionBuilder::new(db, env)
+                    .unpack_aliases(false)
+                    .cycle_recovery(true)
+                    .or_recursively_defined(union.recursively_defined(db));
+                for &element in union.elements(db) {
+                    // A bare marker for this cycle provides no independent type information
+                    // either. Preserve markers from other queries and nested recursive types.
+                    if is_cycle_marker(element) {
+                        continue;
+                    }
+                    let element =
+                        element.pending_narrowing_normalized(db, env, recursive, is_cycle_marker);
+                    if !element.is_pending_narrowing() {
+                        builder.add_in_place(element);
+                    }
+                }
+                if builder.is_empty() {
+                    Self::pending_narrowing()
+                } else {
+                    builder.build()
+                }
+            }
+            Type::NominalInstance(_)
+            | Type::GenericAlias(_)
+            | Type::Callable(_)
+            | Type::FunctionLiteral(_)
+            | Type::BoundMethod(_) => {
+                // Preserve the constructor with this query's recursive marker in its unresolved
+                // parts. Dropping `list[PendingNarrowing]` from `int | list[PendingNarrowing]`
+                // would leave no marker to stop subsequent iterations from growing nested lists.
+                let normalized = self
+                    .recursive_type_normalized_impl(db, env, recursive, false)
+                    .unwrap_or(recursive);
+                // Some stored metadata, such as a callable's generic context, is opaque to
+                // recursive normalization. Use a recursive placeholder until that metadata resolves.
+                if contains_pending(normalized) {
+                    recursive
+                } else {
+                    normalized
+                }
+            }
+            _ => Self::pending_narrowing(),
+        }
     }
 
     /// Normalizes types including divergent types (recursive types), which is necessary for convergence of fixed-point iteration.
@@ -3604,7 +3717,20 @@ impl<'db> Type<'db> {
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
-        if nested && self.same_divergent_marker(div) {
+        if nested && (self.same_divergent_marker(div) || self.is_pending_narrowing()) {
+            return None;
+        }
+        // These types stay opaque, but pending values in their stored arguments, bounds, or
+        // fields still invalidate the enclosing constructor's approximation.
+        if nested
+            && matches!(
+                self,
+                Type::TypeAlias(_) | Type::Recursive(_) | Type::TypedDict(_) | Type::TypeVar(_)
+            )
+            && any_over_type_including_alias_arguments(db, env, self, |ty| {
+                ty.is_pending_narrowing()
+            })
+        {
             return None;
         }
         match self {
@@ -4075,22 +4201,24 @@ impl<'db> Type<'db> {
         self,
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
+        policy: MemberLookupPolicy,
     ) -> Option<PlaceAndQualifiers<'db>> {
-        #[salsa::tracked(returns(copy), cycle_initial=|_, _, _, _| None, heap_size=ruff_memory_usage::heap_size)]
+        #[salsa::tracked(returns(copy), cycle_initial=|_, _, _, _, _| None, heap_size=ruff_memory_usage::heap_size)]
         fn lookup_dunder_new_inner<'db>(
             db: &'db dyn Db,
             program: Program<'db>,
             ty: Type<'db>,
+            policy: MemberLookupPolicy,
         ) -> Option<PlaceAndQualifiers<'db>> {
             let env = &ProgramEnvironment::from_program(program);
-            let mut flags = MemberLookupPolicy::MRO_NO_OBJECT_FALLBACK;
+            let mut flags = policy | MemberLookupPolicy::MRO_NO_OBJECT_FALLBACK;
             if !ty.is_subtype_of(db, env, KnownClass::Type.to_instance(db, env)) {
                 flags |= MemberLookupPolicy::META_CLASS_NO_TYPE_FALLBACK;
             }
             ty.find_name_in_mro_with_policy(db, env, "__new__", flags)
         }
 
-        lookup_dunder_new_inner(db, env.program(db), self)
+        lookup_dunder_new_inner(db, env.program(db), self, policy)
     }
 
     /// Look up an attribute in the MRO of the meta-type of `self`. This returns class-level attributes
@@ -7644,6 +7772,18 @@ impl<'db> Type<'db> {
 
         let class_literal = class.class_literal(db);
         let class_generic_context = class_literal.generic_context(db);
+        let inferable_class_context =
+            if matches!(self, Type::ClassLiteral(_) | Type::GenericAlias(_)) {
+                class_generic_context
+            } else {
+                None
+            };
+        let constructor_member_policy =
+            if class_generic_context.is_some() && inferable_class_context.is_none() {
+                MemberLookupPolicy::NO_INHERITED_GENERIC_CONTEXT
+            } else {
+                MemberLookupPolicy::default()
+            };
 
         // Keep bespoke constructor behavior for cases that don't map cleanly to `__new__`/`__init__`.
         let fallback_bindings = || {
@@ -7653,7 +7793,7 @@ impl<'db> Type<'db> {
             Binding::single(
                 self,
                 Signature::new_generic(
-                    class_generic_context,
+                    inferable_class_context,
                     Parameters::gradual_form(),
                     return_type,
                 ),
@@ -7749,7 +7889,7 @@ impl<'db> Type<'db> {
             let new_method = if class_literal.is_typed_dict(db) {
                 None
             } else {
-                self_type.lookup_dunder_new(db, env)
+                self_type.lookup_dunder_new(db, env, constructor_member_policy)
             };
 
             let init_method_no_object = constructor_instance_ty.member_lookup_with_policy(
@@ -7757,7 +7897,8 @@ impl<'db> Type<'db> {
                 env,
                 "__init__",
                 MemberLookupPolicy::NO_INSTANCE_FALLBACK
-                    | MemberLookupPolicy::MRO_NO_OBJECT_FALLBACK,
+                    | MemberLookupPolicy::MRO_NO_OBJECT_FALLBACK
+                    | constructor_member_policy,
             );
 
             let new_bindings = if let Some(method) = &new_method
@@ -7811,7 +7952,7 @@ impl<'db> Type<'db> {
                             db,
                             env,
                             "__init__",
-                            MemberLookupPolicy::NO_INSTANCE_FALLBACK,
+                            MemberLookupPolicy::NO_INSTANCE_FALLBACK | constructor_member_policy,
                         );
                     match init_method_with_object.place {
                         Place::Defined(DefinedPlace {
@@ -7900,7 +8041,7 @@ impl<'db> Type<'db> {
                 return fallback_bindings();
             };
 
-            bindings.with_generic_context(db, class_generic_context)
+            bindings.with_generic_context(db, inferable_class_context)
         })
     }
 
@@ -9589,15 +9730,7 @@ impl<'db> Type<'db> {
             }
 
             Type::TypeIs(type_is) => visitor.visit(db, self, type_mapping, || {
-                type_is.with_type(
-                    db,
-                    type_is.type_argument(db).apply_type_mapping_impl(
-                        db,
-                        type_mapping,
-                        tcx,
-                        visitor,
-                    ),
-                )
+                type_is.apply_type_mapping_impl(db, type_mapping, tcx, visitor)
             }),
 
             Type::TypeGuard(type_guard) => visitor.visit(db, self, type_mapping, || {
@@ -11099,15 +11232,25 @@ bitflags! {
 
 impl get_size2::GetSize for DivergentFlags {}
 
-/// A type that is determined to be divergent during recursive type inference.
-/// This type must never be eliminated by dynamic type reduction
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum DivergentOrigin {
+    /// A back-reference to the query that caused a recursive inference cycle.
+    Recursive(salsa::Id),
+    /// A predicate's narrowing is not yet known. This carries no recursive type identity.
+    PendingNarrowing,
+}
+
+/// An internal marker used while resolving cyclic type inference.
+///
+/// Recursive markers identify a query whose result is needed to infer its own inputs. Pending
+/// narrowing instead records that a predicate's constraints are not yet available; it does not
+/// reference a recursive type. Both must survive dynamic type reduction
 /// (e.g. `Divergent` is assignable to `@Todo`, but `@Todo | Divergent` must not be reduced to `@Todo`).
 /// Otherwise, type inference cannot converge properly.
 /// For detailed properties of this type, see the unit test at the end of the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DivergentType {
-    /// The query ID that caused the cycle.
-    id: salsa::Id,
+    origin: DivergentOrigin,
     flags: DivergentFlags,
     /// If this divergent marker has been materialized, preserve whether it should behave like the
     /// top (`object`) or bottom (`Never`) bound while still remaining recognizable as divergent.
@@ -11120,14 +11263,14 @@ impl get_size2::GetSize for DivergentType {}
 impl DivergentType {
     const fn new(id: salsa::Id) -> Self {
         Self {
-            id,
+            origin: DivergentOrigin::Recursive(id),
             flags: DivergentFlags::empty(),
             materialization: None,
         }
     }
 
     fn same_marker(self, other: Self) -> bool {
-        self.id == other.id
+        self.origin == other.origin
     }
 
     const fn materialized(self, kind: MaterializationKind) -> Self {
@@ -12042,6 +12185,10 @@ pub(super) struct MetaclassTransformInfo<'db> {
 pub struct TypeIsType<'db> {
     #[returns(copy)]
     type_argument: Type<'db>,
+
+    #[returns(copy)]
+    materialization_kind: Option<MaterializationKind>,
+
     /// The ID of the scope to which the place belongs
     /// and the ID of the place itself within that scope.
     #[returns(copy)]
@@ -12076,7 +12223,7 @@ impl<'db> TypeIsType<'db> {
     ///     return isinstance(value, tuple)
     /// ```
     fn from_type_expression(db: &'db dyn Db, ty: Type<'db>) -> Type<'db> {
-        Type::TypeIs(Self::new(db, ty, None))
+        Type::TypeIs(Self::new(db, ty, None, None))
     }
 
     fn return_type(self, db: &'db dyn Db) -> Type<'db> {
@@ -12085,12 +12232,81 @@ impl<'db> TypeIsType<'db> {
 
     #[must_use]
     fn bind(self, db: &'db dyn Db, scope: ScopeId<'db>, place: ScopedPlaceId) -> Type<'db> {
-        Type::TypeIs(Self::new(db, self.type_argument(db), Some((scope, place))))
+        Type::TypeIs(Self::new(
+            db,
+            self.type_argument(db),
+            self.materialization_kind(db),
+            Some((scope, place)),
+        ))
     }
 
     #[must_use]
     fn with_type(self, db: &'db dyn Db, ty: Type<'db>) -> Type<'db> {
-        Type::TypeIs(Self::new(db, ty, self.place_info(db)))
+        Type::TypeIs(Self::new(
+            db,
+            ty,
+            self.materialization_kind(db),
+            self.place_info(db),
+        ))
+    }
+
+    fn apply_type_mapping_impl(
+        self,
+        db: &'db dyn Db,
+        type_mapping: &TypeMapping<'_, 'db>,
+        tcx: TypeContext<'db>,
+        visitor: &ApplyTypeMappingVisitor<'_, 'db>,
+    ) -> Type<'db> {
+        let argument = self.type_argument(db);
+        let mut materialization = self.materialization_kind(db);
+        let argument = match type_mapping {
+            TypeMapping::Materialize(kind) => {
+                // The top and bottom materializations are already fully static types, so
+                // materializing them further does nothing.
+                if materialization.is_some() {
+                    return Type::TypeIs(self);
+                }
+
+                // `TypeIs` with a static argument is equivalent to its top and bottom materializations.
+                let top = argument.materialize(db, MaterializationKind::Top, visitor);
+                if visitor.is_equivalent_to_materialization(db, argument, top) {
+                    return Type::TypeIs(self);
+                }
+
+                materialization = Some(*kind);
+                argument
+            }
+            TypeMapping::ApplySpecializationWithMaterialization {
+                specialization,
+                materialization_kind,
+            } => {
+                let specialized = argument.apply_type_mapping_impl(
+                    db,
+                    &TypeMapping::ApplySpecialization(*specialization),
+                    tcx,
+                    visitor,
+                );
+
+                // Avoid materializing unrelated gradual types already present in the argument.
+                if materialization.is_none() {
+                    let materialized =
+                        argument.apply_type_mapping_impl(db, type_mapping, tcx, visitor);
+                    if specialized != materialized {
+                        materialization = Some(*materialization_kind);
+                    }
+                }
+
+                specialized
+            }
+            _ => argument.apply_type_mapping_impl(db, type_mapping, tcx, visitor),
+        };
+
+        Type::TypeIs(Self::new(
+            db,
+            argument,
+            materialization,
+            self.place_info(db),
+        ))
     }
 
     fn is_bound(self, db: &'db dyn Db) -> bool {

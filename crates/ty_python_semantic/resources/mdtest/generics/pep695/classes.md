@@ -451,6 +451,23 @@ def accepts_dog(value: Dog) -> None: ...
 consumer: Consumer[Animal] = Consumer(accepts_dog)  # error: [invalid-argument-type]
 ```
 
+### Constrained constructor inference uses argument evidence
+
+Constructor arguments should select the narrowest compatible declared constraint. A string argument
+therefore specializes `NameAttribute` to `str`, not the broader `object` constraint.
+
+```py
+class NameAttribute[T: (object, str)]:
+    def __init__(self, value: T) -> None:
+        self._value = value
+
+    @property
+    def value(self) -> T:
+        return self._value
+
+attribute: NameAttribute[str] = NameAttribute("Alice")
+```
+
 ### Constructing the class from its own type variable
 
 A constructor call inside a generic class can use a value whose type is one of the class's type
@@ -533,6 +550,46 @@ class Box[T: NamedTuple]:
     def __init__(self, value: T, other: Self | None = None) -> None:
         if other is None:
             reveal_type(Box(value, self))  # revealed: Box[T@Box]
+```
+
+### Inferring through a `Self`-annotated constructor parameter
+
+When ty accepts arguments that require different specializations of an invariant class, it should
+infer a specialization covering both. The `Self`-annotated template contributes `int` alongside the
+direct argument, whether that argument is gradual or static.
+
+```py
+from typing import Any, Self
+
+class Box[T]:
+    def __init__(self, value: T, template: Self | None = None) -> None:
+        self.value = value
+
+def construct_from_any(value: Any) -> None:
+    # revealed: Box[Any | int]
+    reveal_type(Box(value, Box(1)))
+
+def construct_from_str(value: str) -> None:
+    # revealed: Box[str | int]
+    reveal_type(Box(value, Box(1)))
+```
+
+### Constructing through `type(self)`
+
+Calling a constructor through `type(self)` preserves the current `Self` specialization. The class's
+type variable is fixed by that specialization and cannot be inferred from a different constructor
+argument.
+
+```py
+from typing import Self
+
+class Box[T]:
+    def __init__(self, value: T) -> None:
+        self.value = value
+
+    def reset(self) -> Self:
+        # error: [invalid-argument-type]
+        return type(self)("hello")
 ```
 
 ### Constructing with an enclosing Self type
@@ -1598,6 +1655,38 @@ class WithOverloadedMethod[T]:
 
 # revealed: Overload[(self, x: int) -> int, [S](self, x: S) -> S | int]
 reveal_type(WithOverloadedMethod[int].method)
+```
+
+## Materialized `TypeIs` return types
+
+A generic `TypeIs` in the return type of a class method is materialized along with the outer class:
+
+```py
+from typing import Any, TypeIs
+from ty_extensions import Bottom, Top
+
+class Predicate[T]:
+    def matches(self, value: object) -> TypeIs[T]:
+        return True
+
+    def unrelated(self, value: object) -> TypeIs[Any]:
+        return True
+
+def _(concrete: Predicate[int], gradual: Predicate[Any], value: object) -> None:
+    reveal_type(concrete.matches(value))  # revealed: TypeIs[int @ value]
+    reveal_type(gradual.matches(value))  # revealed: TypeIs[Any @ value]
+
+def _(top: Top[Predicate[Any]], bottom: Bottom[Predicate[Any]], value: object) -> None:
+    reveal_type(top.matches(value))  # revealed: Top[TypeIs[Any @ value]]
+    reveal_type(bottom.matches(value))  # revealed: Bottom[TypeIs[Any @ value]]
+```
+
+An explicit `TypeIs[Any]` return type remains unmaterialized:
+
+```py
+def _(top: Top[Predicate[Any]], bottom: Bottom[Predicate[Any]], value: object) -> None:
+    reveal_type(top.unrelated(value))  # revealed: TypeIs[Any @ value]
+    reveal_type(bottom.unrelated(value))  # revealed: TypeIs[Any @ value]
 ```
 
 ## `Callable` return annotations preserve enclosing generic context

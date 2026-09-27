@@ -69,6 +69,15 @@ jobs:
           persist-credentials: false
           ref: ${{ github.sha }}
 
+      # Faster to do this separately than to use `fetch-depth: 0` with `actions/checkout`
+      - name: Fetch full history without tags
+        if: matrix.revision == 'base'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh auth setup-git
+          git fetch --no-tags --filter=blob:none --unshallow origin
+
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           lookup-only: false
@@ -85,9 +94,6 @@ jobs:
           REVISION: ${{ matrix.revision }}
         run: |
           if [[ "${REVISION}" == "base" ]]; then
-            # Faster to do this separately than to use `fetch-depth: 0` with `actions/checkout`
-            git fetch --no-tags --filter=blob:none --unshallow origin
-
             # The first parent contains any preceding layers in a stacked pull request.
             MERGE_BASE="$(git rev-parse "${GITHUB_SHA}^1")"
             echo "${MERGE_BASE}" > merge-base.txt
@@ -149,7 +155,7 @@ jobs:
       TY_UV: scripts
     steps:
       - name: Install the latest version of uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "0.12.18"
           ignore-empty-workdir: true
@@ -215,7 +221,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Install the latest version of uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "0.12.18"
           ignore-empty-workdir: true
