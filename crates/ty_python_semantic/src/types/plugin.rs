@@ -1464,11 +1464,14 @@ fn plugin_callee<'db>(
             method_name: None,
             receiver_ty: None,
         }),
-        Type::BoundMethod(method) => Some(PluginCallee::Callable {
-            qualified_name: function_qualified_name(db, method.function(db)),
-            method_name: Some(method.function(db).name(db).to_string()),
-            receiver_ty: Some(method.self_instance(db)),
-        }),
+        Type::BoundMethod(method) => {
+            let function = method.function(db)?;
+            Some(PluginCallee::Callable {
+                qualified_name: function_qualified_name(db, function),
+                method_name: Some(function.name(db).to_string()),
+                receiver_ty: Some(method.self_instance(db)),
+            })
+        }
         Type::ClassLiteral(class) => Some(PluginCallee::Constructor {
             qualified_name: class.qualified_name(db).to_string(),
             instance_ty: class.to_non_generic_instance(db, env),
