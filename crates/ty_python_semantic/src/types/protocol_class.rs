@@ -2394,6 +2394,7 @@ fn protocol_member_read_type<'db>(
             InstanceFallbackShadowsNonDataDescriptor::No,
         )
         .unwrap_or_else(|error| error.fallback_member(db))
+        .member(db)
         .place
     } else {
         receiver_ty.member(db, env, member.name).place
@@ -2741,6 +2742,24 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         access: ProtocolMemberAccessMode,
     ) -> ConstraintSet<'db, 'c> {
         let env = self.env;
+        // Reading a member as `object` imposes no constraint on its value type. A class
+        // attribute establishes presence without inferring a shadowing instance assignment.
+        if !member.is_method()
+            && required_ty
+                .resolve(db, env)
+                .is_some_and(|required| required.ty().resolve_type_alias(db) == Type::object())
+            && receiver_ty
+                .member_lookup_with_policy(
+                    db,
+                    env,
+                    member.name,
+                    MemberLookupPolicy::NO_INSTANCE_FALLBACK,
+                )
+                .place
+                .is_definitely_bound()
+        {
+            return self.always();
+        }
         let Some(attribute_type) =
             protocol_member_read_type(db, env, ty, receiver_ty, member, access)
         else {
@@ -3285,7 +3304,11 @@ impl<'c, 'db> DisjointnessChecker<'_, 'c, 'db> {
             return self.never();
         };
 
-        ConstraintSet::from_bool(self.constraints, actual_property.setter(db).is_none())
+        let missing = actual_property.setter(db).is_none();
+        if missing && let Some(context) = self.report_context() {
+            context.push(ErrorContext::ProtocolMemberNotWritable);
+        }
+        ConstraintSet::from_bool(self.constraints, missing)
     }
 
     /// Checks whether `ty` is disjoint from the readable type required by `member`.
@@ -3300,12 +3323,21 @@ impl<'c, 'db> DisjointnessChecker<'_, 'c, 'db> {
     ) -> ConstraintSet<'db, 'c> {
         let env = self.env;
         let access = member.access(db, env, ProtocolMemberAccessMode::Instance);
-        if !member.is_method() {
+        let result = if !member.is_method() {
             access.read.when_some_and(db, self.constraints, |read_ty| {
                 read_ty
                     .resolve(db, env)
                     .when_some_and(db, self.constraints, |read_ty| {
-                        self.check_type_pair(db, ty, read_ty.ty())
+                        let result = self.check_type_pair(db, ty, read_ty.ty());
+                        if let Some(context) = self.report_context()
+                            && result.is_always_satisfied(db, env)
+                        {
+                            context.push(ErrorContext::DisjointTypes {
+                                left: ty,
+                                right: read_ty.ty(),
+                            });
+                        }
+                        result
                     })
             })
         } else {
@@ -3342,16 +3374,31 @@ impl<'c, 'db> DisjointnessChecker<'_, 'c, 'db> {
                             db,
                             self.constraints,
                             |callable_signature| {
-                                self.check_type_pair(
+                                let result = self.check_type_pair(
                                     db,
                                     method_signature.return_ty,
                                     callable_signature.return_ty,
-                                )
+                                );
+                                if let Some(context) = self.report_context()
+                                    && result.is_always_satisfied(db, env)
+                                {
+                                    context.push(ErrorContext::DisjointReturnTypes {
+                                        left: method_signature.return_ty,
+                                        right: callable_signature.return_ty,
+                                    });
+                                }
+                                result
                             },
                         )
                     })
             })
+        };
+        if let Some(context) = self.report_context()
+            && !result.is_always_satisfied(db, env)
+        {
+            context.take();
         }
+        result
     }
 }
 
@@ -3562,6 +3609,8 @@ fn cached_protocol_interface<'db>(
             return;
         }
 
+        let specialization =
+            specialization.map(|specialization| specialization.with_typevar_bounds(db));
         let candidate = candidate.apply_specialization(db, specialization);
         let ProtocolMemberCandidate {
             ty,
@@ -3710,13 +3759,18 @@ pub(super) fn has_all_protocol_members_defined<'db>(
                 })
         }
         _ => target_interface.members(db).all(|member| {
-            matches!(
-                ty.member(db, env, member.name()).place,
-                Place::Defined(DefinedPlace {
-                    definedness: Definedness::AlwaysDefined,
-                    ..
-                })
+            ty.member_lookup_with_policy(
+                db,
+                env,
+                member.name(),
+                MemberLookupPolicy::NO_INSTANCE_FALLBACK,
             )
+            .place
+            .is_definitely_bound()
+                || ty
+                    .member(db, env, member.name())
+                    .place
+                    .is_definitely_bound()
         }),
     }
 }

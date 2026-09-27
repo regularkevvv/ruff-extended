@@ -509,11 +509,45 @@ impl<'db, 'c> ConstraintSet<'db, 'c> {
         debug_assert!(std::ptr::eq(self.builder, builder));
     }
 
-    /// Returns whether this constraint set never holds.
+    /// Returns whether this constraint set never holds, without checking the type variables'
+    /// declared bounds or constraints. Use [`Self::has_no_valid_solutions`] to include those.
     pub(crate) fn is_never_satisfied(self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> bool {
         let mut storage = self.builder.storage.borrow_mut();
         self.node
             .is_never_satisfied(db, env, &mut storage, self.source_order)
+    }
+
+    /// Returns whether no specialization satisfying the type variables' upper bounds and
+    /// constraints can satisfy this constraint set.
+    ///
+    /// Unlike [`Self::is_never_satisfied`], this validates solutions against the type variables'
+    /// upper bounds and constraints. For example, `T = int` is not contradictory by itself, but has
+    /// no valid solution if `T` has an upper bound of `str`.
+    ///
+    /// If the solver reaches its computation limit, we do not know whether a valid solution exists.
+    /// This returns `false` in that case: stopping the search is not proof that there is no solution.
+    pub(crate) fn has_no_valid_solutions(
+        self,
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+    ) -> bool {
+        if self.is_never_satisfied(db, env) {
+            return true;
+        }
+
+        let inferable = {
+            let storage = self.builder.storage.borrow();
+            let Some(support) = storage.node_support(self.node) else {
+                return false;
+            };
+            // For overlap, every mentioned type variable can choose a valid specialization.
+            TypeVarSet::from_typevars(db, support.iter().map(|id| storage.typevar_data(id)))
+        };
+
+        matches!(
+            self.solutions(db, env, inferable),
+            Ok(Solutions::Unsatisfiable)
+        )
     }
 
     /// Returns whether this constraint set is the `never` terminal.
@@ -3267,15 +3301,6 @@ impl NodeId {
         a_and_b.or(storage, not_a_and_not_b)
     }
 
-    /// Returns the `if-then-else` of three BDDs: when `self` evaluates to `true`, it returns what
-    /// `then_node` evaluates to; otherwise it returns what `else_node` evaluates to.
-    fn ite(self, storage: &mut ConstraintSetStorage<'_>, then_node: Self, else_node: Self) -> Self {
-        let if_true = self.and(storage, then_node);
-        let negated = self.negate(storage);
-        let if_false = negated.and(storage, else_node);
-        if_true.or(storage, if_false)
-    }
-
     /// Returns the TDD `if-then-else` of four BDDs: when `self` evaluates to `true`, it returns
     /// what `then_node` evaluates to; when `self` evaluates to `false`, it returns what
     /// `else_node` evaluates to; and `uncertain_node` is included regardless of `self`'s value.
@@ -4879,23 +4904,16 @@ impl InteriorNode {
             ) -> ControlFlow<Self::Break, Self::Result> {
                 let (disposition, constraint) = interior;
                 match disposition {
-                    // If we are keeping this node, absorb the uncertain branch into both the true
-                    // and false branches before constructing the ITE, matching TDD semantics: when
-                    // the constraint holds the result is C ∨ U, and when it doesn't the result is
-                    // D ∨ U.
-                    //
-                    // NB: We cannot use `Node::new` here, because the recursive calls might introduce new
-                    // derived constraints into the result, and those constraints might appear before this
-                    // one in the BDD ordering.
+                    // Preserve the uncertain branch when rebuilding the node. Recursive calls
+                    // can introduce derived constraints earlier in the variable ordering, so
+                    // use `ite_uncertain` rather than constructing a node directly.
                     Disposition::Keep => {
                         let (guard, guard_source_order) =
                             Node::new_constraint(storage, *constraint);
                         let (if_true, if_true_source_order) = if_true;
                         let (if_uncertain, if_uncertain_source_order) = if_uncertain;
                         let (if_false, if_false_source_order) = if_false;
-                        let if_true = if_true.or(storage, if_uncertain);
-                        let if_false = if_false.or(storage, if_uncertain);
-                        let node = guard.ite(storage, if_true, if_false);
+                        let node = guard.ite_uncertain(storage, if_true, if_uncertain, if_false);
                         let left_source_order =
                             storage.ordered_source_order(guard_source_order, if_true_source_order);
                         let right_source_order = storage
@@ -6903,7 +6921,7 @@ class E: ...
     }
 
     #[test]
-    fn constraint_ordering_changes_nested_transitive_solutions() {
+    fn constraint_ordering_preserves_nested_transitive_solutions() {
         let db = setup_db();
         let db = &db;
         let env = db.program_environment();
@@ -6949,19 +6967,15 @@ class E: ...
                     .and(storage, list_int_t)
                     .or(storage, bytes_v)
             },
-            // TODO: All permutations should produce the first result. TDD traversal currently
-            // leaks irrelevant positive constraints onto the `V = bytes` alternative.
+            // The unrelated `V = bytes` alternative must not pick up bindings for `T` or `U`.
             [
                 "never=false always=false merged=[T=list[int], U=int, V=bytes] paths=[T=list[int], U=int; V=bytes]",
-                "never=false always=false merged=[T=list[int], U=int, V=bytes] paths=[T=list[int], U=int; T=list[int], V=bytes; V=bytes]",
-                "never=false always=false merged=[T=list[int], U=int, V=bytes] paths=[T=list[int], U=int; U=int, V=bytes; V=bytes]",
-                "never=false always=false merged=[T=list[int] | list[U], U=int, V=bytes] paths=[T=list[int], U=int; T=list[U], V=bytes; V=bytes]",
             ],
         );
     }
 
     #[test]
-    fn constraint_ordering_changes_negated_alternative_solutions() {
+    fn constraint_ordering_preserves_negated_alternative_solutions() {
         let db = setup_db();
         let db = &db;
         let env = db.program_environment();
@@ -6999,13 +7013,9 @@ class E: ...
                     .negate(storage)
                     .or(storage, bytes_u)
             },
-            // TODO: All permutations should produce the first result. A satisfied alternative
-            // should not infer `T` from unrelated positive decisions made earlier in a BDD path.
-            [
-                "never=false always=false merged=[U=bytes] paths=[; U=bytes]",
-                "never=false always=false merged=[T=str, U=bytes] paths=[; T=str, U=bytes; U=bytes]",
-                "never=false always=false merged=[T=int, U=bytes] paths=[; T=int, U=bytes; U=bytes]",
-            ],
+            // A satisfied alternative must not infer `T` from unrelated positive decisions
+            // made earlier in a TDD path.
+            ["never=false always=false merged=[U=bytes] paths=[; U=bytes]"],
         );
     }
 
