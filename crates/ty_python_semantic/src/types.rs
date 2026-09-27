@@ -1,7 +1,7 @@
 use compact_str::{CompactString, ToCompactString};
 use itertools::Itertools;
 use ruff_diagnostics::{Edit, Fix};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use std::borrow::Cow;
 use std::cell::OnceCell;
@@ -28,7 +28,7 @@ pub(crate) use self::callable::UpcastPolicy;
 use self::class::ClassInstanceFlags;
 pub use self::cyclic::CycleDetector;
 pub(crate) use self::cyclic::TypeTransformer;
-use self::cyclic::{ActiveRecursionDetector, TypeIdentity};
+use self::cyclic::{ActiveRecursionDetector, HasIdentity, TypeIdentity};
 pub use self::dedicated::pytest::{
     FixtureBinding, FixtureExposure, FixtureNameSource, fixture_bindings_for_parameter,
     fixture_exposures_for_definition, pytest_global_plugin_files,
@@ -53,12 +53,12 @@ pub(crate) use self::match_pattern::{
     typed_dict_matches_class_pattern,
 };
 pub(crate) use self::relation_error::{ErrorContext, ErrorContextTree, ParameterDescription};
-use self::set_theoretic::KnownUnion;
 use self::set_theoretic::NegativeIntersectionElements;
 pub(crate) use self::set_theoretic::builder::{
     IntersectionBuilder, UnionAccumulator, UnionBuilder,
 };
 pub use self::set_theoretic::{IntersectionType, UnionType};
+use self::set_theoretic::{KnownUnion, RecursivelyDefined};
 pub(crate) use self::signatures::Signature;
 pub use self::signatures::{ParameterDefault, ParameterKind};
 pub(crate) use self::subclass_of::{SubclassOfInner, SubclassOfType};
@@ -98,7 +98,9 @@ pub use crate::types::method::{BoundMethodType, KnownBoundMethodType, WrapperDes
 use crate::types::mro::{MroIterator, StaticMroError};
 pub(crate) use crate::types::narrow::{NarrowingConstraint, infer_narrowing_constraints};
 use crate::types::newtype::NewType;
-use crate::types::signatures::{ConcatenateTail, walk_signature};
+use crate::types::signatures::{
+    ConcatenateTail, walk_signature, walk_signature_without_return_type,
+};
 pub(crate) use crate::types::signatures::{Parameter, Parameters};
 use crate::types::special_form::TypeQualifier;
 use crate::types::tuple::TupleSpec;
@@ -112,7 +114,7 @@ pub(crate) use crate::types::typevar::{
 pub use crate::types::typevar::{BoundTypeVarInstance, TypeVarKind};
 use crate::types::typevar::{TypeVarInstance, TypeVarSet};
 pub use crate::types::variance::TypeVarVariance;
-use crate::types::variance::VarianceInferable;
+use crate::types::variance::{VarianceInferable, VarianceTerm};
 use crate::types::visitor::{
     any_over_type, any_over_type_including_alias_arguments, dynamic_content,
 };
@@ -571,8 +573,24 @@ pub(crate) type FindLegacyTypeVarsVisitor<'db> =
 pub(crate) struct FindLegacyTypeVars;
 
 /// A [`CycleDetector`] that is used in `visit_specialization` methods.
-type SpecializationVisitor<'db> = CycleDetector<'db, VisitSpecialization, Type<'db>, (), 3>;
+type SpecializationVisitor<'db> =
+    CycleDetector<'db, VisitSpecialization, (Type<'db>, TypeVarVariance), (), 3>;
 struct VisitSpecialization;
+
+impl<'db> HasIdentity<'db> for (Type<'db>, TypeVarVariance) {
+    type Id = (TypeIdentity<'db>, TypeVarVariance);
+
+    fn may_share_identity(&self, db: &'db dyn Db, other: &Self) -> bool {
+        let (self_ty, self_variance) = self;
+        let (other_ty, other_variance) = other;
+        self_variance == other_variance && self_ty.may_share_type_identity(db, *other_ty)
+    }
+
+    fn to_identity(&self, db: &'db dyn Db) -> Self::Id {
+        let (ty, variance) = self;
+        (ty.to_type_identity(db), *variance)
+    }
+}
 
 /// The standard-library `typing` module or its `typing_extensions` backport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, get_size2::GetSize)]
@@ -2140,6 +2158,7 @@ impl<'db> Type<'db> {
             Type::Dynamic(
                 DynamicType::Unknown
                     | DynamicType::UnknownGeneric(_)
+                    | DynamicType::UnknownLambdaParameter
                     | DynamicType::AmbiguousOverload
             )
         )
@@ -2305,6 +2324,7 @@ impl<'db> Type<'db> {
             | DynamicType::InvalidConcatenateUnknown
             | DynamicType::UnknownGeneric(_)
             | DynamicType::UnspecializedTypeVar
+            | DynamicType::UnknownLambdaParameter
             | DynamicType::AmbiguousOverload => false,
             DynamicType::Todo(_) => true,
         })
@@ -2405,6 +2425,7 @@ impl<'db> Type<'db> {
     pub fn is_deprecated(&self, db: &'db dyn Db) -> bool {
         match self {
             Type::FunctionLiteral(f) => f.implementation_deprecated(db).is_some(),
+            Type::Callable(callable) => callable.deprecated(db).is_some(),
             Type::ClassLiteral(c) => c.deprecated(db).is_some(),
             _ => false,
         }
@@ -2495,14 +2516,44 @@ impl<'db> Type<'db> {
     /// most general form of the type that is fully static.
     #[must_use]
     fn top_materialization(&self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Type<'db> {
-        (*self).cached_materialization(db, env.program(db), MaterializationKind::Top)
+        (*self).materialization(db, env, MaterializationKind::Top)
     }
 
     /// Returns the bottom materialization (or lower bound materialization) of this type, which is
     /// the most specific form of the type that is fully static.
     #[must_use]
     fn bottom_materialization(&self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Type<'db> {
-        (*self).cached_materialization(db, env.program(db), MaterializationKind::Bottom)
+        (*self).materialization(db, env, MaterializationKind::Bottom)
+    }
+
+    fn materialization(
+        self,
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+        materialization_kind: MaterializationKind,
+    ) -> Type<'db> {
+        match self {
+            Type::Dynamic(_) => match materialization_kind {
+                MaterializationKind::Top => Type::object(),
+                MaterializationKind::Bottom => Type::Never,
+            },
+            Type::Divergent(divergent) => {
+                Type::Divergent(divergent.materialized(materialization_kind))
+            }
+            Type::Never
+            | Type::AlwaysTruthy
+            | Type::AlwaysFalsy
+            | Type::ClassLiteral(_)
+            | Type::LiteralValue(_)
+            | Type::ModuleLiteral(_)
+            | Type::WrapperDescriptor(_)
+            | Type::DataclassDecorator(_)
+            | Type::DataclassTransformer(_)
+            | Type::BoundSuper(_)
+            | Type::SpecialForm(_) => self,
+            Type::NominalInstance(instance) if !instance.is_definition_generic(db) => self,
+            _ => self.cached_materialization(db, env.program(db), materialization_kind),
+        }
     }
 
     #[salsa::tracked(
@@ -2802,6 +2853,11 @@ impl<'db> Type<'db> {
         }
     }
 
+    fn is_int_literal(&self) -> bool {
+        self.as_literal_value()
+            .is_some_and(LiteralValueType::is_int)
+    }
+
     fn as_int_literal(self) -> Option<i64> {
         match self {
             Type::LiteralValue(literal) => literal.as_int(),
@@ -3087,6 +3143,7 @@ impl<'db> Type<'db> {
                 DynamicType::Unknown
                 | DynamicType::UnknownGeneric(_)
                 | DynamicType::UnspecializedTypeVar
+                | DynamicType::UnknownLambdaParameter
                 | DynamicType::Todo(_)
                 | DynamicType::InvalidConcatenateUnknown
                 | DynamicType::AmbiguousOverload => false,
@@ -3416,10 +3473,11 @@ impl<'db> Type<'db> {
         }
     }
 
-    /// Recursively visit the specialization of a generic class instance.
+    /// Recursively visit a type and its specializations.
     ///
-    /// The provided closure will be called on any nested types, along with their variance with
-    /// respect to the outermost type.
+    /// The provided closure will be called on the type itself and its nested types, along with
+    /// their variance with respect to the outermost type. Repeated types with the same variance
+    /// may be skipped.
     fn visit_specialization<F>(self, db: &'db dyn Db, env: &ProgramEnvironment<'db>, mut f: F)
     where
         F: FnMut(Type<'db>, TypeVarVariance),
@@ -3441,62 +3499,58 @@ impl<'db> Type<'db> {
         f: &mut dyn FnMut(Type<'db>, TypeVarVariance),
         visitor: &SpecializationVisitor<'db>,
     ) {
-        let Some((_, specialization)) = self.class_specialization(db, env) else {
-            match self {
-                Type::Union(union) => {
-                    for element in union.elements(db) {
-                        element.visit_specialization_impl(db, env, polarity, f, visitor);
-                    }
-                }
-                Type::Intersection(intersection) => {
-                    for element in intersection.positive(db) {
-                        element.visit_specialization_impl(db, env, polarity, f, visitor);
-                    }
-                }
-                Type::TypeAlias(alias) => visitor.visit(db, self, || {
-                    alias
-                        .value_type(db)
-                        .visit_specialization_impl(db, env, polarity, f, visitor);
-                }),
-                Type::Callable(callable) => {
-                    for signature in callable.signatures(db) {
-                        for parameter in signature.parameters() {
-                            let variance = TypeVarVariance::Contravariant.compose(polarity);
+        f(self, polarity);
 
-                            f(parameter.annotated_type(), variance);
-
-                            visitor.visit(db, parameter.annotated_type(), || {
-                                parameter
-                                    .annotated_type()
-                                    .visit_specialization_impl(db, env, variance, f, visitor);
-                            });
+        visitor.visit(db, (self, polarity), || {
+            let Some((_, specialization)) = self.class_specialization(db, env) else {
+                match self {
+                    Type::Union(union) => {
+                        for element in union.elements(db) {
+                            element.visit_specialization_impl(db, env, polarity, f, visitor);
                         }
+                    }
+                    Type::Intersection(intersection) => {
+                        for element in intersection.positive(db) {
+                            element.visit_specialization_impl(db, env, polarity, f, visitor);
+                        }
+                        for element in intersection.negative(db) {
+                            element.visit_specialization_impl(db, env, polarity.flip(), f, visitor);
+                        }
+                    }
+                    Type::TypeAlias(alias) => alias
+                        .value_type(db)
+                        .visit_specialization_impl(db, env, polarity, f, visitor),
+                    Type::Callable(callable) => {
+                        for signature in callable.signatures(db) {
+                            for parameter in signature.parameters() {
+                                parameter.annotated_type().visit_specialization_impl(
+                                    db,
+                                    env,
+                                    polarity.flip(),
+                                    f,
+                                    visitor,
+                                );
+                            }
 
-                        visitor.visit(db, signature.return_ty, || {
                             signature
                                 .return_ty
                                 .visit_specialization_impl(db, env, polarity, f, visitor);
-                        });
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
-            }
 
-            return;
-        };
+                return;
+            };
 
-        for (typevar, ty) in iter::zip(
-            specialization.generic_context(db).variables(db),
-            specialization.types(db),
-        ) {
-            let variance = typevar.variance_with_polarity(db, polarity);
-
-            f(*ty, variance);
-
-            visitor.visit(db, *ty, || {
+            for (typevar, ty) in iter::zip(
+                specialization.generic_context(db).variables(db),
+                specialization.types(db),
+            ) {
+                let variance = typevar.variance_with_polarity(db, polarity);
                 ty.visit_specialization_impl(db, env, variance, f, visitor);
-            });
-        }
+            }
+        });
     }
 
     /// Return true if there is just a single inhabitant for this type.
@@ -5360,7 +5414,8 @@ impl<'db> Type<'db> {
                 // Variance accounts for aliases without expanding recursive specializations,
                 // and ignores alias arguments that do not affect the resulting type.
                 && generic_context.variables(db).any(|typevar| {
-                    ty.variance_of(db, env, typevar.identity(db)) != TypeVarVariance::Bivariant
+                    ty.variance_of(db, env, typevar.identity(db)).evaluate(db)
+                        != TypeVarVariance::Bivariant
                 })
         })
     }
@@ -6230,6 +6285,16 @@ impl<'db> Type<'db> {
                 }),
                 _ => None,
             }
+        }
+
+        if let Type::LiteralValue(literal) = self
+            && let Some(length) = match literal.kind() {
+                LiteralValueTypeKind::String(string) => Some(string.python_len(db)),
+                LiteralValueTypeKind::Bytes(bytes) => Some(bytes.python_len(db)),
+                _ => None,
+            }
+        {
+            return i64::try_from(length).ok().map(Type::int_literal);
         }
 
         let return_ty = match self.try_call_dunder(
@@ -7670,6 +7735,17 @@ impl<'db> Type<'db> {
                 return MemberLookupResult::from(Place::Undefined);
             }
 
+            if matches!(
+                self,
+                Type::KnownInstance(KnownInstanceType::TypeGenericAlias(_))
+            ) {
+                // `GenericAlias.__getattr__` delegates to `__origin__`. For `type[T]`, the
+                // origin is always `type`, not `T`, even when `T` is `Any`.
+                return KnownClass::Type
+                    .to_class_literal(db, env)
+                    .member_lookup_with_policy_and_receiver(db, env, name, policy, None);
+            }
+
             let name_type = Type::string_literal(db, name);
             match self.try_call_dunder(
                 db,
@@ -8684,6 +8760,22 @@ impl<'db> Type<'db> {
         specialization: Specialization<'db>,
         specialize_self_domain: bool,
     ) -> Type<'db> {
+        if let Type::NominalInstance(instance) = self
+            && !instance.is_definition_generic(db)
+        {
+            return self;
+        }
+
+        if let Type::TypeVar(typevar) = self
+            && !typevar.is_paramspec(db)
+        {
+            match specialization.get(db, typevar) {
+                Some(mapped) if specialization.materialization_kind(db).is_none() => return mapped,
+                None if !specialize_self_domain || !typevar.typevar(db).is_self(db) => return self,
+                _ => {}
+            }
+        }
+
         if matches!(
             self,
             Type::Dynamic(_)
@@ -8812,6 +8904,98 @@ impl<'db> Type<'db> {
             )
         {
             return SubclassOfType::from(db, visitor.env, class.default_specialization(db));
+        }
+
+        // Expand union-valued `ParamSpec`s before specializing a given callable.
+        if let TypeMapping::ApplySpecialization(specialization)
+        | TypeMapping::ApplySpecializationWithMaterialization { specialization, .. } =
+            type_mapping
+        {
+            let function_signatures = |function: FunctionType<'db>| {
+                if specialization.preserves_lazy_signatures() {
+                    function.updated_signature(db)
+                } else {
+                    Some(function.signature(db))
+                }
+            };
+
+            let signatures = match self {
+                Type::FunctionLiteral(function) => function_signatures(function),
+                Type::BoundMethod(method) => function_signatures(method.function(db)),
+                Type::Callable(callable) => Some(callable.signatures(db)),
+                _ => None,
+            };
+
+            let mut seen = FxHashSet::default();
+            let union_paramspecs = signatures
+                .into_iter()
+                .flat_map(|signatures| signatures.iter())
+                .filter_map(|signature| {
+                    let (_, typevar) = signature.parameters().as_paramspec_with_prefix()?;
+                    let Type::Union(union) = specialization.get(db, typevar)? else {
+                        return None;
+                    };
+
+                    Some((typevar, union))
+                })
+                .filter(|(typevar, _)| seen.insert(typevar.identity(db)))
+                .collect::<Vec<_>>();
+
+            if !union_paramspecs.is_empty() {
+                // Independent union-valued `ParamSpec`s produce a Cartesian product. Bound
+                // the expansion to avoid exponential blowup.
+                const MAX_PARAMSPEC_EXPANSION: usize = 64;
+
+                let mut expanded_callables = UnionBuilder::new(db, visitor.env);
+                let mut expansion_size = 1usize;
+                for (_, union) in &union_paramspecs {
+                    expansion_size = expansion_size.saturating_mul(union.elements(db).len());
+                    if expansion_size > MAX_PARAMSPEC_EXPANSION {
+                        return Type::unknown();
+                    }
+
+                    if union.recursively_defined(db).is_yes() {
+                        expanded_callables =
+                            expanded_callables.recursively_defined(RecursivelyDefined::Yes);
+                    }
+                }
+
+                return visitor.visit(db, self, type_mapping, || {
+                    let expanded_paramspecs = union_paramspecs
+                        .iter()
+                        .map(|(typevar, union)| {
+                            union.elements(db).iter().map(move |ty| (*typevar, *ty))
+                        })
+                        .multi_cartesian_product();
+
+                    for bindings in expanded_paramspecs {
+                        // Override the specialization with a specific parameter-list assigned to
+                        // each `ParamSpec` from the union expansion.
+                        let specialization = ApplySpecialization::WithBindings {
+                            specialization,
+                            bindings: &bindings,
+                        };
+
+                        let mapping = match type_mapping {
+                            TypeMapping::ApplySpecializationWithMaterialization {
+                                materialization_kind,
+                                ..
+                            } => TypeMapping::ApplySpecializationWithMaterialization {
+                                specialization,
+                                materialization_kind: *materialization_kind,
+                            },
+                            _ => TypeMapping::ApplySpecialization(specialization),
+                        };
+
+                        // Use a fresh visitor, as the visitor cache does not distinguish
+                        // between these specialization bindings.
+                        let callable = self.apply_type_mapping(db, visitor.env, &mapping, tcx);
+                        expanded_callables.add_in_place(callable);
+                    }
+
+                    expanded_callables.build()
+                });
+            }
         }
 
         match self {
@@ -9046,15 +9230,9 @@ impl<'db> Type<'db> {
                     TypeMapping::ApplySpecialization(specialization)
                     | TypeMapping::ApplySpecializationWithMaterialization {
                         specialization, ..
-                    } if matches!(
-                        specialization,
-                        ApplySpecialization::Specialization { .. }
-                            | ApplySpecialization::TypeAlias(_)
-                            | ApplySpecialization::Partial { .. }
-                    ) =>
+                    } if let Some(mut current_specialization) =
+                        specialization.as_specialization(db) =>
                     {
-                        let mut current_specialization =
-                            specialization.as_specialization(db).unwrap();
                         if let TypeMapping::ApplySpecializationWithMaterialization {
                             materialization_kind,
                             ..
@@ -9756,6 +9934,7 @@ impl<'db> Type<'db> {
             Self::Dynamic(
                 DynamicType::Unknown
                 | DynamicType::UnknownGeneric(_)
+                | DynamicType::UnknownLambdaParameter
                 | DynamicType::AmbiguousOverload,
             ) => Type::SpecialForm(SpecialFormType::Unknown).definition(db, env),
             Self::Divergent(_) => Type::SpecialForm(SpecialFormType::Divergent).definition(db, env),
@@ -10084,7 +10263,7 @@ impl<'db> VarianceInferable<'db> for Type<'db> {
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
         typevar: BoundTypeVarIdentity<'db>,
-    ) -> TypeVarVariance {
+    ) -> VarianceTerm<'db> {
         tracing::trace!(
             "Checking variance of '{tvar}' in `{ty:?}`",
             tvar = typevar.identity.name(db),
@@ -10114,18 +10293,20 @@ impl<'db> VarianceInferable<'db> for Type<'db> {
             // A type variable is always covariant in itself.
             Type::TypeVar(other_typevar) if other_typevar.identity(db) == typevar => {
                 // type variables are covariant in themselves
-                TypeVarVariance::Covariant
+                TypeVarVariance::Covariant.into()
             }
             Type::ProtocolInstance(protocol_instance_type) => {
                 protocol_instance_type.variance_of(db, env, typevar)
             }
             Type::TypedDict(typed_dict) => typed_dict.variance_of(db, env, typevar),
             // unions are covariant in their disjuncts
-            Type::Union(union_type) => union_type
-                .elements(db)
-                .iter()
-                .map(|ty| ty.variance_of(db, env, typevar))
-                .collect(),
+            Type::Union(union_type) => VarianceTerm::join(
+                db,
+                union_type
+                    .elements(db)
+                    .iter()
+                    .map(|ty| ty.variance_of(db, env, typevar)),
+            ),
 
             // Products are covariant in their conjuncts. For negative
             // conjuncts, they're contravariant. To see this, suppose we have
@@ -10133,28 +10314,32 @@ impl<'db> VarianceInferable<'db> for Type<'db> {
             // `A`, and so is not assignable to `~A`. On the other hand, a value
             // of type `~A` excludes all `A`s, and thus all `B`s, and so _is_
             // assignable to `~B`.
-            Type::Intersection(intersection_type) => intersection_type
-                .positive(db)
-                .iter()
-                .map(|ty| ty.variance_of(db, env, typevar))
-                .chain(intersection_type.negative(db).iter().map(|ty| {
-                    ty.with_polarity(TypeVarVariance::Contravariant)
-                        .variance_of(db, env, typevar)
-                }))
-                .collect(),
+            Type::Intersection(intersection_type) => VarianceTerm::join(
+                db,
+                intersection_type
+                    .positive(db)
+                    .iter()
+                    .map(|ty| ty.variance_of(db, env, typevar))
+                    .chain(intersection_type.negative(db).iter().map(|ty| {
+                        ty.with_polarity(TypeVarVariance::Contravariant)
+                            .variance_of(db, env, typevar)
+                    })),
+            ),
             Type::EnumComplement(complement) => complement
                 .to_intersection(db, env)
                 .variance_of(db, env, typevar),
-            Type::PropertyInstance(property_instance_type) => [
-                Some(property_instance_type.instance_fallback(db, env)),
-                property_instance_type.getter(db),
-                property_instance_type.setter(db),
-                property_instance_type.deleter(db),
-            ]
-            .into_iter()
-            .flatten()
-            .map(|ty| ty.variance_of(db, env, typevar))
-            .collect(),
+            Type::PropertyInstance(property_instance_type) => VarianceTerm::join(
+                db,
+                [
+                    Some(property_instance_type.instance_fallback(db, env)),
+                    property_instance_type.getter(db),
+                    property_instance_type.setter(db),
+                    property_instance_type.deleter(db),
+                ]
+                .into_iter()
+                .flatten()
+                .map(|ty| ty.variance_of(db, env, typevar)),
+            ),
             // A generic class can store another class's slot descriptor directly:
             //
             //     class Owner[T]:
@@ -10185,7 +10370,7 @@ impl<'db> VarianceInferable<'db> for Type<'db> {
             | Type::AlwaysTruthy
             | Type::BoundSuper(_)
             | Type::TypeVar(_)
-            | Type::NewTypeInstance(_) => TypeVarVariance::Bivariant,
+            | Type::NewTypeInstance(_) => VarianceTerm::BIVARIANT,
         };
 
         tracing::trace!(
@@ -10532,6 +10717,8 @@ pub enum DynamicType<'db> {
     /// calls. For now, we replace unspecialized type variables with this marker type, and ignore them
     /// during generic inference.
     UnspecializedTypeVar,
+    /// A provisional marker inferred for a lambda parameter before access to its declared type.
+    UnknownLambdaParameter,
     /// A special variant that represents that `Unknown` was inferred due to an invalid use of
     /// `Concatenate` in a type expression.
     ///
@@ -10561,6 +10748,13 @@ impl DynamicType<'_> {
     fn is_todo(&self) -> bool {
         matches!(self, Self::Todo(_))
     }
+
+    const fn is_provisional_marker(self) -> bool {
+        matches!(
+            self,
+            Self::UnspecializedTypeVar | Self::UnknownLambdaParameter
+        )
+    }
 }
 
 impl std::fmt::Display for DynamicType<'_> {
@@ -10569,6 +10763,7 @@ impl std::fmt::Display for DynamicType<'_> {
             DynamicType::Any => f.write_str("Any"),
             DynamicType::Unknown
             | DynamicType::UnknownGeneric(_)
+            | DynamicType::UnknownLambdaParameter
             | DynamicType::InvalidConcatenateUnknown
             | DynamicType::AmbiguousOverload => f.write_str("Unknown"),
             DynamicType::UnspecializedTypeVar => f.write_str("UnspecializedTypeVar"),
@@ -11464,7 +11659,7 @@ impl<'db> VarianceInferable<'db> for TypeIsType<'db> {
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
         typevar: BoundTypeVarIdentity<'db>,
-    ) -> TypeVarVariance {
+    ) -> VarianceTerm<'db> {
         self.type_argument(db)
             .with_polarity(TypeVarVariance::Invariant)
             .variance_of(db, env, typevar)
@@ -11536,7 +11731,7 @@ impl<'db> VarianceInferable<'db> for TypeGuardType<'db> {
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
         typevar: BoundTypeVarIdentity<'db>,
-    ) -> TypeVarVariance {
+    ) -> VarianceTerm<'db> {
         self.return_type(db).variance_of(db, env, typevar)
     }
 }

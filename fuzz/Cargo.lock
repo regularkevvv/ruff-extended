@@ -245,9 +245,9 @@ dependencies = [
 
 [[package]]
 name = "char_str"
-version = "0.0.2"
+version = "0.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "576ba56f6ca18ebb069d0d07260407171712aff4dfe15ee3f8982dc16a455bcf"
+checksum = "c9cba78a5abb515610e10af297615434b019755b5d7be14e559ff5340dff50c4"
 dependencies = [
  "castaway",
  "get-size2",
@@ -561,9 +561,9 @@ dependencies = [
 
 [[package]]
 name = "get-size-derive2"
-version = "0.10.3"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c736d226c32e496b8377813b52269e11ad3a48d8373b68862d0364f04fd1229d"
+checksum = "7efe46d2adb529015748742f1a38594039ce357dbb21e6d178de342cfce468d4"
 dependencies = [
  "attribute-derive",
  "quote",
@@ -572,9 +572,9 @@ dependencies = [
 
 [[package]]
 name = "get-size2"
-version = "0.10.3"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b411f34418305908ab15a82ff78958c2a9aee9a272b2a2e663836b20a4e4b9d3"
+checksum = "d4d338de392104417fe6fdbe588c52383b9236956d8afe5654f0077176edc632"
 dependencies = [
  "compact_str",
  "get-size-derive2",
@@ -1538,7 +1538,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_annotate_snippets"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "anstyle",
  "memchr",
@@ -1547,7 +1547,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_cache"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "char_str",
  "filetime",
@@ -1560,7 +1560,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_db"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "anstyle",
  "arc-swap",
@@ -1598,7 +1598,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_diagnostics"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "get-size2",
  "is-macro",
@@ -1608,7 +1608,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_formatter"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "drop_bomb",
  "ruff_cache",
@@ -1623,7 +1623,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_index"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "get-size2",
  "ruff_macros",
@@ -1632,7 +1632,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_linter"
-version = "0.16.5"
+version = "0.16.6"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -1690,7 +1690,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_macros"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "heck",
  "itertools 0.15.0",
@@ -1703,14 +1703,14 @@ dependencies = [
 
 [[package]]
 name = "ruff_memory_usage"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "get-size2",
 ]
 
 [[package]]
 name = "ruff_notebook"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "anyhow",
  "rand 0.10.2",
@@ -1725,7 +1725,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_python_ast"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "aho-corasick",
  "arrayvec",
@@ -1749,7 +1749,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_python_codegen"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "ruff_python_ast",
  "ruff_python_literal",
@@ -1760,7 +1760,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_python_edits"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "ruff_python_ast",
  "ruff_source_file",
@@ -1769,7 +1769,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_python_formatter"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "anyhow",
  "clap",
@@ -1797,7 +1797,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_python_importer"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "anyhow",
  "ruff_diagnostics",
@@ -1810,7 +1810,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_python_index"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "ruff_python_ast",
  "ruff_python_trivia",
@@ -1820,7 +1820,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_python_literal"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "bitflags 2.13.0",
  "icu_properties",
@@ -1830,7 +1830,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_python_parser"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "bitflags 2.13.0",
  "bstr",
@@ -1851,7 +1851,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_python_semantic"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "bitflags 2.13.0",
  "is-macro",
@@ -1868,7 +1868,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_python_stdlib"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "bitflags 2.13.0",
  "unicode-ident",
@@ -1876,7 +1876,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_python_trivia"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "itertools 0.15.0",
  "ruff_source_file",
@@ -1887,7 +1887,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_ranged_value"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "ruff_db",
  "ruff_python_ast",
@@ -1898,7 +1898,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_source_file"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "get-size2",
  "memchr",
@@ -1908,7 +1908,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_text_size"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "get-size2",
  "serde",
@@ -2368,7 +2368,7 @@ dependencies = [
 
 [[package]]
 name = "ty_combine"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "ordermap",
  "ruff_db",
@@ -2378,7 +2378,7 @@ dependencies = [
 
 [[package]]
 name = "ty_module_resolver"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "anyhow",
  "camino",
@@ -2409,7 +2409,7 @@ dependencies = [
 
 [[package]]
 name = "ty_python_core"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "bitflags 2.13.0",
  "bitvec",
@@ -2437,7 +2437,7 @@ dependencies = [
 
 [[package]]
 name = "ty_python_semantic"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "bitflags 2.13.0",
  "char_str",
@@ -2455,7 +2455,9 @@ dependencies = [
  "ruff_macros",
  "ruff_memory_usage",
  "ruff_python_ast",
+ "ruff_python_codegen",
  "ruff_python_edits",
+ "ruff_python_importer",
  "ruff_python_literal",
  "ruff_python_parser",
  "ruff_python_stdlib",
@@ -2480,7 +2482,7 @@ dependencies = [
 
 [[package]]
 name = "ty_site_packages"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "camino",
  "colored",
@@ -2500,14 +2502,14 @@ dependencies = [
 
 [[package]]
 name = "ty_static"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "ruff_macros",
 ]
 
 [[package]]
 name = "ty_vendored"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "path-slash",
  "ruff_db",

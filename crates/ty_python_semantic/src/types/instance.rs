@@ -9,7 +9,7 @@ use std::marker::PhantomData;
 use super::protocol_class::{ProtocolInterface, ProtocolInterfaceView, StructuralMemberPriority};
 use super::{
     BoundTypeVarIdentity, BoundTypeVarInstance, ClassType, DivergentType, KnownClass,
-    MaterializationKind, SubclassOfType, Type, TypeAliasType, TypeVarVariance,
+    MaterializationKind, SubclassOfType, Type, TypeAliasType,
 };
 use crate::place::PlaceAndQualifiers;
 use crate::types::constraints::{
@@ -36,6 +36,7 @@ use crate::types::visitor::{
 use crate::types::{
     ApplyTypeMappingVisitor, CallableType, ClassBase, ClassLiteral, ErrorContext,
     FindLegacyTypeVarsVisitor, LiteralValueTypeKind, TypeContext, TypeMapping, VarianceInferable,
+    VarianceTerm,
 };
 use crate::{Db, FxOrderSet};
 pub(super) use synthesized_protocol::SynthesizedProtocolType;
@@ -501,9 +502,8 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         ty: Type<'db>,
         protocol: ProtocolInstanceType<'db>,
     ) -> ConstraintSet<'db, 'c> {
-        // Explicit protocol inheritance is nominal, but materializing a protocol can change
-        // the requirements represented by that same class. The nominal shortcut is therefore
-        // valid only when materialization leaves the target's members unchanged.
+        // Explicit protocol inheritance establishes subtyping even when a subclass overrides
+        // members incompatibly.
         let mut result = self.never();
         let source_protocol = ty.as_protocol_instance();
 
@@ -557,14 +557,16 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
 
             let env = self.env;
             // `result` combines nominal and structural ways to satisfy the protocol. Including the
-            // nominal constraints directly is safe when materialization leaves the required members
-            // unchanged, or when the nominal relation has no solutions to add to `result`.
+            // nominal constraints directly is safe when the target's requirements are unchanged or
+            // weakened by top materialization, and the source's requirements are unchanged. It is
+            // also safe when the nominal relation has no solutions to add to `result`.
             //
             // Check that inexpensive case first: comparing every requirement of an unrelated
             // recursive protocol can expand its interface before structural member ordering gets
             // a chance to reject an incompatible finite member.
             let can_use_nominal_result_directly = nominally_satisfied.is_never_satisfied(db, env)
-                || (!protocol.materialization_changes_requirements(db, env, protocol)
+                || ((protocol.materialization_kind(db) == Some(MaterializationKind::Top)
+                    || !protocol.materialization_changes_requirements(db, env, protocol))
                     && !source_protocol.is_some_and(|source| {
                         source.materialization_changes_requirements(db, env, protocol)
                     }));
@@ -1278,7 +1280,7 @@ impl<'db> VarianceInferable<'db> for NominalInstanceType<'db> {
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
         typevar: BoundTypeVarIdentity<'db>,
-    ) -> TypeVarVariance {
+    ) -> VarianceTerm<'db> {
         self.class(db, env).variance_of(db, env, typevar)
     }
 }
@@ -1690,7 +1692,7 @@ impl<'db> VarianceInferable<'db> for ProtocolInstanceType<'db> {
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
         typevar: BoundTypeVarIdentity<'db>,
-    ) -> TypeVarVariance {
+    ) -> VarianceTerm<'db> {
         self.inner.variance_of(db, env, typevar)
     }
 }
@@ -1763,7 +1765,7 @@ impl<'db> VarianceInferable<'db> for Protocol<'db> {
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
         typevar: BoundTypeVarIdentity<'db>,
-    ) -> TypeVarVariance {
+    ) -> VarianceTerm<'db> {
         match self {
             Protocol::FromClass(class_type) => class_type.variance_of(db, env, typevar),
             Protocol::Synthesized(synthesized_protocol_type) => {
@@ -1781,8 +1783,7 @@ mod synthesized_protocol {
     use crate::types::protocol_class::ProtocolInterface;
     use crate::types::{
         ApplyTypeMappingVisitor, BoundTypeVarIdentity, BoundTypeVarInstance,
-        FindLegacyTypeVarsVisitor, Type, TypeContext, TypeMapping, TypeVarVariance,
-        VarianceInferable,
+        FindLegacyTypeVarsVisitor, Type, TypeContext, TypeMapping, VarianceInferable, VarianceTerm,
     };
     use crate::{Db, FxOrderSet, ProgramEnvironment};
     use ty_python_core::definition::Definition;
@@ -1845,7 +1846,7 @@ mod synthesized_protocol {
             db: &'db dyn Db,
             env: &ProgramEnvironment<'db>,
             typevar: BoundTypeVarIdentity<'db>,
-        ) -> TypeVarVariance {
+        ) -> VarianceTerm<'db> {
             self.0.variance_of(db, env, typevar)
         }
     }

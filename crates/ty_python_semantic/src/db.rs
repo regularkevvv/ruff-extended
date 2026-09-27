@@ -308,6 +308,7 @@ pub(crate) mod tests {
         files: Vec<(&'a str, &'a str)>,
         /// Whether module resolution should include packages from the synthetic virtual environment.
         third_party_packages: bool,
+        rule_selection: Option<RuleSelection>,
     }
 
     impl<'a> TestDbBuilder<'a> {
@@ -318,6 +319,7 @@ pub(crate) mod tests {
                 src_roots: vec![SystemPathBuf::from("/src")],
                 files: vec![],
                 third_party_packages: false,
+                rule_selection: None,
             }
         }
 
@@ -333,6 +335,11 @@ pub(crate) mod tests {
 
         pub(crate) fn with_src_roots(mut self, src_roots: Vec<SystemPathBuf>) -> Self {
             self.src_roots = src_roots;
+            self
+        }
+
+        pub(crate) fn with_rule_selection(mut self, selection: RuleSelection) -> Self {
+            self.rule_selection = Some(selection);
             self
         }
 
@@ -356,6 +363,10 @@ pub(crate) mod tests {
 
         pub(crate) fn build(self) -> anyhow::Result<TestDb> {
             let mut db = TestDb::new();
+
+            if let Some(selection) = self.rule_selection {
+                db.rule_selection = Arc::new(selection);
+            }
 
             for src_root in &self.src_roots {
                 db.memory_file_system().create_directory_all(src_root)?;
