@@ -162,6 +162,11 @@ jobs:
       - name: Analyze shard ${{ matrix.shard }}
         env:
           SHARD: ${{ matrix.shard }}
+          # Ecosystem projects may pin `required-version` (e.g. mongo-python-driver
+          # pins `uv==0.12.12`). That pin governs uv running *inside* the project, not
+          # the uv we install project dependencies with — skip it to avoid failing on
+          # whichever pin a project happens to carry.
+          UV_NO_CONFIG: "true"
         run: |
           mkdir -p ~/.config/ty
           cp ty-ecosystem.toml ~/.config/ty/ty.toml
