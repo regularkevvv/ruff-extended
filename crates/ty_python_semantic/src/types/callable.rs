@@ -93,6 +93,9 @@ impl<'db> Type<'db> {
         }
 
         match self {
+            Type::RecursiveVar(_) => {
+                unreachable!("semantic operation on an unbound recursive variable")
+            }
             Type::Callable(callable) => Some(CallableTypes::one(callable)),
 
             Type::Dynamic(_) => Some(CallableTypes::one(CallableType::function_like(
@@ -103,6 +106,16 @@ impl<'db> Type<'db> {
                 db,
                 Signature::dynamic(self),
             ))),
+
+            Type::Recursive(recursive) => recursive.map_or_else(
+                db,
+                env,
+                || None,
+                |unfolded| {
+                    unfolded
+                        .try_upcast_to_callable_with_policy_and_context(db, env, policy, context)
+                },
+            ),
 
             Type::FunctionLiteral(function_literal)
                 if context.is_recursive_reference(db, function_literal) =>
@@ -747,6 +760,26 @@ impl<'db> CallableType<'db> {
             ),
             CallableTypeKind::ParamSpecValue,
         )
+    }
+
+    pub(crate) fn is_bottom_paramspec_value(self, db: &'db dyn Db) -> bool {
+        if self.kind(db) != CallableTypeKind::ParamSpecValue {
+            return false;
+        }
+        let [signature] = self.signatures(db).overloads.as_slice() else {
+            return false;
+        };
+        signature.parameters().is_bottom()
+    }
+
+    pub(crate) fn is_top_paramspec_value(self, db: &'db dyn Db) -> bool {
+        if self.kind(db) != CallableTypeKind::ParamSpecValue {
+            return false;
+        }
+        let [signature] = self.signatures(db).overloads.as_slice() else {
+            return false;
+        };
+        signature.parameters().is_top()
     }
 
     /// Create a callable type which accepts any parameters and returns an `Unknown` type.

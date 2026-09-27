@@ -106,7 +106,7 @@ def f(x: Any, y: Unknown, z: Any | str | int):
     e = cast(str | int | Any, z)  # error: [redundant-cast]
 ```
 
-Recursive aliases that fall back to `Divergent` should not trigger `redundant-cast`.
+A cast to the same fully static recursive alias is redundant.
 
 ```py
 from typing import cast
@@ -114,7 +114,7 @@ from typing import cast
 RecursiveAlias = list["RecursiveAlias | None"]
 
 def f(x: RecursiveAlias):
-    cast(RecursiveAlias, x)
+    cast(RecursiveAlias, x)  # error: [redundant-cast]
 ```
 
 ## Redundant casts of tuple classes with unknown elements

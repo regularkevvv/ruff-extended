@@ -853,7 +853,7 @@ fn parse_plugin_generic_type_expr<'db>(
     match origin {
         "type" | "builtins.type" | "typing.Type" if args.len() == 1 => {
             let instance = parse_plugin_type_expr(db, env, args[0], context)?;
-            SubclassOfType::try_from_instance(db, env, instance)
+            SubclassOfType::try_from_instance(db, env, instance).ok()
         }
         "Optional" | "typing.Optional" | "typing_extensions.Optional" if args.len() == 1 => {
             Some(UnionType::from_elements(
