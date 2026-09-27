@@ -233,6 +233,35 @@ fn inferable_typevars_from_tuple<'db>(
     typevars.map(|typevars| TypeVarSet::from_typevars(db, typevars))
 }
 
+/// Converts a bound from an internal `ConstraintSet` constructor to its solver representation.
+/// A bare `ParamSpec` requires parameter lists; ordinary typevars and `ParamSpec` components keep
+/// their type bounds. `None` indicates an invalid supplied bound, not an omitted endpoint.
+fn normalize_constraint_bound<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    typevar: BoundTypeVarInstance<'db>,
+    bound: Type<'db>,
+) -> Option<Type<'db>> {
+    let bound = bound.project_type_form(db, env);
+    if !typevar.is_paramspec(db) || typevar.paramspec_attr(db).is_some() {
+        return Some(bound);
+    }
+    match bound.resolve_type_alias(db) {
+        Type::Callable(callable)
+            if let [signature] = callable.signatures(db).overloads.as_slice()
+                && signature.generic_context.is_none()
+                && let Some(paramspec) = signature.parameters().as_paramspec() =>
+        {
+            Some(Type::TypeVar(paramspec))
+        }
+        Type::Callable(callable) => Some(Type::Callable(callable.into_paramspec_value(db))),
+        Type::TypeVar(bound) if bound.is_paramspec(db) && bound.paramspec_attr(db).is_none() => {
+            Some(Type::TypeVar(bound))
+        }
+        _ => None,
+    }
+}
+
 /// Priority levels for call errors in intersection types.
 /// Higher values indicate more specific errors that should take precedence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -2884,13 +2913,16 @@ impl<'db> Bindings<'db> {
                         let [Some(lower), Some(typevar)] = overload.parameter_types() else {
                             return;
                         };
-                        let lower = lower.project_type_form(db, env);
                         let typevar = typevar.project_type_form(db, env);
                         let Type::TypeVar(typevar) = typevar else {
                             return;
                         };
                         let constraints = ConstraintSetBuilder::new();
                         let result = constraints.into_owned(|constraints| {
+                            let Some(lower) = normalize_constraint_bound(db, env, typevar, *lower)
+                            else {
+                                return ConstraintSet::from_bool(constraints, false);
+                            };
                             ConstraintSet::constrain_typevar_lower_bound(
                                 db,
                                 env,
@@ -2910,12 +2942,15 @@ impl<'db> Bindings<'db> {
                             return;
                         };
                         let typevar = typevar.project_type_form(db, env);
-                        let upper = upper.project_type_form(db, env);
                         let Type::TypeVar(typevar) = typevar else {
                             return;
                         };
                         let constraints = ConstraintSetBuilder::new();
                         let result = constraints.into_owned(|constraints| {
+                            let Some(upper) = normalize_constraint_bound(db, env, typevar, *upper)
+                            else {
+                                return ConstraintSet::from_bool(constraints, false);
+                            };
                             ConstraintSet::constrain_typevar_upper_bound(
                                 db,
                                 env,
@@ -2935,12 +2970,15 @@ impl<'db> Bindings<'db> {
                             return;
                         };
                         let typevar = typevar.project_type_form(db, env);
-                        let value = value.project_type_form(db, env);
                         let Type::TypeVar(typevar) = typevar else {
                             return;
                         };
                         let constraints = ConstraintSetBuilder::new();
                         let result = constraints.into_owned(|constraints| {
+                            let Some(value) = normalize_constraint_bound(db, env, typevar, *value)
+                            else {
+                                return ConstraintSet::from_bool(constraints, false);
+                            };
                             ConstraintSet::constrain_typevar(
                                 db,
                                 env,
@@ -2961,14 +2999,18 @@ impl<'db> Bindings<'db> {
                         else {
                             return;
                         };
-                        let lower = lower.project_type_form(db, env);
                         let typevar = typevar.project_type_form(db, env);
-                        let upper = upper.project_type_form(db, env);
                         let Type::TypeVar(typevar) = typevar else {
                             return;
                         };
                         let constraints = ConstraintSetBuilder::new();
                         let result = constraints.into_owned(|constraints| {
+                            let (Some(lower), Some(upper)) = (
+                                normalize_constraint_bound(db, env, typevar, *lower),
+                                normalize_constraint_bound(db, env, typevar, *upper),
+                            ) else {
+                                return ConstraintSet::from_bool(constraints, false);
+                            };
                             ConstraintSet::constrain_typevar(
                                 db,
                                 env,
@@ -4508,6 +4550,9 @@ impl<'db> CallableBinding<'db> {
         &self,
         db: &'db dyn Db,
     ) -> impl Iterator<Item = OverloadLiteral<'db>> + Clone {
+        if let Type::Callable(callable) = self.signature_type {
+            return Either::Left(callable.deprecated(db).into_iter());
+        }
         let function = match self.signature_type {
             Type::FunctionLiteral(function) => Some(function),
             Type::BoundMethod(bound) => Some(bound.function(db)),
@@ -4519,7 +4564,7 @@ impl<'db> CallableBinding<'db> {
         if let Some(implementation) =
             implementation.filter(|function| function.deprecated(db).is_some())
         {
-            return Either::Left(std::iter::once(implementation));
+            return Either::Left(Some(implementation).into_iter());
         }
 
         Either::Right(self.selected_overloads().filter_map(move |(_, binding)| {
@@ -5792,7 +5837,7 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
                             .unwrap_or_else(|| parameter.annotated_type());
                         let argument_type = matched_parameter
                             .argument_type
-                            .unwrap_or_else(|| argument_types.get_for_declared_type(declared_type));
+                            .or_else(|| argument_types.try_get_for_declared_type(declared_type))?;
 
                         Some(ArgumentRelation::new(
                             argument_index,
@@ -6065,21 +6110,20 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
                         }
 
                         // Filter out inferable typevars (cross-typevar references from
-                        // SequentMap transitivity) and unspecialized typevars (from partially
-                        // specialized contexts).
+                        // SequentMap transitivity) and provisional markers.
                         let inferred_ty = builder
                             .remove_inferable_typevar_artifacts_from_solution(
                                 binding.bound_typevar,
                                 binding.solution,
                             )
                             .filter_union(db, self.env, |ty| {
-                                if ty.has_unspecialized_type_var(db, self.env) {
+                                if ty.has_provisional_marker(db, self.env) {
                                     partially_specialized_declared_type.insert(identity);
                                     return false;
                                 }
                                 true
                             });
-                        if inferred_ty.has_unspecialized_type_var(db, self.env) {
+                        if inferred_ty.has_provisional_marker(db, self.env) {
                             continue;
                         }
 
@@ -6219,7 +6263,7 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
             let preferred_ty = preferred_type_mappings.get(&typevar.identity(db)).copied();
 
             if let Some(bounds) = bounds {
-                let lower = bounds.evidence_lower?;
+                let lower = bounds.evidence_lower()?;
                 if preferred_ty.is_none_or(|ty| !lower.is_assignable_to(db, self.env, ty)) {
                     return maybe_promote(typevar, bounds);
                 }
@@ -6407,6 +6451,7 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
                             && !self.signature.parameters()[matched.index]
                                 .annotated_type()
                                 .variance_of(db, self.env, typevartuple.identity(db))
+                                .evaluate(db)
                                 .is_covariant()
                     })
             })
@@ -7744,8 +7789,10 @@ impl<'db> Binding<'db> {
             .ok()
     }
 
-    /// Returns the type context to use for bidirectional inference of a source call argument,
-    /// using the provided argument specialization.
+    /// Returns the type context to use for bidirectional inference of a source call argument.
+    ///
+    /// Request the shared argument specialization only when this parameter needs it. Unmatched
+    /// arguments and parameters that use their type variable's upper bound do not need one.
     ///
     /// This method also handles `ParamSpec` forwarding, where a wrapper argument receives context
     /// from the wrapped callable's parameter.
@@ -7765,7 +7812,7 @@ impl<'db> Binding<'db> {
         arguments_types: &CallArguments<'_, 'db>,
         argument_index: usize,
         call_expression_tcx: TypeContext<'db>,
-        specialization: Option<Specialization<'db>>,
+        specialization: impl Fn() -> Option<Specialization<'db>>,
     ) -> Option<ArgumentTypeContext<'db>> {
         let argument_matches = self.matched_argument_for_call_argument(binding, argument_index)?;
         let [matched_parameter] = argument_matches.parameters.as_slice() else {
@@ -7782,7 +7829,7 @@ impl<'db> Binding<'db> {
                 .merged_specialization(db)
                 .and_then(|specialization| specialization.get(db, paramspec))
                 .or_else(|| {
-                    specialization.and_then(|specialization| specialization.get(db, paramspec))
+                    specialization().and_then(|specialization| specialization.get(db, paramspec))
                 })?
             else {
                 return None;
@@ -7839,7 +7886,7 @@ impl<'db> Binding<'db> {
                 ));
             }
 
-            parameter_type = parameter_type.apply_optional_specialization(db, specialization);
+            parameter_type = parameter_type.apply_optional_specialization(db, specialization());
             if let Some(expected_return_ty) = call_expression_tcx.annotation
                 && let Some(expected) = self.typevartuple_argument_context(
                     db,
@@ -7911,6 +7958,15 @@ impl<'db> Binding<'db> {
             }
         }
 
+        // The marker distinguishes unsolved type variables without defaults from gradual types
+        // inferred from arguments. Only the former are ignored during fixpoint iteration.
+        let argument_specialization = self.inference.map(|inference| {
+            inference.merged_specialization_with(db, |typevar, inferred| {
+                (inferred.is_none() && typevar.default_type(db).is_none())
+                    .then_some(Type::Dynamic(DynamicType::UnspecializedTypeVar))
+            })
+        });
+
         // TODO: Note that specializing parameter types for type context using this specialization is
         // not strictly correct, as it requires eagerly choosing a solution for a given type variable,
         // which may conflate upper and lower bounds when applied transitively to parameter types
@@ -7924,10 +7980,9 @@ impl<'db> Binding<'db> {
                 let identity = typevar.identity(db);
 
                 let call_expression_constraints = return_type_solutions.get(&identity).copied();
-                let argument_constraints = self
-                    .merged_specialization(db)
+                let argument_constraints = argument_specialization
                     .and_then(|specialization| specialization.get(db, typevar))
-                    .filter(|ty| !ty.has_dynamic(db, env))
+                    .filter(|ty| !ty.has_provisional_marker(db, env))
                     .map(|ty| ty.promote(db, env));
 
                 // TODO: We should similarly combine both the call expression and argument constraints
@@ -8538,7 +8593,10 @@ impl<'db> CallableDescription<'db> {
         }
     }
 
-    fn defining_class(db: &'db dyn Db, callable_type: Type<'db>) -> Option<ClassLiteral<'db>> {
+    pub(crate) fn defining_class(
+        db: &'db dyn Db,
+        callable_type: Type<'db>,
+    ) -> Option<ClassLiteral<'db>> {
         let function = match callable_type {
             Type::FunctionLiteral(function) => function,
             Type::BoundMethod(method) => method.function(db),

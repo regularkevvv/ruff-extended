@@ -13,9 +13,8 @@ use crate::types::class::ClassType;
 use crate::types::class_base::ClassBase;
 use crate::types::constraints::projection::{ProjectionError, SolutionBudget, SolutionProjection};
 use crate::types::constraints::{
-    ConstraintBound, ConstraintBounds, ConstraintSet, ConstraintSetBuilder,
-    IteratorConstraintsExtension, PathBound, PathBoundSolution, PathBounds, SolutionPaths,
-    Solutions, TypeVarSolution,
+    Constraint, ConstraintSet, ConstraintSetBuilder, IteratorConstraintsExtension, PathBound,
+    PathBoundSolution, PathBounds, SolutionPaths, Solutions, TypeVarSolution,
 };
 use crate::types::infer::original_class_type;
 use crate::types::relation::{
@@ -730,7 +729,7 @@ impl<'db> GenericContext<'db> {
                         );
                         let signatures =
                             signatures.with_inherited_generic_context(db, generic_context);
-                        let replacement = CallableType::new(db, signatures, callable.kind(db));
+                        let replacement = callable.with_signatures(db, signatures);
 
                         Some((callable, replacement))
                     })
@@ -1069,46 +1068,39 @@ impl<'db> GenericContext<'db> {
         // class C[T, U = T]: ...
         // ```
         //
-        // If there is a mapping for `T`, we want to map `U` to that type, not to `T`. To handle
-        // this, we repeatedly apply the specialization to itself, until we reach a fixed point.
+        // If there is a mapping for `T`, we want to map `U` to that type, not to `T`.
+        // Fill each argument in order so defaults can use the preceding arguments.
         let mut expanded = Vec::with_capacity(types.len());
-        for typevar in variables.clone() {
-            expanded.push(match typevar.kind(db) {
-                TypeVarKind::LegacyTypeVarTuple | TypeVarKind::Pep695TypeVarTuple => {
-                    Type::homogeneous_tuple(db, &env, Type::unknown())
+        for (ty, typevar) in types.zip(variables) {
+            let ty = if let Some(ty) = ty {
+                ty
+            } else if let Some(default) = typevar.default_type(db) {
+                // Typevars are only allowed to refer to earlier typevars in their defaults.
+                // This is statically enforced for PEP 695 contexts, and explicitly required
+                // for legacy contexts.
+                let specialization = ApplySpecialization::Partial {
+                    generic_context: self,
+                    types: &expanded,
+                    skip: None,
+                };
+                default.apply_type_mapping(
+                    db,
+                    &env,
+                    &TypeMapping::ApplySpecialization(specialization),
+                    TypeContext::default(),
+                )
+            } else {
+                match typevar.kind(db) {
+                    TypeVarKind::LegacyTypeVarTuple | TypeVarKind::Pep695TypeVarTuple => {
+                        Type::homogeneous_tuple(db, &env, Type::unknown())
+                    }
+                    TypeVarKind::LegacyParamSpec | TypeVarKind::Pep695ParamSpec => {
+                        Type::paramspec_value_callable(db, Parameters::unknown())
+                    }
+                    _ => Type::unknown(),
                 }
-                TypeVarKind::LegacyParamSpec | TypeVarKind::Pep695ParamSpec => {
-                    Type::paramspec_value_callable(db, Parameters::unknown())
-                }
-                _ => Type::unknown(),
-            });
-        }
-
-        for (idx, (ty, typevar)) in types.zip(variables).enumerate() {
-            if let Some(ty) = ty {
-                expanded[idx] = ty;
-                continue;
-            }
-
-            let Some(default) = typevar.default_type(db) else {
-                continue;
             };
-
-            // Typevars are only allowed to refer to _earlier_ typevars in their defaults. (This is
-            // statically enforced for PEP-695 contexts, and is explicitly called out as a
-            // requirement for legacy contexts.)
-            let specialization = ApplySpecialization::Partial {
-                generic_context: self,
-                types: &expanded[0..idx],
-                skip: None,
-            };
-            let default = default.apply_type_mapping(
-                db,
-                &env,
-                &TypeMapping::ApplySpecialization(specialization),
-                TypeContext::default(),
-            );
-            expanded[idx] = default;
+            expanded.push(ty);
         }
 
         expanded.into_boxed_slice()
@@ -2267,6 +2259,11 @@ pub enum ApplySpecialization<'a, 'db> {
     /// Maps a single typevar to a concrete type. Used by the constraint set's sequent map to
     /// substitute a typevar nested inside another constraint's bound.
     Single(BoundTypeVarInstance<'db>, Type<'db>),
+    /// Overrides the given type variables in an existing specialization mapping.
+    WithBindings {
+        specialization: &'a ApplySpecialization<'a, 'db>,
+        bindings: &'a [(BoundTypeVarInstance<'db>, Type<'db>)],
+    },
 }
 
 impl<'db> ApplySpecialization<'_, 'db> {
@@ -2283,6 +2280,16 @@ impl<'db> ApplySpecialization<'_, 'db> {
                 specialize_self_domain,
                 ..
             } => specialize_self_domain,
+            Self::WithBindings { specialization, .. } => specialization.specialize_self_domain(),
+            _ => false,
+        }
+    }
+
+    /// Returns `true` if this mapping should leave unevaluated function signatures unchanged.
+    pub(super) fn preserves_lazy_signatures(self) -> bool {
+        match self {
+            Self::ReturnCallables(_) | Self::TypeAlias(_) => true,
+            Self::WithBindings { specialization, .. } => specialization.preserves_lazy_signatures(),
             _ => false,
         }
     }
@@ -2322,6 +2329,14 @@ impl<'db> ApplySpecialization<'_, 'db> {
                     None
                 }
             }
+            ApplySpecialization::WithBindings {
+                specialization,
+                bindings,
+            } => bindings
+                .iter()
+                .find(|(typevar, _)| bound_typevar.is_same_typevar_as(db, *typevar))
+                .map(|(_, ty)| *ty)
+                .or_else(|| specialization.get(db, bound_typevar)),
         }
     }
 
@@ -2355,6 +2370,25 @@ impl<'db> ApplySpecialization<'_, 'db> {
                 ),
             ),
             ApplySpecialization::ReturnCallables(_) | ApplySpecialization::Single(_, _) => None,
+            ApplySpecialization::WithBindings {
+                specialization,
+                bindings,
+            } => {
+                let specialization = specialization.as_specialization(db)?;
+                let types = specialization.map_types(db, |_, variable, original| {
+                    bindings
+                        .iter()
+                        .find(|(typevar, _)| variable.is_same_typevar_as(db, *typevar))
+                        .map_or(original, |(_, ty)| *ty)
+                });
+                Some(Specialization::new(
+                    db,
+                    specialization.generic_context(db),
+                    types,
+                    specialization.materialization_kind(db),
+                    specialization.tuple_inner(db),
+                ))
+            }
         }
     }
 }
@@ -3060,6 +3094,11 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
         identity: BoundTypeVarIdentity<'db>,
         ty: Type<'db>,
     ) -> bool {
+        // Self references are not followed, so a cycle needs at least two pending mappings.
+        if types.len() <= 1 {
+            return false;
+        }
+
         let db = self.db;
         match ty {
             // A bare `T = U` edge only replaces one typevar with another; it does not wrap the
@@ -3290,25 +3329,15 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
         }
     }
 
-    fn intersect_pending_typevar_constraint(
-        &mut self,
-        bound_typevar: BoundTypeVarInstance<'db>,
-        bounds: ConstraintBounds<'db>,
-    ) {
+    fn intersect_pending_typevar_constraint(&mut self, constraint: Constraint<'db>) {
         let db = self.db;
+        let bound_typevar = constraint.typevar();
         let identity = bound_typevar.identity(db);
         if bound_typevar.is_paramspec(db) && !self.paramspec_seen.insert(identity) {
             return;
         }
 
-        let constraint = ConstraintSet::constrain_typevar_with_bounds(
-            db,
-            self.env,
-            self.constraints,
-            bound_typevar,
-            bounds.lower,
-            bounds.upper,
-        );
+        let constraint = ConstraintSet::from_constraint(db, self.env, self.constraints, constraint);
         self.pending.intersect(db, self.constraints, constraint);
     }
 
@@ -3348,17 +3377,15 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
         ty: Type<'db>,
         variance: TypeVarVariance,
     ) {
-        let bounds = match variance {
-            TypeVarVariance::Covariant => {
-                ConstraintBounds::new(Some(ConstraintBound::Evidence(ty)), None)
-            }
+        let constraint = match variance {
+            TypeVarVariance::Covariant => Constraint::from_evidence(bound_typevar, Some(ty), None),
             TypeVarVariance::Contravariant => {
-                ConstraintBounds::new(None, Some(ConstraintBound::Evidence(ty)))
+                Constraint::from_evidence(bound_typevar, None, Some(ty))
             }
-            TypeVarVariance::Invariant => ConstraintBounds::exact(ty),
+            TypeVarVariance::Invariant => Constraint::exact(bound_typevar, ty),
             TypeVarVariance::Bivariant => return,
         };
-        self.intersect_pending_typevar_constraint(bound_typevar, bounds);
+        self.intersect_pending_typevar_constraint(constraint);
     }
 
     /// Solves one relation without recording it or changing the legacy type mappings.
@@ -3431,7 +3458,7 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
     ) -> Option<ConstraintFailure<'db>> {
         let db = self.db;
         let bound_typevar = path_bound.bound_typevar;
-        let argument = path_bound.evidence_lower?;
+        let argument = path_bound.evidence_lower()?;
         let variance = if path_bound.has_upper_evidence() {
             ConstraintFailureVariance::Invariant
         } else {
@@ -3979,18 +4006,27 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
                 );
             }
             (Type::Union(union_formal), _) => {
-                // If the formal is a union and the actual is a bare inferable TypeVar in an
-                // invariant position, record the whole union as the mapping. Invariant matching is
-                // equality-like; probing individual union elements below can leave spurious
-                // partial mappings from non-matching elements. For example, while comparing
-                // `ClassSelector[T]` with `ClassSelector[CT | None]`, descending into `None`
-                // would map `T` to `None` before `CT` is solved from another argument.
                 if let Type::TypeVar(actual_typevar) = actual
                     && actual_typevar.is_inferable(db, self.inferable)
-                    && matches!(polarity, TypeVarVariance::Invariant)
                 {
-                    self.add_type_mapping(actual_typevar, formal, polarity);
-                    return Ok(());
+                    let has_variadic = self
+                        .inferable
+                        .iter(db)
+                        .any(|typevar| typevar.is_paramspec(db) || typevar.is_typevartuple(db));
+                    if has_variadic {
+                        // TODO:
+                        // Variadic contexts still solve from legacy mappings. Projecting the relation
+                        // here can choose a narrow TypeVar constraint before later arguments supply
+                        // evidence for another, such as `str | None` instead of `Any`. Preserve the
+                        // legacy union heuristics, including the whole-union mapping for invariance.
+                        if matches!(polarity, TypeVarVariance::Invariant) {
+                            self.add_type_mapping(actual_typevar, formal, polarity);
+                            return Ok(());
+                        }
+                    } else {
+                        let when = self.constraint_for_relation(formal, actual, relation_polarity);
+                        return self.infer_from_constraint_set(when);
+                    }
                 }
 
                 // Second, if the formal is a union, and the actual type is assignable to precisely
@@ -4711,7 +4747,7 @@ mod tests {
                 let inference = builder
                     .build_inference_with(|typevar, bounds| {
                         (typevar == t
-                            && bounds.is_some_and(|bound| bound.evidence_lower == Some(str)))
+                            && bounds.is_some_and(|bound| bound.evidence_lower() == Some(str)))
                         .then_some(PathBoundSolution::BudgetExceeded { fallback })
                     })
                     .map_err(|()| anyhow::anyhow!("incomplete alternatives remain satisfiable"))?;
@@ -4979,7 +5015,7 @@ mod tests {
 
         let inference = builder
             .build_inference_with(|typevar, bounds| {
-                (typevar == t && bounds.is_some_and(|bound| bound.evidence_lower == Some(str)))
+                (typevar == t && bounds.is_some_and(|bound| bound.evidence_lower() == Some(str)))
                     .then_some(PathBoundSolution::Solved(Type::TypeVar(u)))
             })
             .map_err(|()| anyhow::anyhow!("expected satisfiable alternatives"))?;
@@ -5025,7 +5061,7 @@ mod tests {
         // individual path still contains the cycle after merging with object.
         let inference = builder
             .build_inference_with(|typevar, bounds| {
-                let ty = match (typevar, bounds?.evidence_lower) {
+                let ty = match (typevar, bounds?.evidence_lower()) {
                     (typevar, Some(lower)) if typevar == t && lower == int => list_of_u,
                     (typevar, Some(lower)) if typevar == u && lower == str => Type::TypeVar(t),
                     _ => Type::object(),
