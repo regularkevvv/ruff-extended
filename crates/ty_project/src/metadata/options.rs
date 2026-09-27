@@ -21,7 +21,7 @@ use ruff_db::files::system_path_to_file;
 use ruff_db::system::{System, SystemPath, SystemPathBuf};
 use ruff_db::vendored::VendoredFileSystem;
 use ruff_macros::{Combine, OptionsMetadata, RustDoc};
-use ruff_options_metadata::{OptionSet, OptionsMetadata, Visit};
+use ruff_options_metadata::{OptionSet, OptionSetKind, OptionsMetadata, Visit};
 use ruff_python_ast::PythonVersion;
 use ruff_ranged_value::{RangedValue, ValueSource, ValueSourceGuard};
 use ruff_text_size::TextRange;
@@ -3396,6 +3396,12 @@ pub struct OverridesOptions(Vec<RangedValue<OverrideOptions>>);
 impl OptionsMetadata for OverridesOptions {
     fn documentation() -> Option<&'static str> {
         Some(<Self as RustDoc>::rust_doc())
+    }
+
+    fn kind() -> OptionSetKind {
+        OptionSetKind::Array {
+            example: r#"include = ["src"]"#,
+        }
     }
 
     fn record(visit: &mut dyn Visit) {
