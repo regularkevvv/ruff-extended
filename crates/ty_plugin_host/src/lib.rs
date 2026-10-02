@@ -9,6 +9,7 @@ use thiserror::Error;
 use ty_plugin_protocol::{
     AttributeClaimKind, AttributeScope, CURRENT_PROTOCOL_VERSION, ClassClaimKind, MethodClaimKind,
     PluginManifest, PluginRequest, PluginResponse, ProtocolCompatibility, RuntimeSpec,
+    method_name_pattern_matches,
 };
 
 #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
@@ -184,6 +185,10 @@ pub struct RouteTable {
     call_returns: BTreeMap<String, Vec<String>>,
     call_signature_methods_on_subclass: BTreeMap<MethodRouteKey, Vec<String>>,
     call_return_methods_on_subclass: BTreeMap<MethodRouteKey, Vec<String>>,
+    /// Pattern method claims can't be keyed by an exact method name, so they're stored per
+    /// owner base as `(method_name_pattern, plugin_id)` pairs and filtered at lookup.
+    call_signature_method_patterns_on_subclass: BTreeMap<String, Vec<MethodPatternRoute>>,
+    call_return_method_patterns_on_subclass: BTreeMap<String, Vec<MethodPatternRoute>>,
     dependency_plugins: Vec<String>,
     project_index_plugins: Vec<String>,
     settings_plugins: BTreeMap<String, Vec<String>>,
@@ -318,6 +323,19 @@ impl RouteTable {
                                 .or_default()
                                 .push(plugin_id.clone());
                         }
+                        MethodClaimKind::OnSubclassOfMatching {
+                            base_qualified_name,
+                            method_name_pattern,
+                        } => {
+                            routes
+                                .call_signature_method_patterns_on_subclass
+                                .entry(base_qualified_name.clone())
+                                .or_default()
+                                .push(MethodPatternRoute::new(
+                                    method_name_pattern,
+                                    plugin_id.clone(),
+                                ));
+                        }
                     }
                 }
             }
@@ -351,6 +369,19 @@ impl RouteTable {
                                 .entry(MethodRouteKey::new(base_qualified_name, method_name))
                                 .or_default()
                                 .push(plugin_id.clone());
+                        }
+                        MethodClaimKind::OnSubclassOfMatching {
+                            base_qualified_name,
+                            method_name_pattern,
+                        } => {
+                            routes
+                                .call_return_method_patterns_on_subclass
+                                .entry(base_qualified_name.clone())
+                                .or_default()
+                                .push(MethodPatternRoute::new(
+                                    method_name_pattern,
+                                    plugin_id.clone(),
+                                ));
                         }
                     }
                 }
@@ -486,6 +517,32 @@ impl RouteTable {
             .map_or(&[], Vec::as_slice)
     }
 
+    /// Plugins whose `on-subclass-of-matching` claims select `method_name` on subclasses of
+    /// `base_qualified_name`. Pattern routes filter at lookup, so this allocates.
+    pub fn call_signature_method_on_subclass_pattern_plugins(
+        &self,
+        base_qualified_name: &str,
+        method_name: &str,
+    ) -> Vec<&str> {
+        matching_method_pattern_plugins(
+            &self.call_signature_method_patterns_on_subclass,
+            base_qualified_name,
+            method_name,
+        )
+    }
+
+    pub fn call_return_method_on_subclass_pattern_plugins(
+        &self,
+        base_qualified_name: &str,
+        method_name: &str,
+    ) -> Vec<&str> {
+        matching_method_pattern_plugins(
+            &self.call_return_method_patterns_on_subclass,
+            base_qualified_name,
+            method_name,
+        )
+    }
+
     pub fn dependency_plugins(&self) -> &[String] {
         &self.dependency_plugins
     }
@@ -536,6 +593,39 @@ impl MethodRouteKey {
             method_name: method_name.to_string(),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct MethodPatternRoute {
+    method_name_pattern: String,
+    plugin_id: String,
+}
+
+impl MethodPatternRoute {
+    fn new(method_name_pattern: &str, plugin_id: String) -> Self {
+        Self {
+            method_name_pattern: method_name_pattern.to_string(),
+            plugin_id,
+        }
+    }
+}
+
+fn matching_method_pattern_plugins<'a>(
+    routes: &'a BTreeMap<String, Vec<MethodPatternRoute>>,
+    base_qualified_name: &str,
+    method_name: &str,
+) -> Vec<&'a str> {
+    routes
+        .get(base_qualified_name)
+        .map_or_else(Vec::new, |routes| {
+            routes
+                .iter()
+                .filter(|route| {
+                    method_name_pattern_matches(&route.method_name_pattern, method_name)
+                })
+                .map(|route| route.plugin_id.as_str())
+                .collect()
+        })
 }
 
 impl MemberRouteKey {

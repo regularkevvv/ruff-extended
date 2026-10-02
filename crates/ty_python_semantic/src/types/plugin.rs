@@ -16,7 +16,9 @@ use ruff_text_size::{Ranged, TextRange};
 use ty_module_resolver::{ModuleName, all_modules, file_to_module, resolve_module_confident};
 use ty_plugin_protocol as protocol;
 use ty_python_core::global_scope;
-use ty_python_core::program::{SemanticPlugin, SemanticPluginRuntime, SemanticPlugins};
+use ty_python_core::program::{
+    SemanticPlugin, SemanticPluginMethodNameMatcher, SemanticPluginRuntime, SemanticPlugins,
+};
 use ty_python_core::scope::ScopeId;
 
 use crate::place::imported_symbol;
@@ -1564,7 +1566,15 @@ fn matching_call_plugin<'a, 'db>(
         };
 
         method_claims.iter().any(|claim| {
-            callee.method_name() == Some(claim.method_name())
+            let name_matches = match claim.method_name_matcher() {
+                SemanticPluginMethodNameMatcher::Exact(method_name) => {
+                    callee.method_name() == Some(method_name.as_str())
+                }
+                SemanticPluginMethodNameMatcher::Pattern(pattern) => callee
+                    .method_name()
+                    .is_some_and(|name| protocol::method_name_pattern_matches(pattern, name)),
+            };
+            name_matches
                 && callee_receiver_is_subclass_of(db, env, callee, claim.base_qualified_name())
         })
     })

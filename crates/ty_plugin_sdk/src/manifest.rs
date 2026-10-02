@@ -247,6 +247,26 @@ impl ManifestBuilder {
         self
     }
 
+    /// Claim method calls on subclasses of a base class whose names match `method_name_pattern`
+    /// for the `call-signature` hook. `*` matches any run of characters, so `"*"` claims every
+    /// method and `"run_*"` claims a prefix family without enumerating names.
+    #[must_use]
+    pub fn claim_call_signature_methods_on_subclass_matching(
+        mut self,
+        base_qualified_name: impl Into<String>,
+        method_name_pattern: impl Into<String>,
+    ) -> Self {
+        self.manifest.capabilities.call_signature = true;
+        self.manifest
+            .claims
+            .methods
+            .push(MethodClaim::on_subclass_of_matching(
+                base_qualified_name,
+                method_name_pattern,
+            ));
+        self
+    }
+
     /// Claim a method for the `call-return` hook and enable the capability.
     #[must_use]
     pub fn claim_call_return_method(
@@ -276,6 +296,26 @@ impl ManifestBuilder {
             .push(MethodClaim::on_subclass_of(
                 base_qualified_name,
                 method_name,
+            ));
+        self
+    }
+
+    /// Claim method calls on subclasses of a base class whose names match `method_name_pattern`
+    /// for the `call-return` hook. `*` matches any run of characters, so `"*"` claims every
+    /// method and `"run_*"` claims a prefix family without enumerating names.
+    #[must_use]
+    pub fn claim_call_return_methods_on_subclass_matching(
+        mut self,
+        base_qualified_name: impl Into<String>,
+        method_name_pattern: impl Into<String>,
+    ) -> Self {
+        self.manifest.capabilities.call_return = true;
+        self.manifest
+            .claims
+            .methods
+            .push(MethodClaim::on_subclass_of_matching(
+                base_qualified_name,
+                method_name_pattern,
             ));
         self
     }

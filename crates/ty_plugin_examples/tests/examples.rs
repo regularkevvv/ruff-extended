@@ -496,6 +496,7 @@ fn minidjango_project_index_contributes_reverse_relation_members() {
         classes: vec![author, book],
         settings: Vec::new(),
         assignments: Vec::new(),
+        functions: Vec::new(),
         previous_index_fingerprint: None,
     };
 
@@ -603,6 +604,7 @@ fn minidjango_project_index_reports_relation_target_and_reverse_conflicts() {
         classes: vec![author, book],
         settings: Vec::new(),
         assignments: Vec::new(),
+        functions: Vec::new(),
         previous_index_fingerprint: None,
     };
 
@@ -663,6 +665,7 @@ fn minidjango_resolves_auth_user_model_from_settings_data() {
             "accounts.User",
         )],
         assignments: Vec::new(),
+        functions: Vec::new(),
         previous_index_fingerprint: None,
     };
 
@@ -768,6 +771,7 @@ fn minidjango_resolves_string_and_self_foreign_key_targets() {
         classes: vec![author, book_request.class],
         settings: Vec::new(),
         assignments: Vec::new(),
+        functions: Vec::new(),
         previous_index_fingerprint: None,
     };
 
@@ -943,6 +947,7 @@ fn minidjango_handles_defensive_request_shapes() {
         classes: vec![unrelated_class, author, user, book],
         settings: vec![mixed_settings_module()],
         assignments: Vec::new(),
+        functions: Vec::new(),
         previous_index_fingerprint: None,
     };
     let PluginResponse::ProjectIndex(index) = plugin.build_project_index(&request) else {

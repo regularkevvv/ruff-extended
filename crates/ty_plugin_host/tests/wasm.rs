@@ -154,6 +154,7 @@ fn minidjango_project_index_request() -> PluginRequest {
         ],
         settings: Vec::new(),
         assignments: Vec::new(),
+        functions: Vec::new(),
         previous_index_fingerprint: None,
     })
 }

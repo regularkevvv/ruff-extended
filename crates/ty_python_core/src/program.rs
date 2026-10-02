@@ -343,10 +343,21 @@ impl SemanticPluginMemberClaim {
     }
 }
 
+/// How a subclass method claim selects the methods it applies to.
+///
+/// `Pattern` is the semantic mirror of the protocol's `on-subclass-of-matching` claim kind;
+/// matching uses the protocol's `*` glob, so `Pattern("*")` claims every method on subclasses
+/// of the base.
+#[derive(Clone, Debug, Eq, PartialEq, get_size2::GetSize)]
+pub enum SemanticPluginMethodNameMatcher {
+    Exact(String),
+    Pattern(String),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, get_size2::GetSize)]
 pub struct SemanticPluginMethodClaim {
     base_qualified_name: String,
-    method_name: String,
+    method_name_matcher: SemanticPluginMethodNameMatcher,
 }
 
 impl SemanticPluginMethodClaim {
@@ -356,7 +367,19 @@ impl SemanticPluginMethodClaim {
     ) -> Self {
         Self {
             base_qualified_name: base_qualified_name.into(),
-            method_name: method_name.into(),
+            method_name_matcher: SemanticPluginMethodNameMatcher::Exact(method_name.into()),
+        }
+    }
+
+    pub fn on_subclass_of_matching(
+        base_qualified_name: impl Into<String>,
+        method_name_pattern: impl Into<String>,
+    ) -> Self {
+        Self {
+            base_qualified_name: base_qualified_name.into(),
+            method_name_matcher: SemanticPluginMethodNameMatcher::Pattern(
+                method_name_pattern.into(),
+            ),
         }
     }
 
@@ -364,8 +387,8 @@ impl SemanticPluginMethodClaim {
         &self.base_qualified_name
     }
 
-    pub fn method_name(&self) -> &str {
-        &self.method_name
+    pub fn method_name_matcher(&self) -> &SemanticPluginMethodNameMatcher {
+        &self.method_name_matcher
     }
 }
 
