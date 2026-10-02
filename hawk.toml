@@ -424,14 +424,6 @@ reason = "downstream parser clients retain borrowed result conversion"
 
 [[override]]
 lint = "hawk::dead_public"
-crate = "ruff_python_parser"
-item = "Parsed::<ruff_python_ast::ModExpression>::into_expr"
-kind = "inherent_method"
-level = "expect"
-reason = "parsed expressions retain borrowed and consuming accessors"
-
-[[override]]
-lint = "hawk::dead_public"
 crate = "ruff_python_semantic"
 item = "binding::Binding::<'a>::is_deleted"
 kind = "inherent_method"
@@ -1216,6 +1208,57 @@ item = "all_symbols"
 kind = "reexport"
 level = "expect"
 reason = "the public auto-import API re-exports its query function"
+
+# Keep the plugin host's route-table accessors available to its integration
+# tests, which link against the crate's public API.
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "ty_plugin_host"
+item = "LoadedPlugin::runtime"
+kind = "inherent_method"
+level = "expect"
+reason = "integration tests read the plugin runtime through this accessor"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "ty_plugin_host"
+item = "RouteTable::call_signature_plugins"
+kind = "inherent_method"
+level = "expect"
+reason = "integration tests exercise route-table lookups through this accessor"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "ty_plugin_host"
+item = "RouteTable::call_signature_method_on_subclass_plugins"
+kind = "inherent_method"
+level = "allow"
+reason = "integration tests exercise route-table lookups through this accessor; reachability depends on which routing tests are present"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "ty_plugin_host"
+item = "RouteTable::class_contribution_target_plugins"
+kind = "inherent_method"
+level = "expect"
+reason = "integration tests exercise route-table lookups through this accessor"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "ty_plugin_host"
+item = "RouteTable::class_member_plugins"
+kind = "inherent_method"
+level = "expect"
+reason = "integration tests exercise route-table lookups through this accessor"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "ty_plugin_host"
+item = "RouteTable::dependency_plugins"
+kind = "inherent_method"
+level = "expect"
+reason = "integration tests exercise route-table lookups through this accessor"
 
 # Keep the generated AST and its hand-written companion APIs consistent across
 # node types, visitors, and string literal kinds.

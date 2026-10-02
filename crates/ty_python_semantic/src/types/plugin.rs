@@ -60,7 +60,7 @@ pub(crate) fn plugin_file_path(db: &dyn Db, file: File) -> String {
 /// Upstream resolves a program per file, so plugin entry points build their environment from
 /// whatever they are anchored to — a file, class, or scope — and pass it down. Nothing in this
 /// module reaches for a global program, because there is no longer one to reach for.
-pub(crate) fn plugin_program_environment(db: &dyn Db, file: File) -> ProgramEnvironment<'_> {
+fn plugin_program_environment(db: &dyn Db, file: File) -> ProgramEnvironment<'_> {
     ProgramEnvironment::from_file(db.program_file(file))
 }
 
@@ -278,7 +278,7 @@ fn plugin_type_snapshot_metadata_from_type(
 /// This deliberately supports only a conservative subset of the MVP type-expression grammar
 /// (fully qualified builtins). Anything outside that subset resolves to `Unknown` rather than
 /// panicking, matching the protocol rule that invalid type expressions must not crash the host.
-pub(crate) fn plugin_type_expr_to_type<'db>(
+fn plugin_type_expr_to_type<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
     type_expr: &protocol::TypeExpr,

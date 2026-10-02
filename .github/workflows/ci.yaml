@@ -367,7 +367,12 @@ jobs:
           curl --proto '=https' --tlsv1.2 -LsSf \
             "https://github.com/astral-sh/hawk/releases/download/${HAWK_VERSION}/cargo-hawk-installer.sh" | sh
       - name: "Hawk"
-        run: cargo +1.98.0 hawk check --target-dir target/hawk -D warnings
+        # Fork addition: `ty_plugin_protocol` and `ty_plugin_sdk` are the crates
+        # this fork publishes for plugin authors (see `cargo-publish-dry-run`),
+        # so their public API is consumed outside the closed-world analysis.
+        run: >
+          cargo +1.98.0 hawk check --target-dir target/hawk -D warnings
+          --exclude-crate ty_plugin_protocol --exclude-crate ty_plugin_sdk
 
   cargo-publish-dry-run:
     name: "cargo publish dry-run"
