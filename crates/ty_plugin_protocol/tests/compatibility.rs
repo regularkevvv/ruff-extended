@@ -6,7 +6,7 @@ use ty_plugin_protocol::{
 };
 
 fn host() -> ProtocolVersion {
-    ProtocolVersion { major: 0, minor: 3 }
+    CURRENT_PROTOCOL_VERSION
 }
 
 #[test]
@@ -22,7 +22,7 @@ fn current_version_is_self_compatible() {
 fn accepts_equal_and_older_minor() {
     // A plugin built for the host's exact minor, or an older minor, is compatible.
     assert_eq!(
-        host().negotiate(ProtocolVersion { major: 0, minor: 3 }),
+        host().negotiate(CURRENT_PROTOCOL_VERSION),
         ProtocolCompatibility::Compatible
     );
     assert_eq!(
@@ -34,11 +34,12 @@ fn accepts_equal_and_older_minor() {
 #[test]
 fn rejects_newer_minor() {
     // A plugin requiring protocol features the host has not implemented yet is rejected.
-    assert_eq!(
-        host().negotiate(ProtocolVersion { major: 0, minor: 4 }),
-        ProtocolCompatibility::MinorTooNew
-    );
-    assert!(!host().supports(ProtocolVersion { major: 0, minor: 4 }));
+    let newer = ProtocolVersion {
+        major: 0,
+        minor: CURRENT_PROTOCOL_VERSION.minor + 1,
+    };
+    assert_eq!(host().negotiate(newer), ProtocolCompatibility::MinorTooNew);
+    assert!(!host().supports(newer));
 }
 
 #[test]

@@ -41,6 +41,7 @@ use crate::{
         SubclassOfType, Type, TypeContext, TypeMapping, TypeVarVariance, TypingModule,
         UnionBuilder, UnionType,
         attribute_write::DescriptorSetterDomain,
+        binding_type,
         bound_super::BoundSuperType,
         call::{CallError, CallErrorKind},
         callable::CallableTypeKind,
@@ -4334,6 +4335,7 @@ fn plugin_project_index<'db>(
         classes: plugin_project_class_summaries(db, env),
         settings,
         assignments: plugin_project_assignment_summaries(db, env),
+        functions: plugin_project_function_summaries(db, env),
         previous_index_fingerprint: None,
     });
     tracing::trace!(
@@ -4615,6 +4617,97 @@ fn plugin_project_assignment_summaries<'db>(
     }
 
     summaries
+}
+
+fn plugin_project_function_summaries<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+) -> Vec<protocol::FunctionSummary> {
+    let mut summaries = Vec::new();
+
+    for module in all_modules(db, env.resolver_environment(db)) {
+        let Some(file) = module.file(db) else {
+            continue;
+        };
+        if !db.should_check_file(file) {
+            continue;
+        }
+
+        let parsed = parsed_module(db, db.program_file(file).python_file(db)).load(db);
+        let index = semantic_index(db, db.program_file(file));
+        let module_name = plugin_module_name(db, file);
+        let mut functions = Vec::new();
+        collect_module_function_defs(&parsed.syntax().body, &mut functions);
+        for function in functions {
+            let definition = index.expect_single_definition(function);
+            let qualified_name = format!("{module_name}.{}", function.name);
+            summaries.push(protocol::FunctionSummary {
+                qualified_name: qualified_name.clone(),
+                decorators: function
+                    .decorator_list
+                    .iter()
+                    .map(|decorator| {
+                        plugin_call_or_symbol_summary(db, env, definition, &decorator.expression)
+                    })
+                    .collect(),
+                inferred_type: Some(plugin_type_expr_from_type(
+                    db,
+                    env,
+                    binding_type(db, definition),
+                )),
+                source: plugin_symbol_source(db, file, function.range(), Some(qualified_name)),
+            });
+        }
+    }
+
+    summaries
+}
+
+/// Collect module-level function definitions, descending into the compound-statement suites
+/// (`if`, `try`, `with`, loops, `match`) where decorated `def`s can legally appear.
+/// Function and class bodies are not entered: nested `def`s are function-local, and methods are
+/// already summarized on their [`ClassSummary`](protocol::ClassSummary).
+fn collect_module_function_defs<'a>(
+    statements: &'a [ast::Stmt],
+    functions: &mut Vec<&'a ast::StmtFunctionDef>,
+) {
+    for statement in statements {
+        match statement {
+            ast::Stmt::FunctionDef(function) => functions.push(function),
+            ast::Stmt::If(if_stmt) => {
+                collect_module_function_defs(&if_stmt.body, functions);
+                for clause in &if_stmt.elif_else_clauses {
+                    collect_module_function_defs(&clause.body, functions);
+                }
+            }
+            ast::Stmt::While(while_stmt) => {
+                collect_module_function_defs(&while_stmt.body, functions);
+                collect_module_function_defs(&while_stmt.orelse, functions);
+            }
+            ast::Stmt::For(for_stmt) => {
+                collect_module_function_defs(&for_stmt.body, functions);
+                collect_module_function_defs(&for_stmt.orelse, functions);
+            }
+            ast::Stmt::With(with_stmt) => {
+                collect_module_function_defs(&with_stmt.body, functions);
+            }
+            ast::Stmt::Try(try_stmt) => {
+                collect_module_function_defs(&try_stmt.body, functions);
+                for handler in &try_stmt.handlers {
+                    let ast::ExceptHandler::ExceptHandler(handler) = handler;
+                    collect_module_function_defs(&handler.body, functions);
+                }
+                collect_module_function_defs(&try_stmt.orelse, functions);
+                collect_module_function_defs(&try_stmt.finalbody, functions);
+            }
+            ast::Stmt::Match(match_stmt) => {
+                for case in &match_stmt.cases {
+                    collect_module_function_defs(&case.body, functions);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn plugin_settings_summaries<'db>(
@@ -8977,6 +9070,681 @@ mod tests {
             protocol::LiteralValue::Str {
                 value: "library".to_string()
             }
+        );
+
+        Ok(())
+    }
+
+    // ---- on-subclass-of-matching (pattern) method claims ----
+
+    /// A plugin that records every call routed to it and patches each matched call's return
+    /// type to `int`, so routing is observable both through the recorded callee list and
+    /// through whether `int`-annotated assignments to call results check cleanly.
+    fn install_call_recording_plugin(db: &mut TestDb, plugin_id: &str) -> Arc<Mutex<Vec<String>>> {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&calls);
+        db.register_semantic_plugin_executor(plugin_id.to_string(), move |request| {
+            let record = |hook: &str, request: &protocol::CallRequest| {
+                let receiver = request
+                    .receiver
+                    .as_ref()
+                    .and_then(|receiver| receiver.nominal_class.clone())
+                    .unwrap_or_default();
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(format!("{hook}:{}@{}", request.callee.expression, receiver));
+            };
+            match request {
+                protocol::PluginRequest::AdjustCallReturn(request) => {
+                    record("return", request);
+                    Ok(protocol::PluginResponse::CallReturnPatch(
+                        protocol::CallReturnPatch {
+                            return_type: protocol::TypeExpr::annotation("int"),
+                            diagnostics: Vec::new(),
+                            result_metadata: None,
+                        },
+                    ))
+                }
+                protocol::PluginRequest::AdjustCallSignature(request) => {
+                    record("signature", request);
+                    Ok(protocol::PluginResponse::CallSignaturePatch(
+                        protocol::CallSignaturePatch {
+                            signature: protocol::CallableSignature {
+                                parameters: vec![protocol::Parameter {
+                                    name: Some("token".to_string()),
+                                    kind: protocol::ParameterKind::PositionalOrKeyword,
+                                    type_expr: Some(protocol::TypeExpr::annotation("int")),
+                                    required: true,
+                                }],
+                                return_type: protocol::TypeExpr::annotation("int"),
+                            },
+                            diagnostics: Vec::new(),
+                        },
+                    ))
+                }
+                _ => Ok(protocol::PluginResponse::NoChange),
+            }
+        });
+        calls
+    }
+
+    fn call_method_claim_plugin(
+        plugin_id: &str,
+        signature_claims: Vec<SemanticPluginMethodClaim>,
+        return_claims: Vec<SemanticPluginMethodClaim>,
+    ) -> SemanticPlugin {
+        SemanticPlugin::new(
+            plugin_id,
+            SemanticPluginRuntime::InProcess,
+            Vec::<String>::new(),
+            Vec::<SemanticPluginMemberClaim>::new(),
+            Vec::<SemanticPluginMemberClaim>::new(),
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .with_call_method_on_subclass_claims(signature_claims, return_claims)
+    }
+
+    fn install_semantic_plugins(db: &mut TestDb, plugins: Vec<SemanticPlugin>) {
+        SemanticPlugins::init_or_update(db, SemanticPluginEnvironment::new(1, plugins));
+    }
+
+    fn write_claim_fixture(db: &mut TestDb) -> anyhow::Result<()> {
+        Ok(db.write_dedented(
+            "/src/abcs.py",
+            r#"
+            class Base:
+                def run_a(self) -> str: ...
+                def run_b(self) -> str: ...
+                def stop(self) -> str: ...
+
+            class Sub(Base): ...
+
+            class DeepSub(Base): ...
+            class DeeperSub(DeepSub): ...
+
+            class Other:
+                def run_a(self) -> str: ...
+                def stop(self) -> str: ...
+
+            def run_a() -> str: ...
+            "#,
+        )?)
+    }
+
+    fn not_assignable_count(db: &TestDb, path: &str) -> usize {
+        let file = system_path_to_file(db, path).expect("test file should exist");
+        db.check_file(file)
+            .iter()
+            .map(Diagnostic::headline_message)
+            .filter(|message| message.contains("not assignable"))
+            .count()
+    }
+
+    /// A `*` pattern claim on a base routes every method call on subclasses — deep or shallow —
+    /// while unrelated receivers, same-named free functions, and constructors never route.
+    #[test]
+    fn pattern_claim_routes_all_methods_on_subclasses() -> anyhow::Result<()> {
+        let mut db = TestDbBuilder::new().build()?;
+        write_claim_fixture(&mut db)?;
+        db.write_dedented(
+            "/src/main.py",
+            r#"
+            from abcs import Sub, DeeperSub, Other, run_a
+
+            sub = Sub()
+            ok_a: int = sub.run_a()
+            ok_b: int = sub.run_b()
+            ok_stop: int = sub.stop()
+            ok_deep: int = DeeperSub().run_a()
+
+            other = Other()
+            bad_other_method: int = other.run_a()
+            bad_other_stop: int = other.stop()
+            bad_function: int = run_a()
+            bad_ctor: int = Sub()
+            "#,
+        )?;
+
+        let calls = install_call_recording_plugin(&mut db, "runner");
+        install_semantic_plugins(
+            &mut db,
+            vec![call_method_claim_plugin(
+                "runner",
+                Vec::new(),
+                vec![SemanticPluginMethodClaim::on_subclass_of_matching(
+                    "abcs.Base",
+                    "*",
+                )],
+            )],
+        );
+
+        // The four routed calls patch to `int` and check cleanly; the four unclaimed calls keep
+        // their declared `str`/instance types and fail their `int` annotations.
+        assert_eq!(
+            not_assignable_count(&db, "/src/main.py"),
+            4,
+            "exactly the unrouted calls should fail their int annotation"
+        );
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [
+                "return:abcs.Base.run_a@abcs.Sub",
+                "return:abcs.Base.run_b@abcs.Sub",
+                "return:abcs.Base.stop@abcs.Sub",
+                "return:abcs.Base.run_a@abcs.DeeperSub",
+            ]
+        );
+        Ok(())
+    }
+
+    /// Prefix patterns claim a method family; the first plugin in the environment wins on
+    /// overlap, so ordering is deterministic.
+    #[test]
+    fn pattern_claim_prefix_and_first_plugin_wins() -> anyhow::Result<()> {
+        let mut db = TestDbBuilder::new().build()?;
+        write_claim_fixture(&mut db)?;
+        db.write_dedented(
+            "/src/main.py",
+            r#"
+            from abcs import Sub
+
+            sub = Sub()
+            a: int = sub.run_a()
+            b: int = sub.run_b()
+            c: int = sub.stop()
+            "#,
+        )?;
+
+        let calls_a = install_call_recording_plugin(&mut db, "plugin-a");
+        let calls_b = install_call_recording_plugin(&mut db, "plugin-b");
+        install_semantic_plugins(
+            &mut db,
+            vec![
+                call_method_claim_plugin(
+                    "plugin-a",
+                    Vec::new(),
+                    vec![SemanticPluginMethodClaim::on_subclass_of_matching(
+                        "abcs.Base",
+                        "run_*",
+                    )],
+                ),
+                call_method_claim_plugin(
+                    "plugin-b",
+                    Vec::new(),
+                    vec![SemanticPluginMethodClaim::on_subclass_of_matching(
+                        "abcs.Base",
+                        "*",
+                    )],
+                ),
+            ],
+        );
+
+        let file = system_path_to_file(&db, "/src/main.py").expect("main.py");
+        let diagnostics = db.check_file(file);
+        assert!(
+            diagnostics.is_empty(),
+            "all calls patched to int: {diagnostics:#?}"
+        );
+        assert_eq!(
+            calls_a.lock().unwrap().as_slice(),
+            [
+                "return:abcs.Base.run_a@abcs.Sub",
+                "return:abcs.Base.run_b@abcs.Sub",
+            ],
+            "plugin-a claims the run_* family"
+        );
+        assert_eq!(
+            calls_b.lock().unwrap().as_slice(),
+            ["return:abcs.Base.stop@abcs.Sub"],
+            "plugin-b sees only what plugin-a did not claim"
+        );
+        Ok(())
+    }
+
+    /// With the catch-all registered first, a narrower later plugin is shadowed — matching is
+    /// deterministic first-plugin-wins, not union-of-claims.
+    #[test]
+    fn pattern_claim_earlier_plugin_shadows_later() -> anyhow::Result<()> {
+        let mut db = TestDbBuilder::new().build()?;
+        write_claim_fixture(&mut db)?;
+        db.write_dedented(
+            "/src/main.py",
+            r#"
+            from abcs import Sub
+
+            sub = Sub()
+            a: int = sub.run_a()
+            b: int = sub.stop()
+            "#,
+        )?;
+
+        let calls_broad = install_call_recording_plugin(&mut db, "broad");
+        let calls_narrow = install_call_recording_plugin(&mut db, "narrow");
+        install_semantic_plugins(
+            &mut db,
+            vec![
+                call_method_claim_plugin(
+                    "broad",
+                    Vec::new(),
+                    vec![SemanticPluginMethodClaim::on_subclass_of_matching(
+                        "abcs.Base",
+                        "*",
+                    )],
+                ),
+                call_method_claim_plugin(
+                    "narrow",
+                    Vec::new(),
+                    vec![SemanticPluginMethodClaim::on_subclass_of_matching(
+                        "abcs.Base",
+                        "run_*",
+                    )],
+                ),
+            ],
+        );
+
+        let file = system_path_to_file(&db, "/src/main.py").expect("main.py");
+        let diagnostics = db.check_file(file);
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        assert_eq!(calls_broad.lock().unwrap().len(), 2);
+        assert!(
+            calls_narrow.lock().unwrap().is_empty(),
+            "the earlier catch-all shadows the narrower plugin"
+        );
+        Ok(())
+    }
+
+    /// Exact subclass claims coexist with pattern claims: each call routes to whichever plugin
+    /// claims it, and a call claimed by neither keeps its declared type.
+    #[test]
+    fn exact_and_pattern_claims_coexist() -> anyhow::Result<()> {
+        let mut db = TestDbBuilder::new().build()?;
+        write_claim_fixture(&mut db)?;
+        db.write_dedented(
+            "/src/main.py",
+            r#"
+            from abcs import Sub
+
+            sub = Sub()
+            exact_hit: int = sub.stop()
+            pattern_hit: int = sub.run_a()
+            unclaimed: str = sub.run_b()
+            "#,
+        )?;
+
+        let calls_exact = install_call_recording_plugin(&mut db, "exact");
+        let calls_pattern = install_call_recording_plugin(&mut db, "pattern");
+        install_semantic_plugins(
+            &mut db,
+            vec![
+                call_method_claim_plugin(
+                    "exact",
+                    Vec::new(),
+                    vec![SemanticPluginMethodClaim::on_subclass_of(
+                        "abcs.Base",
+                        "stop",
+                    )],
+                ),
+                call_method_claim_plugin(
+                    "pattern",
+                    Vec::new(),
+                    vec![SemanticPluginMethodClaim::on_subclass_of_matching(
+                        "abcs.Base",
+                        "run_a",
+                    )],
+                ),
+            ],
+        );
+
+        let file = system_path_to_file(&db, "/src/main.py").expect("main.py");
+        let diagnostics = db.check_file(file);
+        assert!(
+            diagnostics.is_empty(),
+            "exact + pattern claims patch their calls, `run_b` stays `str`: {diagnostics:#?}"
+        );
+        assert_eq!(
+            calls_exact.lock().unwrap().as_slice(),
+            ["return:abcs.Base.stop@abcs.Sub"]
+        );
+        assert_eq!(
+            calls_pattern.lock().unwrap().as_slice(),
+            ["return:abcs.Base.run_a@abcs.Sub"],
+            "a pattern without `*` still behaves as an exact name"
+        );
+        Ok(())
+    }
+
+    /// A pattern claim drives the signature hook too: `run_*` calls check against the patched
+    /// `(token: int) -> int` signature while unclaimed methods keep their own.
+    #[test]
+    fn pattern_claim_routes_call_signature_hook() -> anyhow::Result<()> {
+        let mut db = TestDbBuilder::new().build()?;
+        write_claim_fixture(&mut db)?;
+        db.write_dedented(
+            "/src/main.py",
+            r#"
+            from abcs import Sub
+
+            sub = Sub()
+            ok: int = sub.run_a(1)
+            bad_missing: int = sub.run_b()
+            bad_arg: int = sub.run_a("x")
+            untouched: str = sub.stop()
+            "#,
+        )?;
+
+        let calls = install_call_recording_plugin(&mut db, "sig-hooks");
+        install_semantic_plugins(
+            &mut db,
+            vec![call_method_claim_plugin(
+                "sig-hooks",
+                vec![SemanticPluginMethodClaim::on_subclass_of_matching(
+                    "abcs.Base",
+                    "run_*",
+                )],
+                Vec::new(),
+            )],
+        );
+
+        let file = system_path_to_file(&db, "/src/main.py").expect("main.py");
+        let diagnostics = db.check_file(file);
+        assert_eq!(
+            diagnostics.len(),
+            2,
+            "missing and mistyped `token` arguments should fail under the patched signature: {diagnostics:#?}"
+        );
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [
+                "signature:abcs.Base.run_a@abcs.Sub",
+                "signature:abcs.Base.run_b@abcs.Sub",
+                "signature:abcs.Base.run_a@abcs.Sub",
+            ]
+        );
+        Ok(())
+    }
+
+    /// A pattern claim on a base that cannot be resolved routes nothing and fails quietly —
+    /// no spurious matches, no diagnostics.
+    #[test]
+    fn pattern_claim_on_unresolvable_base_never_routes() -> anyhow::Result<()> {
+        let mut db = TestDbBuilder::new().build()?;
+        write_claim_fixture(&mut db)?;
+        db.write_dedented(
+            "/src/main.py",
+            r#"
+            from abcs import Sub
+
+            sub = Sub()
+            still_str: str = sub.run_a()
+            "#,
+        )?;
+
+        let calls = install_call_recording_plugin(&mut db, "missing-base");
+        install_semantic_plugins(
+            &mut db,
+            vec![call_method_claim_plugin(
+                "missing-base",
+                Vec::new(),
+                vec![SemanticPluginMethodClaim::on_subclass_of_matching(
+                    "missing.Base",
+                    "*",
+                )],
+            )],
+        );
+
+        let file = system_path_to_file(&db, "/src/main.py").expect("main.py");
+        let diagnostics = db.check_file(file);
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        assert!(calls.lock().unwrap().is_empty());
+        Ok(())
+    }
+
+    /// An empty pattern is a dead claim — it matches no method name and routes nothing.
+    #[test]
+    fn empty_pattern_claim_never_routes() -> anyhow::Result<()> {
+        let mut db = TestDbBuilder::new().build()?;
+        write_claim_fixture(&mut db)?;
+        db.write_dedented(
+            "/src/main.py",
+            r#"
+            from abcs import Sub
+
+            sub = Sub()
+            still_str: str = sub.run_a()
+            "#,
+        )?;
+
+        let calls = install_call_recording_plugin(&mut db, "empty-pattern");
+        install_semantic_plugins(
+            &mut db,
+            vec![call_method_claim_plugin(
+                "empty-pattern",
+                Vec::new(),
+                vec![SemanticPluginMethodClaim::on_subclass_of_matching(
+                    "abcs.Base",
+                    "",
+                )],
+            )],
+        );
+
+        let file = system_path_to_file(&db, "/src/main.py").expect("main.py");
+        let diagnostics = db.check_file(file);
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        assert!(calls.lock().unwrap().is_empty());
+        Ok(())
+    }
+
+    /// Pattern routing stays per-call-site linear: every claimed call produces exactly one
+    /// plugin request, no more and no less.
+    #[test]
+    fn pattern_claim_executes_once_per_call_site() -> anyhow::Result<()> {
+        const METHODS: [&str; 3] = ["run_a", "run_b", "stop"];
+
+        let mut db = TestDbBuilder::new().build()?;
+        write_claim_fixture(&mut db)?;
+        let calls_src = (0..200)
+            .map(|i| format!("v{i}: int = sub.{}()", METHODS[i % 3]))
+            .collect::<Vec<_>>()
+            .join("\n");
+        db.write_dedented(
+            "/src/main.py",
+            &format!("from abcs import Sub\nsub = Sub()\n{calls_src}\n"),
+        )?;
+
+        let calls = install_call_recording_plugin(&mut db, "stress");
+        install_semantic_plugins(
+            &mut db,
+            vec![call_method_claim_plugin(
+                "stress",
+                Vec::new(),
+                vec![SemanticPluginMethodClaim::on_subclass_of_matching(
+                    "abcs.Base",
+                    "*",
+                )],
+            )],
+        );
+
+        assert_eq!(not_assignable_count(&db, "/src/main.py"), 0);
+        let recorded = calls.lock().unwrap();
+        assert_eq!(recorded.len(), 200, "one request per routed call site");
+        assert!(
+            recorded
+                .iter()
+                .all(|entry| entry.starts_with("return:abcs.Base.")),
+            "every routed callee is a Base method: {recorded:#?}"
+        );
+        Ok(())
+    }
+
+    /// `BuildProjectIndexRequest.functions` exposes module-level decorated functions, including
+    /// ones nested in `if`/`try` suites, while class methods and function-local defs stay out.
+    #[test]
+    fn project_index_includes_module_level_functions() -> anyhow::Result<()> {
+        let mut db = TestDbBuilder::new().build()?;
+        db.write_dedented(
+            "/src/marking.py",
+            r#"
+            from collections.abc import Callable
+
+            class Token:
+                def __init__(self, first: type, second: type): ...
+
+            def mark(first: type, second: type) -> Callable[[object], Token]:
+                def decorator(fn: object) -> Token:
+                    return Token(first, second)
+                return decorator
+            "#,
+        )?;
+        db.write_dedented(
+            "/src/things.py",
+            r#"
+            class Alpha: ...
+            class Beta: ...
+            "#,
+        )?;
+        db.write_dedented(
+            "/src/entries.py",
+            r#"
+            from marking import mark
+            from things import Alpha, Beta
+
+            @mark(Alpha, Beta)
+            def handle_alpha(raw: bytes) -> Alpha:
+                return Alpha()
+
+            def helper() -> int:
+                return 0
+
+            def outer():
+                def nested() -> None: ...
+
+            if True:
+                @mark(Alpha, Alpha)
+                def conditional_entry(): ...
+
+            class SomeClass:
+                def method_def(self): ...
+            "#,
+        )?;
+
+        let requests = Arc::new(Mutex::new(Vec::<protocol::PluginRequest>::new()));
+        let captured = Arc::clone(&requests);
+        db.register_semantic_plugin_executor("index-recorder", move |request| {
+            captured.lock().unwrap().push(request.clone());
+            Ok(protocol::PluginResponse::ProjectIndex(
+                protocol::ProjectIndexResponse {
+                    plugin_index: serde_json::Value::Null,
+                    contributions: Vec::new(),
+                    virtual_types: Vec::new(),
+                    dependencies: Vec::new(),
+                    diagnostics: Vec::new(),
+                },
+            ))
+        });
+        install_semantic_plugin(
+            &mut db,
+            SemanticPlugin::new(
+                "index-recorder",
+                SemanticPluginRuntime::InProcess,
+                Vec::<String>::new(),
+                Vec::<SemanticPluginMemberClaim>::new(),
+                Vec::<SemanticPluginMemberClaim>::new(),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .with_project_index_enabled(true),
+        );
+
+        let file = system_path_to_file(&db, "/src/entries.py").expect("entries.py");
+        let diagnostics = db.check_file(file);
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+
+        let index_request = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|request| match request {
+                protocol::PluginRequest::BuildProjectIndex(request) => Some(request.clone()),
+                _ => None,
+            })
+            .expect("the index request should reach the plugin");
+
+        let functions = index_request
+            .functions
+            .iter()
+            .map(|function| (function.qualified_name.as_str(), function))
+            .collect::<BTreeMap<_, _>>();
+
+        // Top-level defs, including ones inside `if` suites, and the decorator factory itself.
+        for expected in [
+            "entries.handle_alpha",
+            "entries.helper",
+            "entries.outer",
+            "entries.conditional_entry",
+            "marking.mark",
+        ] {
+            assert!(
+                functions.contains_key(expected),
+                "expected `{expected}` in project functions: {:?}",
+                functions.keys().collect::<Vec<_>>()
+            );
+        }
+        // Function-local defs and methods must not be summarized as module functions.
+        for excluded in ["entries.nested", "entries.SomeClass.method_def"] {
+            assert!(
+                !functions.contains_key(excluded),
+                "`{excluded}` must not appear in module-level functions"
+            );
+        }
+
+        // The decorated site carries its decorator call and the bound type. Callee and
+        // argument `SymbolRef`s are syntactic (`mark`, `Alpha`); the semantically resolved
+        // decorator-applied type is on `inferred_type`.
+        let handle_alpha = functions["entries.handle_alpha"];
+        let [protocol::CallOrSymbolSummary::Call(decorator)] = handle_alpha.decorators.as_slice()
+        else {
+            panic!(
+                "expected one call decorator, got {:?}",
+                handle_alpha.decorators
+            );
+        };
+        assert_eq!(decorator.callee.qualified_name, "mark");
+        let arg_refs = decorator
+            .arguments
+            .iter()
+            .map(|argument| &argument.value)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            arg_refs,
+            [
+                &protocol::LiteralValue::SymbolRef(protocol::SymbolRef {
+                    qualified_name: "Alpha".to_string(),
+                }),
+                &protocol::LiteralValue::SymbolRef(protocol::SymbolRef {
+                    qualified_name: "Beta".to_string(),
+                }),
+            ]
+        );
+        assert!(
+            handle_alpha
+                .inferred_type
+                .as_ref()
+                .is_some_and(|ty| ty.expression.contains("Token")),
+            "decorator-applied binding should show `Token`: {:?}",
+            handle_alpha.inferred_type
+        );
+
+        let helper = functions["entries.helper"];
+        assert!(helper.decorators.is_empty());
+        assert!(
+            helper
+                .inferred_type
+                .as_ref()
+                .is_some_and(|ty| ty.expression.contains("-> int")),
+            "undecorated function keeps its callable type: {:?}",
+            helper.inferred_type
         );
 
         Ok(())

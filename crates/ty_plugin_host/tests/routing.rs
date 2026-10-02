@@ -55,6 +55,69 @@ fn builds_capability_routes_from_manifest_claims() {
 }
 
 #[test]
+fn routes_method_pattern_claims_per_owner_base() {
+    let mut manifest = manifest();
+    manifest.capabilities.call_signature = true;
+    manifest
+        .claims
+        .methods
+        .push(MethodClaim::on_subclass_of_matching(
+            "example.Base",
+            "run_*",
+        ));
+    manifest
+        .claims
+        .methods
+        .push(MethodClaim::on_subclass_of_matching("example.Queue", "*"));
+
+    let environment = PluginEnvironment::from_manifests(vec![manifest]).unwrap();
+    let routes = environment.routes();
+
+    // A prefix pattern claims every matching method name on subclasses of the base.
+    assert_eq!(
+        routes.call_signature_method_on_subclass_pattern_plugins("example.Base", "run_a"),
+        ["plugin.model"]
+    );
+    assert_eq!(
+        routes.call_signature_method_on_subclass_pattern_plugins("example.Base", "run_b"),
+        ["plugin.model"]
+    );
+    // ...but not names outside the pattern, and not claims on a different owner base.
+    assert!(
+        routes
+            .call_signature_method_on_subclass_pattern_plugins("example.Base", "halt")
+            .is_empty()
+    );
+    assert!(
+        routes
+            .call_signature_method_on_subclass_pattern_plugins("other.Base", "run_a")
+            .is_empty()
+    );
+    // `*` claims every method name.
+    assert_eq!(
+        routes.call_signature_method_on_subclass_pattern_plugins("example.Queue", "anything"),
+        ["plugin.model"]
+    );
+    // The claim registers in the call-return map too (the fixture enables that capability),
+    // under the same pattern-matching semantics.
+    assert_eq!(
+        routes.call_return_method_on_subclass_pattern_plugins("example.Base", "run_a"),
+        ["plugin.model"]
+    );
+    assert!(
+        routes
+            .call_return_method_on_subclass_pattern_plugins("example.Base", "halt")
+            .is_empty()
+    );
+    // Pattern claims never register as exact method routes.
+    assert!(
+        routes
+            .call_signature_method_on_subclass_plugins("example.Base", "run_a")
+            .is_empty()
+    );
+}
+
+#[test]
 fn mock_runner_returns_registered_response() {
     let environment = PluginEnvironment::from_manifests(vec![manifest()]).unwrap();
     let response = PluginResponse::ClassPatch(ClassPatch {

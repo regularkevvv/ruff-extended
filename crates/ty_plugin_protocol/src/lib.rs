@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 3 };
+pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 4 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -240,6 +240,22 @@ impl MethodClaim {
         }
     }
 
+    /// Claim every method on subclasses of `base_qualified_name` whose name matches
+    /// `method_name_pattern`. See [`method_name_pattern_matches`] for the pattern language;
+    /// `"*"` claims all methods.
+    #[must_use]
+    pub fn on_subclass_of_matching(
+        base_qualified_name: impl Into<String>,
+        method_name_pattern: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: MethodClaimKind::OnSubclassOfMatching {
+                base_qualified_name: base_qualified_name.into(),
+                method_name_pattern: method_name_pattern.into(),
+            },
+        }
+    }
+
     #[must_use]
     pub fn exact_method(&self) -> Option<(&str, &str)> {
         match &self.kind {
@@ -247,7 +263,9 @@ impl MethodClaim {
                 class_qualified_name,
                 method_name,
             } => Some((class_qualified_name, method_name)),
-            MethodClaimKind::OnSubclassOf { .. } => None,
+            MethodClaimKind::OnSubclassOf { .. } | MethodClaimKind::OnSubclassOfMatching { .. } => {
+                None
+            }
         }
     }
 }
@@ -267,6 +285,44 @@ pub enum MethodClaimKind {
         base_qualified_name: String,
         method_name: String,
     },
+    /// Claim methods on subclasses of `base_qualified_name` whose names match
+    /// `method_name_pattern`, as defined by [`method_name_pattern_matches`].
+    OnSubclassOfMatching {
+        base_qualified_name: String,
+        method_name_pattern: String,
+    },
+}
+
+/// Match a method name against a claim pattern.
+///
+/// `*` matches any (possibly empty) run of characters; every other character is literal. There
+/// are no character classes or escapes, so `*` is the only metacharacter and `"*"` alone matches
+/// every name. An empty pattern matches only an empty name, which no Python method can have.
+#[must_use]
+pub fn method_name_pattern_matches(pattern: &str, method_name: &str) -> bool {
+    let (pattern, name) = (pattern.as_bytes(), method_name.as_bytes());
+    let (mut p, mut n) = (0, 0);
+    let (mut star_p, mut star_n) = (usize::MAX, 0);
+    while n < name.len() {
+        if p < pattern.len() && pattern[p] == name[n] {
+            p += 1;
+            n += 1;
+        } else if p < pattern.len() && pattern[p] == b'*' {
+            star_p = p;
+            star_n = n;
+            p += 1;
+        } else if star_p != usize::MAX {
+            p = star_p + 1;
+            star_n += 1;
+            n = star_n;
+        } else {
+            return false;
+        }
+    }
+    while p < pattern.len() && pattern[p] == b'*' {
+        p += 1;
+    }
+    p == pattern.len()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -425,6 +481,10 @@ pub struct BuildProjectIndexRequest {
     pub settings: Vec<SettingsModuleSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assignments: Vec<AssignmentSummary>,
+    /// Module-level function definitions, so plugins can see decorator-based registration
+    /// sites that are neither classes nor assignments.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub functions: Vec<FunctionSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_index_fingerprint: Option<String>,
 }
@@ -582,6 +642,23 @@ pub struct MethodSummary {
     pub return_type: Option<TypeExpr>,
     #[serde(default)]
     pub is_public: bool,
+    #[serde(default, skip_serializing_if = "SymbolSource::is_unknown")]
+    pub source: SymbolSource,
+}
+
+/// A module-level function definition for [`BuildProjectIndexRequest::functions`].
+///
+/// `inferred_type` carries the bound type *after* decorators are applied, so a definition
+/// whose decorator returns a `Registry[Model, Schema]` instance shows up with that instance
+/// type rather than the raw function type.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct FunctionSummary {
+    pub qualified_name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decorators: Vec<CallOrSymbolSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inferred_type: Option<TypeExpr>,
     #[serde(default, skip_serializing_if = "SymbolSource::is_unknown")]
     pub source: SymbolSource,
 }

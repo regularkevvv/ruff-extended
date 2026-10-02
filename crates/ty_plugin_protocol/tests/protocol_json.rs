@@ -1,12 +1,12 @@
 use ty_plugin_protocol::{
     AnalyzeClassRequest, ArgumentKind, ArgumentSummary, AssignedValueSummary,
-    BuildProjectIndexRequest, CallRequest, CallValueSummary, CallableSignature, ClassClaim,
-    ClassPatch, ClassSummary, FieldPatch, FieldSummary, LiteralValue, MemberAccessPatch,
-    MemberPatchMode, MutationOperation, MutationRequest, MutationResponse, Parameter,
-    ParameterKind, PluginCapabilities, PluginClaims, PluginManifest, PluginRequest, PluginResponse,
-    ProjectContext, ProjectIndexResponse, ProtocolVersion, ReceiverSummary, RuntimeSpec,
-    SemanticContext, SettingsModuleSummary, SymbolRef, SymbolSource, TypeExpr, TypeSnapshot,
-    TypeSnapshotField, VersionReq,
+    BuildProjectIndexRequest, CallOrSymbolSummary, CallRequest, CallValueSummary,
+    CallableSignature, ClassClaim, ClassPatch, ClassSummary, FieldPatch, FieldSummary,
+    LiteralValue, MemberAccessPatch, MemberPatchMode, MutationOperation, MutationRequest,
+    MutationResponse, Parameter, ParameterKind, PluginCapabilities, PluginClaims, PluginManifest,
+    PluginRequest, PluginResponse, ProjectContext, ProjectIndexResponse, ProtocolVersion,
+    ReceiverSummary, RuntimeSpec, SemanticContext, SettingsModuleSummary, SymbolRef, SymbolSource,
+    TypeExpr, TypeSnapshot, TypeSnapshotField, VersionReq,
 };
 
 #[test]
@@ -83,6 +83,25 @@ fn serializes_manifest() {
       }
     }
     "#);
+}
+
+#[test]
+fn serializes_method_pattern_claim() {
+    let claim =
+        ty_plugin_protocol::MethodClaim::on_subclass_of_matching("app.workers.Runner", "run_*");
+
+    insta::assert_json_snapshot!(claim, @r#"
+    {
+      "kind": "on-subclass-of-matching",
+      "base-qualified-name": "app.workers.Runner",
+      "method-name-pattern": "run_*"
+    }
+    "#);
+
+    let json = serde_json::to_string(&claim).expect("serialize claim");
+    let restored: ty_plugin_protocol::MethodClaim =
+        serde_json::from_str(&json).expect("deserialize claim");
+    assert_eq!(restored, claim);
 }
 
 #[test]
@@ -332,6 +351,38 @@ fn serializes_project_index_request_and_response() {
             source: SymbolSource::default(),
         }],
         assignments: Vec::new(),
+        functions: vec![ty_plugin_protocol::FunctionSummary {
+            qualified_name: "app.jobs.handle_alpha".to_string(),
+            decorators: vec![CallOrSymbolSummary::Call(CallValueSummary {
+                callee: SymbolRef {
+                    qualified_name: "app.marks.mark".to_string(),
+                },
+                receiver: None,
+                arguments: vec![
+                    ArgumentSummary {
+                        name: None,
+                        kind: ArgumentKind::Positional,
+                        type_expr: None,
+                        value: LiteralValue::ClassRef(SymbolRef {
+                            qualified_name: "app.Alpha".to_string(),
+                        }),
+                        source: None,
+                    },
+                    ArgumentSummary {
+                        name: None,
+                        kind: ArgumentKind::Positional,
+                        type_expr: None,
+                        value: LiteralValue::ClassRef(SymbolRef {
+                            qualified_name: "app.Beta".to_string(),
+                        }),
+                        source: None,
+                    },
+                ],
+                return_type: None,
+            })],
+            inferred_type: Some(TypeExpr::annotation("app.Token[app.Alpha, app.Beta]")),
+            source: SymbolSource::default(),
+        }],
         previous_index_fingerprint: None,
     });
 
@@ -385,6 +436,39 @@ fn serializes_project_index_request_and_response() {
       "settings": [
         {
           "module": "app.settings"
+        }
+      ],
+      "functions": [
+        {
+          "qualified-name": "app.jobs.handle_alpha",
+          "decorators": [
+            {
+              "kind": "call",
+              "callee": {
+                "qualified-name": "app.marks.mark"
+              },
+              "arguments": [
+                {
+                  "kind": "positional",
+                  "value": {
+                    "kind": "class-ref",
+                    "qualified-name": "app.Alpha"
+                  }
+                },
+                {
+                  "kind": "positional",
+                  "value": {
+                    "kind": "class-ref",
+                    "qualified-name": "app.Beta"
+                  }
+                }
+              ]
+            }
+          ],
+          "inferred-type": {
+            "expression": "app.Token[app.Alpha, app.Beta]",
+            "mode": "annotation"
+          }
         }
       ]
     }

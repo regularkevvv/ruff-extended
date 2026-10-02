@@ -2709,18 +2709,22 @@ fn call_method_on_subclass_claims(manifest: &PluginManifest) -> Vec<SemanticPlug
         .claims
         .methods
         .iter()
-        .filter_map(|method| {
-            let MethodClaimKind::OnSubclassOf {
+        .filter_map(|method| match &method.kind {
+            MethodClaimKind::OnSubclassOf {
                 base_qualified_name,
                 method_name,
-            } = &method.kind
-            else {
-                return None;
-            };
-            Some(SemanticPluginMethodClaim::on_subclass_of(
+            } => Some(SemanticPluginMethodClaim::on_subclass_of(
                 base_qualified_name.clone(),
                 method_name.clone(),
-            ))
+            )),
+            MethodClaimKind::OnSubclassOfMatching {
+                base_qualified_name,
+                method_name_pattern,
+            } => Some(SemanticPluginMethodClaim::on_subclass_of_matching(
+                base_qualified_name.clone(),
+                method_name_pattern.clone(),
+            )),
+            MethodClaimKind::Exact { .. } => None,
         })
         .collect()
 }
@@ -4313,6 +4317,45 @@ mod plugin_tests {
     }
 
     #[test]
+    fn method_pattern_claim_converts_to_semantic_matcher() {
+        let db = project_database(
+            r#"
+            [plugins]
+            enabled = true
+
+            [[plugins.plugin]]
+            id = "runner"
+            path = ".ty/plugins/runner.mock"
+            runtime = "mock"
+            manifest-path = ".ty/plugins/runner.plugin.json"
+            "#,
+            [
+                ("/project/.ty/plugins/runner.mock", "plugin artifact"),
+                (
+                    "/project/.ty/plugins/runner.plugin.json",
+                    &method_pattern_manifest_json(),
+                ),
+            ],
+        );
+
+        assert_plugin_diagnostics(&db, []);
+
+        let semantic_plugins = SemanticPlugins::environment_or_empty(&db);
+        let [plugin] = semantic_plugins.plugins() else {
+            panic!("expected one semantic plugin");
+        };
+
+        assert_eq!(
+            plugin.call_return_method_on_subclass_claims(),
+            [
+                SemanticPluginMethodClaim::on_subclass_of("minidjango.Manager", "filter"),
+                SemanticPluginMethodClaim::on_subclass_of_matching("minidjango.Manager", "run_*"),
+                SemanticPluginMethodClaim::on_subclass_of_matching("minidjango.Manager", "*"),
+            ]
+        );
+    }
+
+    #[test]
     fn settings_data_claim_participates_in_semantic_environment() {
         let db = project_database(
             r#"
@@ -4466,7 +4509,7 @@ mod plugin_tests {
             &db,
             [(
                 Severity::Error,
-                "Plugin `pydantic` uses unsupported protocol version 99.1; ty supports 0.3",
+                "Plugin `pydantic` uses unsupported protocol version 99.1; ty supports 0.4",
             )],
         );
     }
@@ -4795,6 +4838,26 @@ mod plugin_tests {
                 "methods": [
                     { "kind": "on-subclass-of", "base-qualified-name": "minidjango.Manager", "method-name": "filter" },
                     { "kind": "on-subclass-of", "base-qualified-name": "minidjango.Manager", "method-name": "get" }
+                ]
+            }
+        }"#
+        .to_string()
+    }
+
+    fn method_pattern_manifest_json() -> String {
+        r#"{
+            "id": "runner",
+            "name": "Runner plugin",
+            "version": "0.1.0",
+            "protocol-version": { "major": 0, "minor": 4 },
+            "ty-compatibility": { "requirement": ">=0.0.0" },
+            "runtime": { "kind": "mock" },
+            "capabilities": { "call-return": true },
+            "claims": {
+                "methods": [
+                    { "kind": "on-subclass-of", "base-qualified-name": "minidjango.Manager", "method-name": "filter" },
+                    { "kind": "on-subclass-of-matching", "base-qualified-name": "minidjango.Manager", "method-name-pattern": "run_*" },
+                    { "kind": "on-subclass-of-matching", "base-qualified-name": "minidjango.Manager", "method-name-pattern": "*" }
                 ]
             }
         }"#
