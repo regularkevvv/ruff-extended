@@ -176,11 +176,6 @@ jobs:
       - name: Analyze shard ${{ matrix.shard }}
         env:
           SHARD: ${{ matrix.shard }}
-          # Ecosystem projects may pin `required-version` (e.g. mongo-python-driver
-          # pins `uv==0.12.12`). That pin governs uv running *inside* the project, not
-          # the uv we install project dependencies with — skip it to avoid failing on
-          # whichever pin a project happens to carry.
-          UV_NO_CONFIG: "true"
         run: |
           mkdir -p ~/.config/ty
           cp ty-ecosystem.toml ~/.config/ty/ty.toml
@@ -189,9 +184,15 @@ jobs:
           MERGE_BASE="$(< merge-base.txt)"
           echo "MERGE_BASE: ${MERGE_BASE}"
 
+          # Ecosystem projects may pin `required-version` (e.g. mongo-python-driver
+          # pins `uv==0.12.12`), so the analyzer's spawned `uv` invocations must skip
+          # project config discovery. Scope `UV_NO_CONFIG` to the analyzer process:
+          # applying it to this `uv run` would also strip this workspace's
+          # `exclude-newer` config and make `--locked` reject the lockfile.
           uv run \
             --locked \
             --only-group=ty-ecosystem \
+            env UV_NO_CONFIG=true \
             ecosystem-analyzer \
             --flaky-runs 10 \
             diff \
