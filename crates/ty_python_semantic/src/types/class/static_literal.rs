@@ -2014,7 +2014,7 @@ impl<'db> StaticClassLiteral<'db> {
         .map(|member| plugin_member_to_member(&member).inner)
     }
 
-    pub(super) fn own_plugin_class_transform_instance_assignment_member(
+    fn own_plugin_class_transform_instance_assignment_member(
         self,
         db: &'db dyn Db,
         name: &str,

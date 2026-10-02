@@ -64,7 +64,7 @@ impl Settings {
         &self.analysis
     }
 
-    pub fn plugins(&self) -> &PluginSettings {
+    pub(crate) fn plugins(&self) -> &PluginSettings {
         &self.plugins
     }
 }
@@ -110,7 +110,7 @@ pub struct PluginSettings {
 }
 
 impl PluginSettings {
-    pub const fn new(
+    pub(crate) const fn new(
         enabled: bool,
         plugins: Vec<PluginEntrySettings>,
         environment_fingerprint: PluginEnvironmentFingerprint,
@@ -126,23 +126,27 @@ impl PluginSettings {
         }
     }
 
-    pub const fn enabled(&self) -> bool {
+    #[cfg(any(test, all(feature = "plugins-wasm", not(target_arch = "wasm32"))))]
+    pub(crate) const fn enabled(&self) -> bool {
         self.enabled
     }
 
-    pub fn plugins(&self) -> &[PluginEntrySettings] {
+    #[cfg(any(test, all(feature = "plugins-wasm", not(target_arch = "wasm32"))))]
+    pub(crate) fn plugins(&self) -> &[PluginEntrySettings] {
         &self.plugins
     }
 
-    pub const fn environment_fingerprint(&self) -> PluginEnvironmentFingerprint {
+    #[cfg(test)]
+    pub(crate) const fn environment_fingerprint(&self) -> PluginEnvironmentFingerprint {
         self.environment_fingerprint
     }
 
-    pub fn reload_paths(&self) -> &[SystemPathBuf] {
+    pub(crate) fn reload_paths(&self) -> &[SystemPathBuf] {
         &self.reload_paths
     }
 
-    pub fn active_stub_overlay_paths(&self) -> &[SystemPathBuf] {
+    #[cfg(test)]
+    pub(crate) fn active_stub_overlay_paths(&self) -> &[SystemPathBuf] {
         &self.active_stub_overlay_paths
     }
 }
@@ -151,11 +155,12 @@ impl PluginSettings {
 pub struct PluginEnvironmentFingerprint(u64);
 
 impl PluginEnvironmentFingerprint {
-    pub const fn new(value: u64) -> Self {
+    pub(crate) const fn new(value: u64) -> Self {
         Self(value)
     }
 
-    pub const fn get(self) -> u64 {
+    #[cfg(test)]
+    pub(crate) const fn get(self) -> u64 {
         self.0
     }
 }
@@ -172,7 +177,7 @@ pub struct PluginEntrySettings {
 }
 
 impl PluginEntrySettings {
-    pub const fn new(
+    pub(crate) const fn new(
         id: String,
         runtime: PluginRuntimeSettings,
         path: SystemPathBuf,
@@ -192,37 +197,37 @@ impl PluginEntrySettings {
         }
     }
 
-    pub fn id(&self) -> &str {
+    pub(crate) fn id(&self) -> &str {
         &self.id
     }
 
-    pub const fn runtime(&self) -> PluginRuntimeSettings {
+    pub(crate) const fn runtime(&self) -> PluginRuntimeSettings {
         self.runtime
     }
 
-    pub fn path(&self) -> &SystemPathBuf {
+    pub(crate) fn path(&self) -> &SystemPathBuf {
         &self.path
     }
 
-    pub fn manifest_path(&self) -> Option<&SystemPathBuf> {
+    pub(crate) fn manifest_path(&self) -> Option<&SystemPathBuf> {
         self.manifest_path.as_ref()
     }
 
-    pub const fn config(&self) -> &PluginConfig {
+    pub(crate) const fn config(&self) -> &PluginConfig {
         &self.config
     }
 
     #[must_use]
-    pub fn with_config(mut self, config: PluginConfig) -> Self {
+    pub(crate) fn with_config(mut self, config: PluginConfig) -> Self {
         self.config = config;
         self
     }
 
-    pub fn stub_overlay_path(&self) -> Option<&SystemPathBuf> {
+    pub(crate) fn stub_overlay_path(&self) -> Option<&SystemPathBuf> {
         self.stub_overlay_path.as_ref()
     }
 
-    pub const fn trusted(&self) -> bool {
+    pub(crate) const fn trusted(&self) -> bool {
         self.trusted
     }
 }
@@ -232,7 +237,7 @@ impl PluginEntrySettings {
 /// The runtime (wasmtime) is compiled in only for native targets under the `plugins-wasm` feature.
 /// The `wasm32` `ty_wasm` build never embeds it, so there a `wasm` plugin runtime is reported
 /// unsupported and produces a settings diagnostic.
-pub const WASM_RUNTIME_SUPPORTED: bool =
+pub(crate) const WASM_RUNTIME_SUPPORTED: bool =
     cfg!(all(feature = "plugins-wasm", not(target_arch = "wasm32")));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, get_size2::GetSize)]
@@ -243,7 +248,7 @@ pub enum PluginRuntimeSettings {
 }
 
 impl PluginRuntimeSettings {
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Wasm => "wasm",
             Self::Subprocess => "subprocess",
@@ -253,7 +258,7 @@ impl PluginRuntimeSettings {
 
     /// Whether this build can execute the runtime. `mock` is always available; `wasm` depends on
     /// [`WASM_RUNTIME_SUPPORTED`]; `subprocess` is not implemented yet.
-    pub const fn is_supported(self) -> bool {
+    pub(crate) const fn is_supported(self) -> bool {
         match self {
             Self::Mock => true,
             Self::Wasm => WASM_RUNTIME_SUPPORTED,
@@ -262,12 +267,12 @@ impl PluginRuntimeSettings {
     }
 
     /// Whether the host must be explicitly trusted before executing this runtime's local artifacts.
-    pub const fn requires_trust(self) -> bool {
+    pub(crate) const fn requires_trust(self) -> bool {
         matches!(self, Self::Wasm | Self::Subprocess)
     }
 
     /// Whether this runtime participates in semantic hooks for this build.
-    pub const fn participates_in_semantic_hooks(self) -> bool {
+    pub(crate) const fn participates_in_semantic_hooks(self) -> bool {
         match self {
             Self::Mock => true,
             Self::Wasm => WASM_RUNTIME_SUPPORTED,
