@@ -450,7 +450,7 @@ impl ProjectMetadata {
         self.use_uv
     }
 
-    pub fn options(&self) -> &Options {
+    pub(crate) fn options(&self) -> &Options {
         &self.options
     }
 
@@ -464,7 +464,7 @@ impl ProjectMetadata {
     }
 
     /// Returns configuration paths outside normal project discovery that should be watched.
-    pub fn extra_configuration_paths(&self) -> impl Iterator<Item = &SystemPath> {
+    pub(crate) fn extra_configuration_paths(&self) -> impl Iterator<Item = &SystemPath> {
         self.config_file_override().into_iter().chain(
             self.user_configuration
                 .as_deref()

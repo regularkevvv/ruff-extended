@@ -1929,7 +1929,7 @@ pub struct PluginsOptions {
             enabled = true
         "#
     )]
-    pub enabled: Option<bool>,
+    enabled: Option<bool>,
 
     /// Whether to load trusted plugin packages installed into the project's Python environment.
     ///
@@ -1945,15 +1945,15 @@ pub struct PluginsOptions {
             auto-discover = true
         "#
     )]
-    pub auto_discover: Option<bool>,
+    auto_discover: Option<bool>,
 
     /// Plugin-specific configuration keyed by installed plugin id.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub config: Option<HashMap<String, PluginConfig>>,
+    config: Option<HashMap<String, PluginConfig>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[option_group]
-    pub plugin: Option<PluginEntriesOptions>,
+    plugin: Option<PluginEntriesOptions>,
 }
 
 impl PluginsOptions {
@@ -2247,7 +2247,7 @@ impl PluginsOptions {
         SemanticPluginEnvironment::new(hasher.finish(), semantic_plugins)
     }
 
-    pub(super) fn to_settings(
+    fn to_settings(
         &self,
         db: &dyn Db,
         project_root: &SystemPath,
@@ -2523,7 +2523,7 @@ pub struct PluginEntryOptions {
             id = "pydantic"
         "#
     )]
-    pub id: RangedValue<String>,
+    id: RangedValue<String>,
 
     /// Path to the plugin artifact.
     #[option(
@@ -2534,7 +2534,7 @@ pub struct PluginEntryOptions {
             path = ".ty/plugins/pydantic.wasm"
         "#
     )]
-    pub path: RelativePathBuf,
+    path: RelativePathBuf,
 
     /// Runtime used to execute the plugin artifact.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2546,7 +2546,7 @@ pub struct PluginEntryOptions {
             runtime = "wasm"
         "#
     )]
-    pub runtime: Option<RangedValue<PluginRuntimeOption>>,
+    runtime: Option<RangedValue<PluginRuntimeOption>>,
 
     /// Optional path to a separate manifest file.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2558,7 +2558,7 @@ pub struct PluginEntryOptions {
             manifest-path = ".ty/plugins/pydantic.plugin.json"
         "#
     )]
-    pub manifest_path: Option<RelativePathBuf>,
+    manifest_path: Option<RelativePathBuf>,
 
     /// Plugin-specific configuration passed through the stable protocol.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2570,7 +2570,7 @@ pub struct PluginEntryOptions {
             config = { init-typed = true }
         "#
     )]
-    pub config: Option<PluginConfig>,
+    config: Option<PluginConfig>,
 
     /// Optional path to a plugin-provided stub overlay root.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2582,7 +2582,7 @@ pub struct PluginEntryOptions {
             stub-overlay-path = ".ty/plugins/pydantic-stubs"
         "#
     )]
-    pub stub_overlay_path: Option<RelativePathBuf>,
+    stub_overlay_path: Option<RelativePathBuf>,
 
     /// Whether this plugin artifact is trusted to execute locally.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2594,7 +2594,7 @@ pub struct PluginEntryOptions {
             trusted = true
         "#
     )]
-    pub trusted: Option<bool>,
+    trusted: Option<bool>,
 }
 
 impl PluginEntryOptions {
@@ -2653,7 +2653,7 @@ impl From<PluginRuntimeOption> for PluginRuntimeSettings {
 pub struct PluginConfig(#[get_size(ignore)] serde_json::Value);
 
 impl PluginConfig {
-    pub const fn as_value(&self) -> &serde_json::Value {
+    const fn as_value(&self) -> &serde_json::Value {
         &self.0
     }
 }
