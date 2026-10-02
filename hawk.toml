@@ -1233,8 +1233,8 @@ lint = "hawk::dead_public"
 crate = "ty_plugin_host"
 item = "RouteTable::call_signature_method_on_subclass_plugins"
 kind = "inherent_method"
-level = "expect"
-reason = "integration tests exercise route-table lookups through this accessor"
+level = "allow"
+reason = "integration tests exercise route-table lookups through this accessor; reachability depends on which routing tests are present"
 
 [[override]]
 lint = "hawk::dead_public"
