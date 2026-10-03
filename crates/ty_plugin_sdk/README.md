@@ -38,7 +38,7 @@ edition = "2024"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
-ty_plugin_sdk = "0.0.4"
+ty_plugin_sdk = "0.0.6"
 ```
 
 Implement `Plugin`, claim the matching hook in the manifest, and export it:
@@ -55,7 +55,7 @@ struct MyPlugin;
 impl Plugin for MyPlugin {
     fn manifest(&self) -> PluginManifest {
         ManifestBuilder::new("my-plugin", "My plugin", env!("CARGO_PKG_VERSION"))
-            .ty_compatibility(">=0.75.0,<0.76.0")
+            .ty_compatibility(">=0.84.0,<0.85.0")
             .runtime(RuntimeSpec::Wasm(WasmRuntimeSpec {
                 artifact: "my_plugin.wasm".to_string(),
                 sha256: None,
