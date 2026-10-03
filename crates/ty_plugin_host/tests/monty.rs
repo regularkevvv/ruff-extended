@@ -61,6 +61,10 @@ def adjust_runner(request):
 "#;
 
 fn example_host(limits: MontyLimits) -> PluginHost<MontyRunner> {
+    source_host(limits, EXAMPLE_PLUGIN)
+}
+
+fn source_host(limits: MontyLimits, source: &str) -> PluginHost<MontyRunner> {
     let manifest = ManifestBuilder::new("example.runner", "Example Runner", "0.1.0")
         .runtime(RuntimeSpec::Monty(
             ty_plugin_sdk::protocol::MontyRuntimeSpec {
@@ -74,7 +78,7 @@ fn example_host(limits: MontyLimits) -> PluginHost<MontyRunner> {
         PluginEnvironment::from_manifests(vec![manifest]).expect("example manifest is valid");
     let mut runner = MontyRunner::new(limits).expect("runner builds");
     runner
-        .add_plugin(plugin_id, EXAMPLE_PLUGIN)
+        .add_plugin(plugin_id, source)
         .expect("plugin source compiles");
     PluginHost::new(environment, runner)
 }
@@ -670,4 +674,54 @@ def adjust_runner(request):
         error.to_string().contains("ime") || error.to_string().contains("loop"),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn recursion_is_stopped_by_limits() {
+    let host = source_host(
+        MontyLimits {
+            max_recursion_depth: 50,
+            ..MontyLimits::default()
+        },
+        r#"
+def recurse():
+    return recurse()
+
+def __ty_handle__(request_json):
+    if json.loads(request_json)["kind"] == "manifest":
+        return json.dumps(no_change())
+    return recurse()
+"#,
+    );
+    let error = host
+        .execute("example.runner", &call_request())
+        .expect_err("recursion is bounded");
+    assert!(
+        error.to_string().contains("RecursionError"),
+        "unexpected error: {error}"
+    );
+    host.execute("example.runner", &PluginRequest::Manifest)
+        .expect("interpreter remains usable");
+}
+
+#[test]
+fn python_exception_does_not_invalidate_interpreter() {
+    let host = source_host(
+        MontyLimits::default(),
+        r#"
+def __ty_handle__(request_json):
+    if json.loads(request_json)["kind"] == "manifest":
+        return json.dumps(no_change())
+    raise ValueError("invalid plugin input")
+"#,
+    );
+    let error = host
+        .execute("example.runner", &call_request())
+        .expect_err("Python exception is reported");
+    assert!(
+        error.to_string().contains("ValueError"),
+        "unexpected error: {error}"
+    );
+    host.execute("example.runner", &PluginRequest::Manifest)
+        .expect("interpreter remains usable");
 }

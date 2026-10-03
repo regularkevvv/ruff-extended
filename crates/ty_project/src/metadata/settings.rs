@@ -6,7 +6,7 @@ use ty_combine::Combine;
 use ty_python_semantic::AnalysisSettings;
 use ty_python_semantic::lint::RuleSelection;
 
-use crate::metadata::options::{InnerOverrideOptions, OutputFormat, PluginConfig};
+use crate::metadata::options::{InnerOverrideOptions, MontyMode, OutputFormat, PluginConfig};
 use crate::script::Script;
 use crate::{Db, glob::IncludeExcludeFilter};
 
@@ -103,6 +103,7 @@ impl SrcSettings {
 #[derive(Debug, Default, Clone, PartialEq, Eq, get_size2::GetSize)]
 pub struct PluginSettings {
     enabled: bool,
+    monty_mode: MontyMode,
     plugins: Vec<PluginEntrySettings>,
     environment_fingerprint: PluginEnvironmentFingerprint,
     reload_paths: Vec<SystemPathBuf>,
@@ -112,6 +113,7 @@ pub struct PluginSettings {
 impl PluginSettings {
     pub(crate) const fn new(
         enabled: bool,
+        monty_mode: MontyMode,
         plugins: Vec<PluginEntrySettings>,
         environment_fingerprint: PluginEnvironmentFingerprint,
         reload_paths: Vec<SystemPathBuf>,
@@ -119,11 +121,17 @@ impl PluginSettings {
     ) -> Self {
         Self {
             enabled,
+            monty_mode,
             plugins,
             environment_fingerprint,
             reload_paths,
             active_stub_overlay_paths,
         }
+    }
+
+    #[cfg(any(test, all(feature = "plugins-monty", not(target_arch = "wasm32"))))]
+    pub(crate) const fn monty_mode(&self) -> MontyMode {
+        self.monty_mode
     }
 
     #[cfg(any(

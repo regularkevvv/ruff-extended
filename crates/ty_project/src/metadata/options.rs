@@ -1931,6 +1931,22 @@ pub struct PluginsOptions {
     )]
     enabled: Option<bool>,
 
+    /// How Python plugins execute in Monty.
+    ///
+    /// The default `in-process` mode uses the interpreter embedded in ty. Select `worker` for
+    /// crash isolation and hard timeouts. Worker mode requires a `monty` executable and a build
+    /// with `plugins-monty-pool`; failure to start workers reports a plugin error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[option(
+        default = r#""in-process""#,
+        value_type = "\"in-process\" | \"worker\"",
+        example = r#"
+            [tool.ty.plugins]
+            monty-mode = "worker"
+        "#
+    )]
+    monty_mode: Option<MontyMode>,
+
     /// Whether to load trusted plugin packages installed into the project's Python environment.
     ///
     /// Installed plugin packages expose a `ty-plugin.json` manifest next to their artifact. This
@@ -2055,6 +2071,11 @@ impl PluginsOptions {
             loaded.artifact_content_hash.cache_key(&mut hasher);
             loaded.config_hash.cache_key(&mut hasher);
             loaded.strict_settings.cache_key(&mut hasher);
+            if loaded.runtime == PluginRuntimeSettings::Monty {
+                // Runtime handles live outside Salsa; changing modes must invalidate their answers.
+                matches!(self.monty_mode.unwrap_or_default(), MontyMode::Worker)
+                    .cache_key(&mut hasher);
+            }
 
             let manifest = plugin.manifest();
             let class_transform_claims = if manifest.capabilities.class_transform {
@@ -2425,6 +2446,7 @@ impl PluginsOptions {
 
         PluginSettings::new(
             enabled || auto_discovered_plugin_loaded,
+            self.monty_mode.unwrap_or_default(),
             plugins,
             environment_fingerprint,
             reload_paths,
@@ -2627,6 +2649,25 @@ pub enum PluginRuntimeOption {
     Subprocess,
     Monty,
     Mock,
+}
+
+#[derive(
+    Debug, Default, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, get_size2::GetSize,
+)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub enum MontyMode {
+    #[default]
+    InProcess,
+    Worker,
+}
+
+impl Combine for MontyMode {
+    fn combine_with(&mut self, _other: Self) {}
+
+    fn combine(self, _other: Self) -> Self {
+        self
+    }
 }
 
 impl Combine for PluginRuntimeOption {
@@ -4039,13 +4080,14 @@ mod plugin_tests {
 
     use crate::{Db as _, ProjectDatabase, ProjectMetadata};
 
-    use super::{Options, PluginRuntimeSettings};
+    use super::{MontyMode, Options, PluginRuntimeSettings};
     use crate::metadata::settings::{MONTY_RUNTIME_SUPPORTED, WASM_RUNTIME_SUPPORTED};
 
     const PROJECT_ROOT: &str = "/project";
     const CONFIG_PATH: &str = "/project/ty.toml";
     const ARTIFACT_PATH: &str = "/project/.ty/plugins/pydantic.mock";
     const MANIFEST_PATH: &str = "/project/.ty/plugins/pydantic.plugin.json";
+
     // A virtualenv's `site-packages` sits at `<prefix>/Lib/site-packages` on Windows and
     // `<prefix>/lib/pythonX.Y/site-packages` everywhere else. These fixtures have to match the
     // layout `ty_site_packages` actually probes for, or discovery finds nothing on Windows.
@@ -4071,6 +4113,24 @@ mod plugin_tests {
           (func (export "ty_plugin_alloc") (param i32) (result i32) i32.const 1024)
           (func (export "ty_plugin_handle") (param i32 i32) (result i64) i64.const 0))
     "#;
+
+    #[test]
+    fn monty_execution_mode_is_explicit() {
+        let embedded = project_database("[plugins]\nenabled = true", []);
+        assert_eq!(
+            embedded
+                .project()
+                .settings(&embedded)
+                .plugins()
+                .monty_mode(),
+            MontyMode::InProcess,
+        );
+        let worker = project_database("[plugins]\nenabled = true\nmonty-mode = 'worker'", []);
+        assert_eq!(
+            worker.project().settings(&worker).plugins().monty_mode(),
+            MontyMode::Worker,
+        );
+    }
 
     #[test]
     fn parses_resolves_and_fingerprints_plugin_options() {
@@ -4655,6 +4715,43 @@ mod plugin_tests {
         assert_eq!(plugin.runtime(), SemanticPluginRuntime::Monty);
         assert_eq!(plugin.call_return_claims(), ["example.issue_token"]);
         assert_ne!(semantic_plugins.fingerprint(), 0);
+    }
+
+    #[cfg(all(feature = "plugins-monty", not(target_arch = "wasm32")))]
+    #[test]
+    fn monty_execution_mode_invalidates_semantic_cache() {
+        let environment = |mode| {
+            let config = format!(
+                r#"
+                [plugins]
+                enabled = true
+                monty-mode = "{mode}"
+
+                [[plugins.plugin]]
+                id = "tokens"
+                path = ".ty/plugins/tokens.py"
+                runtime = "monty"
+                manifest-path = ".ty/plugins/tokens.plugin.json"
+                trusted = true
+                "#
+            );
+            let db = project_database(
+                &config,
+                [
+                    ("/project/.ty/plugins/tokens.py", "pass"),
+                    (
+                        "/project/.ty/plugins/tokens.plugin.json",
+                        &monty_manifest_json(),
+                    ),
+                ],
+            );
+            assert_plugin_diagnostics(&db, []);
+            let environment = SemanticPlugins::environment_or_empty(&db);
+            assert_eq!(environment.plugins().len(), 1);
+            assert_ne!(environment.fingerprint(), 0);
+            environment.clone()
+        };
+        assert_ne!(environment("in-process"), environment("worker"));
     }
 
     #[cfg(feature = "plugins-wasm")]
