@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 4 };
+pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 5 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -87,6 +87,7 @@ pub enum RuntimeSpec {
     Mock,
     Wasm(WasmRuntimeSpec),
     Subprocess(SubprocessRuntimeSpec),
+    Monty(MontyRuntimeSpec),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +104,16 @@ pub struct SubprocessRuntimeSpec {
     pub command: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct MontyRuntimeSpec {
+    /// Path to the plugin's Python source file, resolved against the plugin package root or the
+    /// configured `path`.
+    pub artifact: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
 }
@@ -567,6 +578,10 @@ pub struct SemanticContext {
     pub file_path: String,
     pub python_version: String,
     pub platform: String,
+    /// The plugin's resolved configuration (`default-config` merged with project overrides),
+    /// matching what `ProjectContext::config` carries for project-level hooks.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub config: serde_json::Value,
     #[serde(default)]
     pub speculative: bool,
 }
@@ -865,10 +880,17 @@ pub enum PluginResponse {
     MemberPatch(MemberPatch),
     CallSignaturePatch(CallSignaturePatch),
     CallReturnPatch(CallReturnPatch),
-    Dependencies(Vec<PluginDependency>),
+    Dependencies(DependenciesResponse),
     MutationDiagnostics(MutationResponse),
     NoChange,
     Error(PluginError),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct DependenciesResponse {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<PluginDependency>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

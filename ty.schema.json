@@ -391,6 +391,7 @@
       "enum": [
         "wasm",
         "subprocess",
+        "monty",
         "mock"
       ]
     },

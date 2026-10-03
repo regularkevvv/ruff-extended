@@ -160,6 +160,9 @@ memchr = { version = "2.7.1", default-features = false, features = ["std"] }
 # Fixed in mimalloc v3.4.0: https://github.com/microsoft/mimalloc/issues/1291
 # Keep v2 until an updated Rust crate includes the fix.
 mimalloc = { version = "0.1.52", default-features = false, features = ["v2"] }
+monty = { version = "1.0.0", default-features = false }
+monty-pool = { version = "1.0.0", default-features = false }
+monty-types = { version = "1.0.0", default-features = false }
 natord = { version = "1.0.9", default-features = false }
 notify = { version = "8.0.0", default-features = false, features = ["macos_fsevent"] }
 ordermap = { version = "1.0.0", default-features = false, features = ["std"] }
@@ -231,6 +234,11 @@ thin-vec = { version = "0.2.14", default-features = false, features = ["std"] }
 tikv-jemallocator = { version = "0.6.0", default-features = false, features = ["background_threads_runtime_support"] }
 toml = { version = "1.0.0", default-features = false, features = ["display", "parse", "serde", "std"] }
 toml_parser = { version = "1.0.0", default-features = false, features = ["std"] }
+tokio = { version = "1", default-features = false, features = [
+    "rt-multi-thread",
+    "process",
+    "time",
+] }
 tracing = { version = "0.1.40", default-features = false, features = ["attributes", "std"] }
 tracing-flame = { version = "0.2.0", default-features = false, features = ["smallvec"] }
 tracing-indicatif = { version = "0.3.11", default-features = false }

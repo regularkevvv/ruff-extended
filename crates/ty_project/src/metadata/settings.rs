@@ -126,12 +126,20 @@ impl PluginSettings {
         }
     }
 
-    #[cfg(any(test, all(feature = "plugins-wasm", not(target_arch = "wasm32"))))]
+    #[cfg(any(
+        test,
+        all(feature = "plugins-wasm", not(target_arch = "wasm32")),
+        all(feature = "plugins-monty", not(target_arch = "wasm32"))
+    ))]
     pub(crate) const fn enabled(&self) -> bool {
         self.enabled
     }
 
-    #[cfg(any(test, all(feature = "plugins-wasm", not(target_arch = "wasm32"))))]
+    #[cfg(any(
+        test,
+        all(feature = "plugins-wasm", not(target_arch = "wasm32")),
+        all(feature = "plugins-monty", not(target_arch = "wasm32"))
+    ))]
     pub(crate) fn plugins(&self) -> &[PluginEntrySettings] {
         &self.plugins
     }
@@ -240,10 +248,16 @@ impl PluginEntrySettings {
 pub(crate) const WASM_RUNTIME_SUPPORTED: bool =
     cfg!(all(feature = "plugins-wasm", not(target_arch = "wasm32")));
 
+/// The Monty sandbox is compiled in only for native targets under the `plugins-monty` feature.
+/// As with `wasm`, the `wasm32` `ty_wasm` build never embeds it.
+pub(crate) const MONTY_RUNTIME_SUPPORTED: bool =
+    cfg!(all(feature = "plugins-monty", not(target_arch = "wasm32")));
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, get_size2::GetSize)]
 pub enum PluginRuntimeSettings {
     Wasm,
     Subprocess,
+    Monty,
     Mock,
 }
 
@@ -252,23 +266,25 @@ impl PluginRuntimeSettings {
         match self {
             Self::Wasm => "wasm",
             Self::Subprocess => "subprocess",
+            Self::Monty => "monty",
             Self::Mock => "mock",
         }
     }
 
-    /// Whether this build can execute the runtime. `mock` is always available; `wasm` depends on
-    /// [`WASM_RUNTIME_SUPPORTED`]; `subprocess` is not implemented yet.
+    /// Whether this build can execute the runtime. `mock` is always available; `wasm` and `monty`
+    /// depend on their build features; `subprocess` is not implemented yet.
     pub(crate) const fn is_supported(self) -> bool {
         match self {
             Self::Mock => true,
             Self::Wasm => WASM_RUNTIME_SUPPORTED,
+            Self::Monty => MONTY_RUNTIME_SUPPORTED,
             Self::Subprocess => false,
         }
     }
 
     /// Whether the host must be explicitly trusted before executing this runtime's local artifacts.
     pub(crate) const fn requires_trust(self) -> bool {
-        matches!(self, Self::Wasm | Self::Subprocess)
+        matches!(self, Self::Wasm | Self::Subprocess | Self::Monty)
     }
 
     /// Whether this runtime participates in semantic hooks for this build.
@@ -276,6 +292,7 @@ impl PluginRuntimeSettings {
         match self {
             Self::Mock => true,
             Self::Wasm => WASM_RUNTIME_SUPPORTED,
+            Self::Monty => MONTY_RUNTIME_SUPPORTED,
             Self::Subprocess => false,
         }
     }

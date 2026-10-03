@@ -1,0 +1,673 @@
+//! End-to-end tests for the Monty plugin backend.
+//!
+//! These run only when `plugins-monty` is enabled and drive real Python plugin source through the
+//! in-process interpreter: the SDK prelude is prepended by the runner, the plugin registers hooks
+//! with it, and requests cross the boundary as serialized JSON. Failure-path tests override
+//! `__ty_handle__` or use malformed source so each error mapping is exercised deterministically.
+
+#![cfg(all(feature = "plugins-monty", not(target_arch = "wasm32")))]
+
+use ty_plugin_host::{MontyLimits, MontyRunner, PluginEnvironment, PluginHost};
+use ty_plugin_protocol::{
+    ArgumentKind, ArgumentSummary, CallRequest, DependencyRequest, LiteralValue, PluginDependency,
+    PluginRequest, PluginResponse, RuntimeSpec, SemanticContext, TypeExpr,
+};
+use ty_plugin_sdk::ManifestBuilder;
+
+fn context() -> SemanticContext {
+    SemanticContext {
+        module: "app".to_string(),
+        file_path: "/project/app.py".to_string(),
+        python_version: "3.13".to_string(),
+        platform: "linux".to_string(),
+        config: serde_json::Value::Null,
+        speculative: false,
+    }
+}
+
+fn call_request() -> PluginRequest {
+    PluginRequest::AdjustCallReturn(CallRequest {
+        context: context(),
+        callee: TypeExpr::expression("example.runner"),
+        receiver: None,
+        arguments: vec![ArgumentSummary {
+            name: None,
+            kind: ArgumentKind::Positional,
+            type_expr: Some(TypeExpr::annotation("str")),
+            value: LiteralValue::Str {
+                value: "token".to_string(),
+            },
+            source: None,
+        }],
+        existing_signature: None,
+        default_return_type: None,
+        project_index: None,
+    })
+}
+
+/// A plugin that claims `example.runner` calls and rewrites their return type to `Token`.
+const EXAMPLE_PLUGIN: &str = r#"
+set_manifest(manifest(
+    id="example.runner",
+    name="Example Runner",
+    version="0.1.0",
+    capabilities=capabilities(call_return=True),
+    claims={"functions": [{"qualified-name": "example.runner"}]},
+))
+
+@on_call_return
+def adjust_runner(request):
+    return call_return_patch(type_expr("example.Token", mode="annotation"))
+"#;
+
+fn example_host(limits: MontyLimits) -> PluginHost<MontyRunner> {
+    let manifest = ManifestBuilder::new("example.runner", "Example Runner", "0.1.0")
+        .runtime(RuntimeSpec::Monty(
+            ty_plugin_sdk::protocol::MontyRuntimeSpec {
+                artifact: "plugin.py".to_string(),
+                sha256: None,
+            },
+        ))
+        .build();
+    let plugin_id = manifest.id.clone();
+    let environment =
+        PluginEnvironment::from_manifests(vec![manifest]).expect("example manifest is valid");
+    let mut runner = MontyRunner::new(limits).expect("runner builds");
+    runner
+        .add_plugin(plugin_id, EXAMPLE_PLUGIN)
+        .expect("plugin source compiles");
+    PluginHost::new(environment, runner)
+}
+
+#[test]
+fn runs_python_plugin_in_monty() {
+    let host = example_host(MontyLimits::default());
+
+    let manifest_response = host
+        .execute("example.runner", &PluginRequest::Manifest)
+        .expect("manifest request executes");
+    let PluginResponse::Manifest(manifest) = manifest_response else {
+        panic!("expected a manifest, got {manifest_response:?}");
+    };
+    assert_eq!(manifest.id, "example.runner");
+    assert!(manifest.capabilities.call_return);
+
+    let response = host
+        .execute("example.runner", &call_request())
+        .expect("call-return request executes");
+    let PluginResponse::CallReturnPatch(patch) = response else {
+        panic!("expected a call-return patch, got {response:?}");
+    };
+    assert_eq!(patch.return_type.expression, "example.Token");
+}
+
+#[test]
+fn unclaimed_hooks_get_no_change() {
+    let host = example_host(MontyLimits::default());
+
+    let request = PluginRequest::AdjustCallSignature(CallRequest {
+        context: context(),
+        callee: TypeExpr::expression("example.runner"),
+        receiver: None,
+        arguments: Vec::new(),
+        existing_signature: None,
+        default_return_type: None,
+        project_index: None,
+    });
+    let response = host
+        .execute("example.runner", &request)
+        .expect("request executes");
+
+    assert_eq!(response, PluginResponse::NoChange);
+}
+
+#[test]
+fn sdk_builders_produce_valid_wire_responses() {
+    const BUILDER_PLUGIN: &str = r#"
+set_manifest(manifest(
+    id="example.builders",
+    name="Example Builders",
+    version="0.1.0",
+    capabilities=capabilities(
+        call_signature=True,
+        call_return=True,
+        project_index=True,
+        additional_dependencies=True,
+    ),
+))
+
+@on_call_signature
+def signature(request):
+    return call_signature_patch(
+        callable_signature(
+            parameters=[
+                parameter(
+                    name="value",
+                    type=type_expr("str", mode="annotation"),
+                    required=True,
+                ),
+            ],
+            return_type=type_expr("example.Token", mode="annotation"),
+        )
+    )
+
+@on_dependencies
+def deps(request):
+    return dependencies([dependency("vendor/spec.json")])
+
+@on_project_index
+def index(request):
+    return project_index({"tokens": {"example.issue_token": "example.Token"}})
+"#;
+    let manifest = ManifestBuilder::new("example.builders", "test", "0.0.0").build();
+    let environment = PluginEnvironment::from_manifests(vec![manifest]).expect("manifest is valid");
+    let plugin_id = "example.builders".to_string();
+    let mut runner = MontyRunner::new(MontyLimits::default()).expect("runner builds");
+    runner
+        .add_plugin(&plugin_id, BUILDER_PLUGIN)
+        .expect("plugin source compiles");
+    let host = PluginHost::new(environment, runner);
+
+    let response = host
+        .execute(
+            &plugin_id,
+            &PluginRequest::AdjustCallSignature(CallRequest {
+                context: context(),
+                callee: TypeExpr::expression("example.issue_token"),
+                receiver: None,
+                arguments: Vec::new(),
+                existing_signature: None,
+                default_return_type: None,
+                project_index: None,
+            }),
+        )
+        .expect("call-signature request executes");
+    let PluginResponse::CallSignaturePatch(patch) = response else {
+        panic!("expected a call-signature patch, got {response:?}");
+    };
+    assert_eq!(patch.signature.return_type.expression, "example.Token");
+    assert_eq!(patch.signature.parameters[0].name.as_deref(), Some("value"));
+
+    let response = host
+        .execute(
+            &plugin_id,
+            &PluginRequest::AdditionalDependencies(DependencyRequest {
+                config: serde_json::Value::default(),
+            }),
+        )
+        .expect("dependencies request executes");
+    let PluginResponse::Dependencies(deps) = response else {
+        panic!("expected a dependencies response, got {response:?}");
+    };
+    assert_eq!(
+        deps.dependencies,
+        vec![PluginDependency {
+            path: "vendor/spec.json".to_string(),
+            sha256: None,
+        }]
+    );
+
+    let response = host
+        .execute(
+            &plugin_id,
+            &PluginRequest::BuildProjectIndex(ty_plugin_protocol::BuildProjectIndexRequest {
+                context: ty_plugin_protocol::ProjectContext {
+                    root: "/project".to_string(),
+                    python_version: "3.13".to_string(),
+                    platform: "linux".to_string(),
+                    config: serde_json::Value::default(),
+                },
+                classes: Vec::new(),
+                settings: Vec::new(),
+                assignments: Vec::new(),
+                functions: Vec::new(),
+                previous_index_fingerprint: None,
+            }),
+        )
+        .expect("project-index request executes");
+    let PluginResponse::ProjectIndex(index) = response else {
+        panic!("expected a project-index response, got {response:?}");
+    };
+    assert_eq!(
+        index.plugin_index["tokens"]["example.issue_token"],
+        "example.Token"
+    );
+}
+
+#[test]
+fn sdk_surface_covers_manifest_claims_and_project_index() {
+    const SURFACE_PLUGIN: &str = r#"
+set_manifest(manifest(
+    id="example.surface",
+    name="Example Surface",
+    version="0.1.0",
+    capabilities=capabilities(project_index=True, call_return=True),
+    claims=claims(
+        functions=[symbol_claim("example.issue_token")],
+        methods=[method_claim_on_subclass_of_matching("example.Base", "run_*")],
+        attributes=[attribute_claim_exact("example.Widget", "state", "instance")],
+        mutations=[class_claim_subclass_of("example.Model")],
+        settings=[settings_claim(module="example.settings")],
+    ),
+    stub_overlays=[stub_overlay("example", "stubs/example.pyi")],
+))
+
+@on_call_return_of("example.runner")
+def filtered(request):
+    args = call_arguments(request)
+    if literal_value(args[0]) == "token":
+        return call_return_patch(type_expr("example.Token", mode="annotation"))
+    return None
+
+@on_call_return
+def fallback(request):
+    return call_return_patch(type_expr("example.Fallback", mode="annotation"))
+
+@on_project_index
+def index(request):
+    return project_index(
+        {"seen": True},
+        contributions=[
+            contribution(
+                symbol_source(module="example", qualified_name="example.tokens"),
+                instance_target("example.Widget"),
+                member_contribution(member("state", type_annotation("int"))),
+                "example.tokens/state",
+            ),
+        ],
+        virtual_types=[
+            virtual_type(
+                "example.Pair",
+                virtual_named_tuple([
+                    virtual_field("first", type_annotation("int")),
+                    virtual_field("second", type_annotation("str"), required=False),
+                ]),
+            ),
+        ],
+    )
+"#;
+    let manifest = ManifestBuilder::new("example.surface", "test", "0.0.0").build();
+    let environment = PluginEnvironment::from_manifests(vec![manifest]).expect("manifest is valid");
+    let plugin_id = "example.surface".to_string();
+    let mut runner = MontyRunner::new(MontyLimits::default()).expect("runner builds");
+    runner
+        .add_plugin(&plugin_id, SURFACE_PLUGIN)
+        .expect("plugin source compiles");
+    let host = PluginHost::new(environment, runner);
+
+    let response = host
+        .execute(&plugin_id, &PluginRequest::Manifest)
+        .expect("manifest request executes");
+    let PluginResponse::Manifest(manifest) = response else {
+        panic!("expected a manifest, got {response:?}");
+    };
+    assert_eq!(manifest.claims.methods.len(), 1);
+    assert_eq!(
+        manifest.claims.methods[0].kind,
+        ty_plugin_protocol::MethodClaimKind::OnSubclassOfMatching {
+            base_qualified_name: "example.Base".to_string(),
+            method_name_pattern: "run_*".to_string(),
+        }
+    );
+    assert_eq!(
+        manifest.claims.attributes[0].kind,
+        ty_plugin_protocol::AttributeClaimKind::Exact {
+            owner_qualified_name: "example.Widget".to_string(),
+            attribute_name: "state".to_string(),
+            scope: ty_plugin_protocol::AttributeScope::Instance,
+        }
+    );
+    assert_eq!(
+        manifest.stub_overlays,
+        vec![ty_plugin_protocol::StubOverlay {
+            module: "example".to_string(),
+            path: "stubs/example.pyi".to_string(),
+            sha256: None,
+        }]
+    );
+
+    // The filtered handler claims matching callees; the generic one catches the rest.
+    let response = host
+        .execute(&plugin_id, &call_request())
+        .expect("filtered call executes");
+    let PluginResponse::CallReturnPatch(patch) = response else {
+        panic!("expected a call-return patch, got {response:?}");
+    };
+    assert_eq!(patch.return_type.expression, "example.Token");
+
+    let other_call = PluginRequest::AdjustCallReturn(CallRequest {
+        context: context(),
+        callee: TypeExpr::expression("example.other"),
+        receiver: None,
+        arguments: Vec::new(),
+        existing_signature: None,
+        default_return_type: None,
+        project_index: None,
+    });
+    let response = host
+        .execute(&plugin_id, &other_call)
+        .expect("unclaimed callee falls through to the generic handler");
+    let PluginResponse::CallReturnPatch(patch) = response else {
+        panic!("expected a call-return patch, got {response:?}");
+    };
+    assert_eq!(patch.return_type.expression, "example.Fallback");
+
+    let response = host
+        .execute(
+            &plugin_id,
+            &PluginRequest::BuildProjectIndex(ty_plugin_protocol::BuildProjectIndexRequest {
+                context: ty_plugin_protocol::ProjectContext {
+                    root: "/project".to_string(),
+                    python_version: "3.13".to_string(),
+                    platform: "linux".to_string(),
+                    config: serde_json::Value::default(),
+                },
+                classes: Vec::new(),
+                settings: Vec::new(),
+                assignments: Vec::new(),
+                functions: Vec::new(),
+                previous_index_fingerprint: None,
+            }),
+        )
+        .expect("project-index request executes");
+    let PluginResponse::ProjectIndex(index) = response else {
+        panic!("expected a project-index response, got {response:?}");
+    };
+    let ty_plugin_protocol::ContributionTarget::Instance { qualified_name } =
+        &index.contributions[0].target
+    else {
+        panic!("expected an instance target, got {:?}", index.contributions);
+    };
+    assert_eq!(qualified_name, "example.Widget");
+    let ty_plugin_protocol::ContributionPatch::Member(patch) = &index.contributions[0].patch else {
+        panic!("expected a member patch, got {:?}", index.contributions);
+    };
+    assert_eq!(patch.name, "state");
+    assert_eq!(
+        index.virtual_types[0].shape,
+        ty_plugin_protocol::VirtualTypeShape::NamedTuple {
+            fields: vec![
+                ty_plugin_protocol::VirtualTypeField {
+                    name: "first".to_string(),
+                    type_expr: TypeExpr::annotation("int"),
+                    required: true,
+                    read_only: false,
+                },
+                ty_plugin_protocol::VirtualTypeField {
+                    name: "second".to_string(),
+                    type_expr: TypeExpr::annotation("str"),
+                    required: false,
+                    read_only: false,
+                },
+            ],
+        }
+    );
+}
+
+#[test]
+fn plugin_exception_surfaces_as_error_response() {
+    const RAISING_PLUGIN: &str = r#"
+@on_call_return
+def adjust_runner(request):
+    raise ValueError("plugin rejected the call")
+"#;
+    let manifest = ManifestBuilder::new("example.runner", "test", "0.0.0").build();
+    let environment = PluginEnvironment::from_manifests(vec![manifest]).expect("manifest is valid");
+    let mut runner = MontyRunner::new(MontyLimits::default()).expect("runner builds");
+    runner
+        .add_plugin("example.runner", RAISING_PLUGIN)
+        .expect("plugin source compiles");
+    let host = PluginHost::new(environment, runner);
+
+    let response = host
+        .execute("example.runner", &call_request())
+        .expect("a raising hook returns a protocol error response");
+
+    let PluginResponse::Error(error) = response else {
+        panic!("expected an error response, got {response:?}");
+    };
+    assert!(
+        error.message.contains("plugin rejected the call"),
+        "unexpected error message: {}",
+        error.message
+    );
+}
+
+#[test]
+fn invalid_python_fails_at_load() {
+    let mut runner = MontyRunner::new(MontyLimits::default()).expect("runner builds");
+
+    let error = runner
+        .add_plugin("broken", "def broken(:\n")
+        .expect_err("invalid Python is rejected");
+
+    assert!(
+        error.to_string().contains("compile"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn non_string_handler_result_is_rejected() {
+    const BAD_HANDLER: &str = r#"
+def __ty_handle__(request_json):
+    return 42
+"#;
+    let manifest = ManifestBuilder::new("bad.handler", "test", "0.0.0").build();
+    let environment = PluginEnvironment::from_manifests(vec![manifest]).expect("manifest is valid");
+    let plugin_id = "bad.handler".to_string();
+    let mut runner = MontyRunner::new(MontyLimits::default()).expect("runner builds");
+    runner
+        .add_plugin(&plugin_id, BAD_HANDLER)
+        .expect("plugin source compiles");
+    let host = PluginHost::new(environment, runner);
+
+    let error = host
+        .execute(&plugin_id, &PluginRequest::Manifest)
+        .expect_err("a non-string result is rejected");
+
+    assert!(
+        error.to_string().contains("non-string"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn invalid_json_result_is_rejected() {
+    const BAD_JSON: &str = r#"
+def __ty_handle__(request_json):
+    return "not json"
+"#;
+    let manifest = ManifestBuilder::new("bad.json", "test", "0.0.0").build();
+    let environment = PluginEnvironment::from_manifests(vec![manifest]).expect("manifest is valid");
+    let plugin_id = "bad.json".to_string();
+    let mut runner = MontyRunner::new(MontyLimits::default()).expect("runner builds");
+    runner
+        .add_plugin(&plugin_id, BAD_JSON)
+        .expect("plugin source compiles");
+    let host = PluginHost::new(environment, runner);
+
+    let error = host
+        .execute(&plugin_id, &PluginRequest::Manifest)
+        .expect_err("invalid JSON is rejected");
+
+    assert!(
+        error.to_string().contains("invalid response JSON"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn oversized_response_is_rejected() {
+    let limits = MontyLimits {
+        max_response_bytes: 4,
+        ..MontyLimits::default()
+    };
+    let host = example_host(limits);
+
+    let error = host
+        .execute("example.runner", &PluginRequest::Manifest)
+        .expect_err("an oversized response is rejected");
+
+    assert!(
+        error.to_string().contains("size limit"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn sandbox_denies_filesystem_access() {
+    const ESCAPING_PLUGIN: &str = r#"
+@on_call_return
+def probe(request):
+    return call_return_patch(type_expr(open("/etc/passwd").read()))
+"#;
+    let manifest = ManifestBuilder::new("sandbox.probe", "test", "0.0.0").build();
+    let environment = PluginEnvironment::from_manifests(vec![manifest]).expect("manifest is valid");
+    let plugin_id = "sandbox.probe".to_string();
+    let mut runner = MontyRunner::new(MontyLimits::default()).expect("runner builds");
+    runner
+        .add_plugin(&plugin_id, ESCAPING_PLUGIN)
+        .expect("plugin source compiles");
+    let host = PluginHost::new(environment, runner);
+
+    let error = host
+        .execute(&plugin_id, &call_request())
+        .expect_err("filesystem access is denied");
+
+    assert!(
+        error.to_string().contains("open"),
+        "unexpected error: {error}"
+    );
+}
+
+#[cfg(feature = "plugins-monty-pool")]
+#[test]
+fn runs_python_plugin_through_monty_pool() {
+    // Pool workers are `monty` subprocesses; the test only runs when a worker binary is provided
+    // through `TY_MONTY_BIN` (e.g. from the `pydantic-monty-runtime` wheel) and skips otherwise.
+    let Some(binary) = std::env::var_os("TY_MONTY_BIN") else {
+        return;
+    };
+
+    let manifest = ManifestBuilder::new("example.runner", "Example Runner", "0.1.0")
+        .runtime(RuntimeSpec::Monty(
+            ty_plugin_sdk::protocol::MontyRuntimeSpec {
+                artifact: "plugin.py".to_string(),
+                sha256: None,
+            },
+        ))
+        .build();
+    let environment =
+        PluginEnvironment::from_manifests(vec![manifest]).expect("example manifest is valid");
+    let mut runner =
+        MontyRunner::pool(MontyLimits::default(), Some(binary.into())).expect("worker pool starts");
+    runner
+        .add_plugin("example.runner", EXAMPLE_PLUGIN)
+        .expect("plugin source compiles");
+    let host = PluginHost::new(environment, runner);
+
+    let response = host
+        .execute("example.runner", &call_request())
+        .expect("call-return request executes through the pool");
+    let PluginResponse::CallReturnPatch(patch) = response else {
+        panic!("expected a call-return patch, got {response:?}");
+    };
+    assert_eq!(patch.return_type.expression, "example.Token");
+}
+
+#[test]
+fn sandboxed_time_and_random_are_deterministic() {
+    const CLOCK_PLUGIN: &str = r#"
+import time
+import random
+
+@on_call_return
+def adjust_runner(request):
+    observed = time.time() + time.process_time() + random.random()
+    return call_return_patch(type_expr(str(observed)))
+"#;
+    let manifest = ManifestBuilder::new("example.clock", "test", "0.0.0").build();
+    let environment = PluginEnvironment::from_manifests(vec![manifest]).expect("manifest is valid");
+    let plugin_id = "example.clock".to_string();
+    let mut runner = MontyRunner::new(MontyLimits::default()).expect("runner builds");
+    runner
+        .add_plugin(&plugin_id, CLOCK_PLUGIN)
+        .expect("plugin source compiles");
+    let host = PluginHost::new(environment, runner);
+
+    let response = host
+        .execute(&plugin_id, &call_request())
+        .expect("call-return request executes");
+    let PluginResponse::CallReturnPatch(patch) = response else {
+        panic!("expected a call-return patch, got {response:?}");
+    };
+
+    // The fixed os policy pins `time.time`/`process_time` to zero and seeds `random`
+    // deterministically, so the summed value is a constant across runs.
+    let first = patch.return_type.expression;
+    let response = host
+        .execute(&plugin_id, &call_request())
+        .expect("second call executes");
+    let PluginResponse::CallReturnPatch(patch) = response else {
+        panic!("expected a call-return patch, got {response:?}");
+    };
+    assert_eq!(patch.return_type.expression, first);
+}
+
+#[test]
+fn plugin_print_output_does_not_corrupt_responses() {
+    const CHATTY_PLUGIN: &str = r#"
+@on_call_return
+def adjust_runner(request):
+    print("handling", request["kind"])
+    return call_return_patch(type_expr("example.Token", mode="annotation"))
+"#;
+    let manifest = ManifestBuilder::new("example.chatty", "test", "0.0.0").build();
+    let environment = PluginEnvironment::from_manifests(vec![manifest]).expect("manifest is valid");
+    let plugin_id = "example.chatty".to_string();
+    let mut runner = MontyRunner::new(MontyLimits::default()).expect("runner builds");
+    runner
+        .add_plugin(&plugin_id, CHATTY_PLUGIN)
+        .expect("plugin source compiles");
+    let host = PluginHost::new(environment, runner);
+
+    let response = host
+        .execute(&plugin_id, &call_request())
+        .expect("call-return request executes");
+    let PluginResponse::CallReturnPatch(patch) = response else {
+        panic!("expected a call-return patch, got {response:?}");
+    };
+    assert_eq!(patch.return_type.expression, "example.Token");
+}
+
+#[test]
+fn looping_plugin_is_stopped_by_limits() {
+    const LOOPER: &str = r#"
+@on_call_return
+def adjust_runner(request):
+    while True:
+        pass
+"#;
+    let manifest = ManifestBuilder::new("looper", "test", "0.0.0").build();
+    let environment = PluginEnvironment::from_manifests(vec![manifest]).expect("manifest is valid");
+    let plugin_id = "looper".to_string();
+    let limits = MontyLimits {
+        max_feed_duration: std::time::Duration::from_millis(100),
+        ..MontyLimits::default()
+    };
+    let mut runner = MontyRunner::new(limits).expect("runner builds");
+    runner
+        .add_plugin(&plugin_id, LOOPER)
+        .expect("plugin source compiles");
+    let host = PluginHost::new(environment, runner);
+
+    let error = host
+        .execute(&plugin_id, &call_request())
+        .expect_err("a looping plugin is stopped");
+
+    assert!(
+        error.to_string().contains("ime") || error.to_string().contains("loop"),
+        "unexpected error: {error}"
+    );
+}
