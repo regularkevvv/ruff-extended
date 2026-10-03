@@ -19,8 +19,8 @@ use ty_plugin_protocol as protocol;
 use super::implicit_attributes::implicit_attribute_names;
 use crate::types::plugin::{
     PluginVirtualTypePatch, plugin_callable_type_from_protocol_signature_in_class,
-    plugin_callable_type_from_protocol_signature_with_virtual_types, plugin_file_path,
-    plugin_semantic_context, plugin_type_expr_from_type,
+    plugin_callable_type_from_protocol_signature_with_virtual_types, plugin_config_json,
+    plugin_file_path, plugin_semantic_context, plugin_type_expr_from_type,
     plugin_type_expr_to_type_in_class_with_virtual_types,
     plugin_type_expr_to_type_with_virtual_types, plugin_virtual_type_patches_from_protocol,
 };
@@ -1700,6 +1700,7 @@ impl<'db> StaticClassLiteral<'db> {
             let request = plugin_analyze_class_request(
                 db,
                 env,
+                plugin,
                 self,
                 &class_summary,
                 plugin_project_index_json(db, env, plugin),
@@ -1825,6 +1826,7 @@ impl<'db> StaticClassLiteral<'db> {
             );
             let request = plugin_resolve_member_request(
                 db,
+                plugin,
                 self,
                 name.as_str(),
                 scope,
@@ -4317,13 +4319,7 @@ fn plugin_project_index<'db>(
         .map(plugin_project_diagnostic_from_protocol)
         .collect::<Vec<_>>();
 
-    let mut config: serde_json::Value =
-        serde_json::from_str(plugin.config_json()).unwrap_or_default();
-    if let serde_json::Value::Object(config) = &mut config {
-        config
-            .entry("strict_settings")
-            .or_insert_with(|| serde_json::Value::Bool(plugin.strict_settings()));
-    }
+    let config = plugin_config_json(plugin);
 
     let request = protocol::PluginRequest::BuildProjectIndex(protocol::BuildProjectIndexRequest {
         context: protocol::ProjectContext {
@@ -5263,6 +5259,7 @@ fn plugin_class_field_summaries<'db>(
 fn plugin_analyze_class_request<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
+    plugin: &SemanticPlugin,
     class: StaticClassLiteral<'db>,
     summary: &PluginClassSummary<'db>,
     project_index: Option<serde_json::Value>,
@@ -5270,7 +5267,7 @@ fn plugin_analyze_class_request<'db>(
     let file = class.file(db);
 
     protocol::PluginRequest::AnalyzeClass(protocol::AnalyzeClassRequest {
-        context: plugin_semantic_context(db, env, file, false),
+        context: plugin_semantic_context(db, env, plugin, file, false),
         class: plugin_protocol_class_summary(db, env, class, summary),
         project_index,
     })
@@ -6010,8 +6007,10 @@ fn plugin_module_name(db: &dyn Db, file: File) -> String {
         .unwrap_or_default()
 }
 
+#[expect(clippy::too_many_arguments)]
 fn plugin_resolve_member_request<'db>(
     db: &'db dyn Db,
+    plugin: &SemanticPlugin,
     class: StaticClassLiteral<'db>,
     member_name: &str,
     scope: PluginMemberScope,
@@ -6026,7 +6025,7 @@ fn plugin_resolve_member_request<'db>(
         PluginMemberScope::Instance => ClassLiteral::Static(class).to_non_generic_instance(db, env),
     });
     let request = protocol::ResolveMemberRequest {
-        context: plugin_semantic_context(db, env, file, false),
+        context: plugin_semantic_context(db, env, plugin, file, false),
         owner: plugin_type_expr_from_type(db, env, owner),
         member_name: member_name.to_string(),
         existing_member: existing_ty.map(|ty| protocol::MemberSummary {
@@ -6103,7 +6102,9 @@ fn execute_project_index_plugin(
 ) -> protocol::PluginResponse {
     match plugin.runtime() {
         SemanticPluginRuntime::Mock => mock_plugin_execute_project_index(request),
-        SemanticPluginRuntime::InProcess | SemanticPluginRuntime::Wasm => db
+        SemanticPluginRuntime::InProcess
+        | SemanticPluginRuntime::Wasm
+        | SemanticPluginRuntime::Monty => db
             .execute_semantic_plugin(plugin.id(), request)
             .unwrap_or_else(|error| {
                 tracing::warn!(
@@ -6124,7 +6125,9 @@ fn execute_class_transform_plugin(
 ) -> protocol::PluginResponse {
     match plugin.runtime() {
         SemanticPluginRuntime::Mock => mock_plugin_execute_class_transform(request),
-        SemanticPluginRuntime::InProcess | SemanticPluginRuntime::Wasm => db
+        SemanticPluginRuntime::InProcess
+        | SemanticPluginRuntime::Wasm
+        | SemanticPluginRuntime::Monty => db
             .execute_semantic_plugin(plugin.id(), request)
             .unwrap_or_else(|error| {
                 tracing::warn!(
@@ -6166,7 +6169,9 @@ fn execute_member_plugin(
 ) -> protocol::PluginResponse {
     match plugin.runtime() {
         SemanticPluginRuntime::Mock => mock_plugin_execute_member(request),
-        SemanticPluginRuntime::InProcess | SemanticPluginRuntime::Wasm => db
+        SemanticPluginRuntime::InProcess
+        | SemanticPluginRuntime::Wasm
+        | SemanticPluginRuntime::Monty => db
             .execute_semantic_plugin(plugin.id(), request)
             .unwrap_or_else(|error| {
                 tracing::warn!(
@@ -6881,13 +6886,31 @@ mod tests {
         class_name: &str,
     ) -> protocol::AnalyzeClassRequest {
         let class = static_class_literal(db, path, class_name);
+        let plugin = SemanticPlugin::new(
+            "test.class-transform",
+            SemanticPluginRuntime::Mock,
+            Vec::<String>::new(),
+            Vec::<SemanticPluginMemberClaim>::new(),
+            Vec::<SemanticPluginMemberClaim>::new(),
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        );
 
         let summary = plugin_class_summary(db, &db.program_environment(), class);
-        let protocol::PluginRequest::AnalyzeClass(request) =
-            plugin_analyze_class_request(db, &db.program_environment(), class, &summary, None)
-        else {
+        let protocol::PluginRequest::AnalyzeClass(request) = plugin_analyze_class_request(
+            db,
+            &db.program_environment(),
+            &plugin,
+            class,
+            &summary,
+            None,
+        ) else {
             panic!("expected AnalyzeClass request");
         };
+        assert_eq!(
+            request.context.config["strict_settings"],
+            serde_json::Value::Bool(false)
+        );
         request
     }
 

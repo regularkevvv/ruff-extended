@@ -69,6 +69,8 @@ zip = { workspace = true }
 [features]
 default = []
 plugins-wasm = ["ty_project/plugins-wasm"]
+plugins-monty = ["ty_project/plugins-monty"]
+plugins-monty-pool = ["ty_project/plugins-monty-pool"]
 test-uv = ["ty_server/test-uv"]
 
 [lints]

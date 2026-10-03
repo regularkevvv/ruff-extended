@@ -21,6 +21,7 @@ fn context() -> SemanticContext {
         file_path: "/project/app.py".to_string(),
         python_version: "3.13".to_string(),
         platform: "linux".to_string(),
+        config: Value::Null,
         speculative: false,
     }
 }

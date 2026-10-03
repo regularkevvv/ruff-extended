@@ -1392,10 +1392,24 @@ fn parentheses_wrap_entire_expression(expression: &str) -> bool {
     depth == 0
 }
 
+/// The resolved configuration JSON sent to `plugin` in request contexts: the user's plugin
+/// config with `strict_settings` folded in as a fallback key.
+pub(crate) fn plugin_config_json(plugin: &SemanticPlugin) -> serde_json::Value {
+    let mut config: serde_json::Value =
+        serde_json::from_str(plugin.config_json()).unwrap_or_default();
+    if let serde_json::Value::Object(config) = &mut config {
+        config
+            .entry("strict_settings")
+            .or_insert_with(|| serde_json::Value::Bool(plugin.strict_settings()));
+    }
+    config
+}
+
 /// Build the semantic context sent to plugins for a hook rooted in `file`.
 pub(crate) fn plugin_semantic_context<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
+    plugin: &SemanticPlugin,
     file: File,
     speculative: bool,
 ) -> protocol::SemanticContext {
@@ -1408,6 +1422,7 @@ pub(crate) fn plugin_semantic_context<'db>(
         file_path: plugin_file_path(db, file),
         python_version: env.python_version(db).to_string(),
         platform: env.program(db).python_platform(db).to_string(),
+        config: plugin_config_json(plugin),
         speculative,
     }
 }
@@ -1815,7 +1830,7 @@ pub(crate) fn plugin_mutation_diagnostics<'db>(
         source: Some(plugin_symbol_source(db, file, expression.range(), None)),
     };
     let request = protocol::PluginRequest::ValidateMutation(Box::new(protocol::MutationRequest {
-        context: plugin_semantic_context(db, env, file, speculative),
+        context: plugin_semantic_context(db, env, plugin, file, speculative),
         operation,
         receiver: plugin_qualified_type_expr_from_type(db, env, receiver_ty),
         key: key.map(argument),
@@ -1826,7 +1841,9 @@ pub(crate) fn plugin_mutation_diagnostics<'db>(
 
     let response = match plugin.runtime() {
         SemanticPluginRuntime::Mock => protocol::PluginResponse::NoChange,
-        SemanticPluginRuntime::InProcess | SemanticPluginRuntime::Wasm => db
+        SemanticPluginRuntime::InProcess
+        | SemanticPluginRuntime::Wasm
+        | SemanticPluginRuntime::Monty => db
             .execute_semantic_plugin(plugin.id(), &request)
             .map_err(|error| PluginRuntimeDiagnostic::new(plugin.id(), error))?,
     };
@@ -1850,7 +1867,7 @@ fn plugin_call_request<'db>(
     speculative: bool,
 ) -> protocol::PluginRequest {
     let request = protocol::CallRequest {
-        context: plugin_semantic_context(db, env, file, speculative),
+        context: plugin_semantic_context(db, env, plugin, file, speculative),
         callee: protocol::TypeExpr::expression(callee.qualified_name()),
         receiver: callee
             .receiver_ty()
@@ -2106,7 +2123,9 @@ fn execute_call_plugin(
             CallHook::Signature => mock_plugin_execute_call_signature(request),
             CallHook::Return => mock_plugin_execute_call_return(request),
         }),
-        SemanticPluginRuntime::InProcess | SemanticPluginRuntime::Wasm => db
+        SemanticPluginRuntime::InProcess
+        | SemanticPluginRuntime::Wasm
+        | SemanticPluginRuntime::Monty => db
             .execute_semantic_plugin(plugin.id(), request)
             .map_err(|error| PluginRuntimeDiagnostic::new(plugin.id(), error)),
     }

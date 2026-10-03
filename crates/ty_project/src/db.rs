@@ -1,7 +1,9 @@
-#[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
 use std::collections::BTreeMap;
 use std::fmt::Formatter;
-#[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
+#[cfg(any(
+    all(feature = "plugins-wasm", not(target_arch = "wasm32")),
+    all(feature = "plugins-monty", not(target_arch = "wasm32"))
+))]
 use std::panic::AssertUnwindSafe;
 use std::panic::RefUnwindSafe;
 use std::sync::Arc;
@@ -9,7 +11,6 @@ use std::{cmp, fmt};
 
 pub use self::changes::ChangeResult;
 use crate::CollectReporter;
-#[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
 use crate::metadata::settings::PluginRuntimeSettings;
 use crate::metadata::settings::Settings;
 use crate::metadata::settings::file_settings;
@@ -24,9 +25,19 @@ use ruff_db::system::{DbWithWritableSystem, System, SystemPath, WritableSystem};
 use ruff_db::vendored::VendoredFileSystem;
 use salsa::{Database, Event, Setter};
 use ty_module_resolver::system_module_search_paths;
+#[cfg(any(
+    all(feature = "plugins-wasm", not(target_arch = "wasm32")),
+    all(feature = "plugins-monty", not(target_arch = "wasm32"))
+))]
+use ty_plugin_host::{HostError, PluginEnvironment, PluginHost, PluginRunner};
+#[cfg(all(feature = "plugins-monty", not(target_arch = "wasm32")))]
+use ty_plugin_host::{MontyLimits, MontyRunner};
 #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
-use ty_plugin_host::{HostError, PluginEnvironment, PluginHost, WasmLimits, WasmRunner};
-#[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
+use ty_plugin_host::{WasmLimits, WasmRunner};
+#[cfg(any(
+    all(feature = "plugins-wasm", not(target_arch = "wasm32")),
+    all(feature = "plugins-monty", not(target_arch = "wasm32"))
+))]
 use ty_plugin_protocol::PluginManifest;
 use ty_plugin_protocol::{PluginRequest, PluginResponse};
 use ty_python_core::ProgramFile;
@@ -61,90 +72,143 @@ pub trait Db: SemanticDb {
 
 #[derive(Clone, Default)]
 struct SemanticPluginRuntimeState {
+    /// Every configured plugin's runtime, including plugins this build cannot execute; used to
+    /// dispatch hook calls to the right host and to report accurate unsupported-runtime errors.
+    plugin_runtimes: Arc<BTreeMap<String, PluginRuntimeSettings>>,
     #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
     wasm_host: Option<Arc<AssertUnwindSafe<PluginHost<WasmRunner>>>>,
     #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
     wasm_errors: Arc<BTreeMap<String, SemanticPluginRuntimeError>>,
+    #[cfg(all(feature = "plugins-monty", not(target_arch = "wasm32")))]
+    monty_host: Option<Arc<AssertUnwindSafe<PluginHost<MontyRunner>>>>,
+    #[cfg(all(feature = "plugins-monty", not(target_arch = "wasm32")))]
+    monty_errors: Arc<BTreeMap<String, SemanticPluginRuntimeError>>,
 }
 
 impl SemanticPluginRuntimeState {
     fn from_settings(settings: &Settings, system: &dyn System) -> Self {
-        #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
+        #[cfg(any(
+            all(feature = "plugins-wasm", not(target_arch = "wasm32")),
+            all(feature = "plugins-monty", not(target_arch = "wasm32"))
+        ))]
         {
-            Self::from_settings_wasm(settings, system)
+            let plugin_settings = settings.plugins();
+            if !plugin_settings.enabled() {
+                return Self::default();
+            }
+
+            let mut state = Self {
+                plugin_runtimes: Arc::new(
+                    plugin_settings
+                        .plugins()
+                        .iter()
+                        .map(|plugin| (plugin.id().to_string(), plugin.runtime()))
+                        .collect(),
+                ),
+                ..Self::default()
+            };
+
+            #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
+            {
+                let (host, errors) = Self::load_runtime_plugins(
+                    settings,
+                    system,
+                    PluginRuntimeSettings::Wasm,
+                    WasmRunner::new(WasmLimits::default()),
+                    |runner: &mut WasmRunner, plugin_id, artifact| {
+                        runner.add_plugin(plugin_id, artifact)
+                    },
+                );
+                state.wasm_host = host.map(|host| Arc::new(AssertUnwindSafe(host)));
+                state.wasm_errors = Arc::new(errors);
+            }
+
+            #[cfg(all(feature = "plugins-monty", not(target_arch = "wasm32")))]
+            {
+                let (host, errors) = Self::load_runtime_plugins(
+                    settings,
+                    system,
+                    PluginRuntimeSettings::Monty,
+                    Self::monty_runner(),
+                    |runner: &mut MontyRunner, plugin_id, artifact| {
+                        runner.add_plugin(plugin_id, artifact)
+                    },
+                );
+                state.monty_host = host.map(|host| Arc::new(AssertUnwindSafe(host)));
+                state.monty_errors = Arc::new(errors);
+            }
+
+            state
         }
 
-        #[cfg(not(all(feature = "plugins-wasm", not(target_arch = "wasm32"))))]
+        #[cfg(not(any(
+            all(feature = "plugins-wasm", not(target_arch = "wasm32")),
+            all(feature = "plugins-monty", not(target_arch = "wasm32"))
+        )))]
         {
             let _ = (settings, system);
             Self::default()
         }
     }
 
-    fn execute(
-        &self,
-        plugin_id: &str,
-        request: &PluginRequest,
-    ) -> Result<PluginResponse, SemanticPluginRuntimeError> {
-        #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
+    /// Prefer a `monty-pool` of worker subprocesses when the pool feature and a `monty` binary are
+    /// available; fall back to the in-process interpreter otherwise.
+    #[cfg(all(feature = "plugins-monty", not(target_arch = "wasm32")))]
+    fn monty_runner() -> Result<MontyRunner, ty_plugin_host::RuntimeError> {
+        #[cfg(feature = "plugins-monty-pool")]
         {
-            if let Some(error) = self.wasm_errors.get(plugin_id) {
-                return Err(error.clone());
+            match MontyRunner::pool(MontyLimits::default(), None) {
+                Ok(runner) => return Ok(runner),
+                Err(error) => {
+                    tracing::info!(
+                        "monty worker pool unavailable ({error}); running monty plugins in-process"
+                    );
+                }
             }
-            if let Some(error) = self.wasm_errors.get("*") {
-                return Err(error.clone());
-            }
-
-            let Some(host) = &self.wasm_host else {
-                return Err(Self::unsupported_runtime_error());
-            };
-
-            host.0
-                .execute(plugin_id, request)
-                .map_err(Self::host_error_to_runtime_error)
         }
-
-        #[cfg(not(all(feature = "plugins-wasm", not(target_arch = "wasm32"))))]
-        {
-            let _ = (self, plugin_id, request);
-            Err(Self::unsupported_runtime_error())
-        }
+        MontyRunner::new(MontyLimits::default())
     }
 
-    fn unsupported_runtime_error() -> SemanticPluginRuntimeError {
-        SemanticPluginRuntimeError::new(
-            "plugin runtime `wasm` is not available in this build",
-            "Rebuild `ty` with the `plugins-wasm` feature enabled or remove the plugin.",
-        )
-    }
-
-    #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
-    fn from_settings_wasm(settings: &Settings, system: &dyn System) -> Self {
-        let plugin_settings = settings.plugins();
-        if !plugin_settings.enabled() {
-            return Self::default();
-        }
-
-        let mut runner = match WasmRunner::new(WasmLimits::default()) {
+    /// Read manifests and artifacts for every trusted plugin on `runtime` and register them with
+    /// `runner`, returning the constructed host and any per-plugin load errors.
+    #[cfg(any(
+        all(feature = "plugins-wasm", not(target_arch = "wasm32")),
+        all(feature = "plugins-monty", not(target_arch = "wasm32"))
+    ))]
+    fn load_runtime_plugins<R>(
+        settings: &Settings,
+        system: &dyn System,
+        runtime: PluginRuntimeSettings,
+        runner: Result<R, ty_plugin_host::RuntimeError>,
+        mut add_artifact: impl FnMut(&mut R, &str, &[u8]) -> Result<(), ty_plugin_host::RuntimeError>,
+    ) -> (
+        Option<PluginHost<R>>,
+        BTreeMap<String, SemanticPluginRuntimeError>,
+    )
+    where
+        R: PluginRunner,
+    {
+        let mut runner = match runner {
             Ok(runner) => runner,
             Err(error) => {
-                return Self {
-                    wasm_host: None,
-                    wasm_errors: Arc::new(BTreeMap::from([(
+                return (
+                    None,
+                    BTreeMap::from([(
                         "*".to_string(),
                         Self::runtime_error_to_semantic_error(&error),
-                    )])),
-                };
+                    )]),
+                );
             }
         };
 
         let mut manifests = Vec::new();
         let mut errors = BTreeMap::new();
 
-        for plugin in plugin_settings
+        for plugin in settings
+            .plugins()
             .plugins()
             .iter()
-            .filter(|plugin| plugin.runtime() == PluginRuntimeSettings::Wasm)
+            .filter(|plugin| plugin.runtime() == runtime)
         {
             if !plugin.trusted() {
                 continue;
@@ -217,7 +281,7 @@ impl SemanticPluginRuntimeState {
                 }
             };
 
-            if let Err(error) = runner.add_plugin(plugin.id(), artifact) {
+            if let Err(error) = add_artifact(&mut runner, plugin.id(), &artifact) {
                 errors.insert(
                     plugin.id().to_string(),
                     Self::runtime_error_to_semantic_error(&error),
@@ -228,14 +292,11 @@ impl SemanticPluginRuntimeState {
             manifests.push(manifest);
         }
 
-        let wasm_host = if manifests.is_empty() {
+        let host = if manifests.is_empty() {
             None
         } else {
             match PluginEnvironment::from_manifests(manifests) {
-                Ok(environment) => Some(Arc::new(AssertUnwindSafe(PluginHost::new(
-                    environment,
-                    runner,
-                )))),
+                Ok(environment) => Some(PluginHost::new(environment, runner)),
                 Err(error) => {
                     errors.insert("*".to_string(), Self::host_error_to_runtime_error(error));
                     None
@@ -243,13 +304,118 @@ impl SemanticPluginRuntimeState {
             }
         };
 
-        Self {
-            wasm_host,
-            wasm_errors: Arc::new(errors),
+        (host, errors)
+    }
+
+    fn execute(
+        &self,
+        plugin_id: &str,
+        request: &PluginRequest,
+    ) -> Result<PluginResponse, SemanticPluginRuntimeError> {
+        let _ = request;
+        match self.plugin_runtimes.get(plugin_id).copied() {
+            #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
+            Some(PluginRuntimeSettings::Wasm) => self.execute_wasm(plugin_id, request),
+            #[cfg(all(feature = "plugins-monty", not(target_arch = "wasm32")))]
+            Some(PluginRuntimeSettings::Monty) => self.execute_monty(plugin_id, request),
+            Some(runtime) => Err(Self::unsupported_runtime_error(runtime)),
+            None => Err(SemanticPluginRuntimeError::new(
+                format!("unknown plugin id `{plugin_id}`"),
+                "Fix the plugin manifest or remove the plugin.",
+            )),
         }
     }
 
     #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
+    fn execute_wasm(
+        &self,
+        plugin_id: &str,
+        request: &PluginRequest,
+    ) -> Result<PluginResponse, SemanticPluginRuntimeError> {
+        if let Some(error) = self
+            .wasm_errors
+            .get(plugin_id)
+            .or_else(|| self.wasm_errors.get("*"))
+        {
+            return Err(error.clone());
+        }
+        let Some(host) = &self.wasm_host else {
+            return Err(Self::unloaded_plugin_error(plugin_id, "wasm"));
+        };
+        host.0
+            .execute(plugin_id, request)
+            .map_err(Self::host_error_to_runtime_error)
+    }
+
+    #[cfg(all(feature = "plugins-monty", not(target_arch = "wasm32")))]
+    fn execute_monty(
+        &self,
+        plugin_id: &str,
+        request: &PluginRequest,
+    ) -> Result<PluginResponse, SemanticPluginRuntimeError> {
+        if let Some(error) = self
+            .monty_errors
+            .get(plugin_id)
+            .or_else(|| self.monty_errors.get("*"))
+        {
+            return Err(error.clone());
+        }
+        let Some(host) = &self.monty_host else {
+            return Err(Self::unloaded_plugin_error(plugin_id, "monty"));
+        };
+        host.0
+            .execute(plugin_id, request)
+            .map_err(Self::host_error_to_runtime_error)
+    }
+
+    fn unsupported_runtime_error(runtime: PluginRuntimeSettings) -> SemanticPluginRuntimeError {
+        let feature = match runtime {
+            PluginRuntimeSettings::Wasm => "plugins-wasm",
+            PluginRuntimeSettings::Monty => "plugins-monty",
+            PluginRuntimeSettings::Subprocess | PluginRuntimeSettings::Mock => "",
+        };
+        let hint = if feature.is_empty() {
+            "Use a plugin runtime this `ty` build supports or remove the plugin."
+        } else {
+            return SemanticPluginRuntimeError::new(
+                format!(
+                    "plugin runtime `{}` is not available in this build",
+                    runtime.as_str()
+                ),
+                match feature {
+                    "plugins-wasm" => {
+                        "Rebuild `ty` with the `plugins-wasm` feature enabled or remove the plugin."
+                    }
+                    _ => {
+                        "Rebuild `ty` with the `plugins-monty` feature enabled or remove the plugin."
+                    }
+                },
+            );
+        };
+        SemanticPluginRuntimeError::new(
+            format!(
+                "plugin runtime `{}` is not available in this build",
+                runtime.as_str()
+            ),
+            hint,
+        )
+    }
+
+    #[cfg(any(
+        all(feature = "plugins-wasm", not(target_arch = "wasm32")),
+        all(feature = "plugins-monty", not(target_arch = "wasm32"))
+    ))]
+    fn unloaded_plugin_error(plugin_id: &str, runtime_name: &str) -> SemanticPluginRuntimeError {
+        SemanticPluginRuntimeError::new(
+            format!("plugin `{plugin_id}` was not loaded into the `{runtime_name}` runtime"),
+            "Check the plugin's `trusted` flag and plugin configuration diagnostics.",
+        )
+    }
+
+    #[cfg(any(
+        all(feature = "plugins-wasm", not(target_arch = "wasm32")),
+        all(feature = "plugins-monty", not(target_arch = "wasm32"))
+    ))]
     fn host_error_to_runtime_error(error: HostError) -> SemanticPluginRuntimeError {
         match error {
             HostError::Runtime { source, .. } => Self::runtime_error_to_semantic_error(&source),
@@ -260,7 +426,10 @@ impl SemanticPluginRuntimeState {
         }
     }
 
-    #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        all(feature = "plugins-wasm", not(target_arch = "wasm32")),
+        all(feature = "plugins-monty", not(target_arch = "wasm32"))
+    ))]
     fn runtime_error_to_semantic_error(
         error: &ty_plugin_host::RuntimeError,
     ) -> SemanticPluginRuntimeError {
@@ -1660,6 +1829,7 @@ mod tests {
                     file_path: "/project/test.py".to_string(),
                     python_version: "3.13".to_string(),
                     platform: "all".to_string(),
+                    config: serde_json::Value::Null,
                     speculative: false,
                 },
                 callee: TypeExpr::expression("toy.Field"),

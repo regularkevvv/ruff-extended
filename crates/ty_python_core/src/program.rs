@@ -397,6 +397,7 @@ pub enum SemanticPluginRuntime {
     Mock,
     InProcess,
     Wasm,
+    Monty,
 }
 
 impl ProgramSettings {

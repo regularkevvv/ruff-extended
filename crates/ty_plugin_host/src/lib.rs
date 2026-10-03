@@ -12,6 +12,10 @@ use ty_plugin_protocol::{
     method_name_pattern_matches,
 };
 
+#[cfg(all(feature = "plugins-monty", not(target_arch = "wasm32")))]
+mod monty;
+#[cfg(all(feature = "plugins-monty", not(target_arch = "wasm32")))]
+pub use monty::{MontyLimits, MontyRunner};
 #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
 mod wasm;
 #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]

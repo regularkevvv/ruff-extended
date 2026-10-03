@@ -160,6 +160,7 @@ fn mock_runner_returns_registered_response() {
                     file_path: "/project/app.py".to_string(),
                     python_version: "3.13".to_string(),
                     platform: "linux".to_string(),
+                    config: serde_json::Value::Null,
                     speculative: false,
                 },
                 class: ty_plugin_protocol::ClassSummary {

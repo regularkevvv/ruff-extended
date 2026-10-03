@@ -80,6 +80,7 @@ fn call_request() -> CallRequest {
             file_path: "/project/app.py".to_string(),
             python_version: "3.13".to_string(),
             platform: "linux".to_string(),
+            config: serde_json::Value::Null,
             speculative: false,
         },
         callee: TypeExpr::expression("toy.Field"),

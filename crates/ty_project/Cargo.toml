@@ -88,6 +88,10 @@ testing = []
 # Embed the WASM plugin runtime (native only). Enables the `wasm` plugin runtime; never enabled for
 # the `wasm32` `ty_wasm` build.
 plugins-wasm = ["ty_plugin_host/plugins-wasm"]
+# Embed the Monty sandboxed-Python plugin runtime (native only). Enables the `monty` plugin
+# runtime; `plugins-monty-pool` additionally isolates plugins in `monty` worker subprocesses.
+plugins-monty = ["ty_plugin_host/plugins-monty"]
+plugins-monty-pool = ["plugins-monty", "ty_plugin_host/plugins-monty-pool"]
 
 [lints]
 workspace = true

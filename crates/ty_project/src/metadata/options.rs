@@ -2223,6 +2223,7 @@ impl PluginsOptions {
                     match loaded.runtime {
                         PluginRuntimeSettings::Mock => SemanticPluginRuntime::Mock,
                         PluginRuntimeSettings::Wasm => SemanticPluginRuntime::Wasm,
+                        PluginRuntimeSettings::Monty => SemanticPluginRuntime::Monty,
                         PluginRuntimeSettings::Subprocess => continue,
                     },
                     class_transform_claims,
@@ -2540,7 +2541,7 @@ pub struct PluginEntryOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[option(
         default = r#""wasm""#,
-        value_type = "wasm | subprocess | mock",
+        value_type = "wasm | subprocess | monty | mock",
         example = r#"
             [[tool.ty.plugins.plugin]]
             runtime = "wasm"
@@ -2624,6 +2625,7 @@ pub enum PluginRuntimeOption {
     #[default]
     Wasm,
     Subprocess,
+    Monty,
     Mock,
 }
 
@@ -2642,6 +2644,7 @@ impl From<PluginRuntimeOption> for PluginRuntimeSettings {
         match value {
             PluginRuntimeOption::Wasm => Self::Wasm,
             PluginRuntimeOption::Subprocess => Self::Subprocess,
+            PluginRuntimeOption::Monty => Self::Monty,
             PluginRuntimeOption::Mock => Self::Mock,
         }
     }
@@ -2813,6 +2816,17 @@ fn discover_installed_plugins(
                         continue;
                     }
                     (PluginRuntimeSettings::Wasm, artifact_path)
+                }
+                RuntimeSpec::Monty(monty) => {
+                    let artifact_path = package_dir.join(&monty.artifact);
+                    if !system.is_file(&artifact_path) {
+                        tracing::warn!(
+                            "Skipping installed plugin `{}` because artifact `{artifact_path}` is missing",
+                            manifest.id
+                        );
+                        continue;
+                    }
+                    (PluginRuntimeSettings::Monty, artifact_path)
                 }
                 RuntimeSpec::Subprocess(_) => continue,
             };
@@ -4026,7 +4040,7 @@ mod plugin_tests {
     use crate::{Db as _, ProjectDatabase, ProjectMetadata};
 
     use super::{Options, PluginRuntimeSettings};
-    use crate::metadata::settings::WASM_RUNTIME_SUPPORTED;
+    use crate::metadata::settings::{MONTY_RUNTIME_SUPPORTED, WASM_RUNTIME_SUPPORTED};
 
     const PROJECT_ROOT: &str = "/project";
     const CONFIG_PATH: &str = "/project/ty.toml";
@@ -4509,7 +4523,7 @@ mod plugin_tests {
             &db,
             [(
                 Severity::Error,
-                "Plugin `pydantic` uses unsupported protocol version 99.1; ty supports 0.4",
+                "Plugin `pydantic` uses unsupported protocol version 99.1; ty supports 0.5",
             )],
         );
     }
@@ -4544,26 +4558,103 @@ mod plugin_tests {
     }
 
     #[test]
-    fn wasm_runtime_support_follows_build() {
-        // `mock` always runs; `wasm` follows the build (embedded only on native + `plugins-wasm`);
-        // `subprocess` is not implemented.
+    fn plugin_runtime_support_follows_build() {
+        // `mock` always runs; `wasm` and `monty` follow their build features (embedded only on
+        // native targets); `subprocess` is not implemented.
         assert!(PluginRuntimeSettings::Mock.is_supported());
         assert_eq!(
             PluginRuntimeSettings::Wasm.is_supported(),
             WASM_RUNTIME_SUPPORTED
         );
+        assert_eq!(
+            PluginRuntimeSettings::Monty.is_supported(),
+            MONTY_RUNTIME_SUPPORTED
+        );
         assert!(!PluginRuntimeSettings::Subprocess.is_supported());
 
         // The `wasm32` `ty_wasm` build never embeds the runtime.
         #[cfg(target_arch = "wasm32")]
-        assert!(!PluginRuntimeSettings::Wasm.is_supported());
+        {
+            assert!(!PluginRuntimeSettings::Wasm.is_supported());
+            assert!(!PluginRuntimeSettings::Monty.is_supported());
+        }
 
         assert!(PluginRuntimeSettings::Mock.participates_in_semantic_hooks());
         assert_eq!(
             PluginRuntimeSettings::Wasm.participates_in_semantic_hooks(),
             WASM_RUNTIME_SUPPORTED
         );
+        assert_eq!(
+            PluginRuntimeSettings::Monty.participates_in_semantic_hooks(),
+            MONTY_RUNTIME_SUPPORTED
+        );
         assert!(!PluginRuntimeSettings::Subprocess.participates_in_semantic_hooks());
+    }
+
+    // Runs on builds that do not embed the Monty runtime — which always includes the `wasm32`
+    // `ty_wasm` build, where the runtime is compiled out. There, a `monty` plugin runtime is
+    // reported unsupported through a settings diagnostic.
+    #[cfg(not(all(feature = "plugins-monty", not(target_arch = "wasm32"))))]
+    #[test]
+    fn reports_unsupported_monty_runtime() {
+        let db = project_database(
+            r#"
+            [plugins]
+            enabled = true
+
+            [[plugins.plugin]]
+            id = "tokens"
+            path = ".ty/plugins/tokens.py"
+            runtime = "monty"
+            trusted = true
+            "#,
+            [("/project/.ty/plugins/tokens.py", "plugin artifact")],
+        );
+
+        assert_plugin_diagnostics(
+            &db,
+            [(
+                Severity::Error,
+                "Plugin `tokens` uses unsupported runtime `monty`",
+            )],
+        );
+    }
+
+    #[cfg(all(feature = "plugins-monty", not(target_arch = "wasm32")))]
+    #[test]
+    fn supported_monty_plugin_participates_in_semantic_environment() {
+        let db = project_database(
+            r#"
+            [plugins]
+            enabled = true
+
+            [[plugins.plugin]]
+            id = "tokens"
+            path = ".ty/plugins/tokens.py"
+            runtime = "monty"
+            manifest-path = ".ty/plugins/tokens.plugin.json"
+            trusted = true
+            "#,
+            [
+                ("/project/.ty/plugins/tokens.py", "plugin artifact"),
+                (
+                    "/project/.ty/plugins/tokens.plugin.json",
+                    &monty_manifest_json(),
+                ),
+            ],
+        );
+
+        assert_plugin_diagnostics(&db, []);
+
+        let semantic_plugins = SemanticPlugins::environment_or_empty(&db);
+        let [plugin] = semantic_plugins.plugins() else {
+            panic!("expected one semantic plugin");
+        };
+
+        assert_eq!(plugin.id(), "tokens");
+        assert_eq!(plugin.runtime(), SemanticPluginRuntime::Monty);
+        assert_eq!(plugin.call_return_claims(), ["example.issue_token"]);
+        assert_ne!(semantic_plugins.fingerprint(), 0);
     }
 
     #[cfg(feature = "plugins-wasm")]
@@ -4895,6 +4986,25 @@ mod plugin_tests {
             "claims": {
                 "functions": [
                     { "qualified-name": "toy.Field" }
+                ]
+            }
+        }"#
+        .to_string()
+    }
+
+    #[cfg(all(feature = "plugins-monty", not(target_arch = "wasm32")))]
+    fn monty_manifest_json() -> String {
+        r#"{
+            "id": "tokens",
+            "name": "Tokens Monty plugin",
+            "version": "0.1.0",
+            "protocol-version": { "major": 0, "minor": 5 },
+            "ty-compatibility": { "requirement": ">=0.0.0" },
+            "runtime": { "kind": "monty", "artifact": "tokens.py" },
+            "capabilities": { "call-return": true },
+            "claims": {
+                "functions": [
+                    { "qualified-name": "example.issue_token" }
                 ]
             }
         }"#

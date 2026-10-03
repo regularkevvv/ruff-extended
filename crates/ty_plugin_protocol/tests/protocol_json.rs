@@ -86,6 +86,26 @@ fn serializes_manifest() {
 }
 
 #[test]
+fn serializes_monty_runtime_spec() {
+    let spec = RuntimeSpec::Monty(ty_plugin_protocol::MontyRuntimeSpec {
+        artifact: "plugins/example.py".to_string(),
+        sha256: Some("abc123".to_string()),
+    });
+
+    insta::assert_json_snapshot!(spec, @r#"
+    {
+      "kind": "monty",
+      "artifact": "plugins/example.py",
+      "sha256": "abc123"
+    }
+    "#);
+
+    let json = serde_json::to_string(&spec).expect("serialize spec");
+    let restored: RuntimeSpec = serde_json::from_str(&json).expect("deserialize spec");
+    assert_eq!(restored, spec);
+}
+
+#[test]
 fn serializes_method_pattern_claim() {
     let claim =
         ty_plugin_protocol::MethodClaim::on_subclass_of_matching("app.workers.Runner", "run_*");
@@ -650,6 +670,7 @@ fn context() -> SemanticContext {
         file_path: "/project/app.py".to_string(),
         python_version: "3.13".to_string(),
         platform: "linux".to_string(),
+        config: serde_json::Value::Null,
         speculative: false,
     }
 }

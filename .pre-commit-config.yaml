@@ -130,8 +130,10 @@ repos:
       - id: ruff-format
         types_or: [python, pyi, jupyter]
         # `plugin_fixtures/` joins `corpus/` here: both are Python consumed by
-        # `include_str!` to exercise the checker, not code meant to pass lint.
-        exclude: crates/ty_python_semantic/resources/(corpus|plugin_fixtures)/
+        # `include_str!` to exercise the checker, not code meant to pass lint. The
+        # plugin SDK under `ty_plugin_host/python/` is the same: it is prepended to
+        # sandboxed plugin source, so it must not gain linter-driven imports.
+        exclude: crates/(ty_python_semantic/resources/(corpus|plugin_fixtures)|ty_plugin_host/python)/
         priority: 0
 
   # Priority 1: Second-pass fixers (e.g., markdownlint-fix runs after mdformat).
@@ -142,8 +144,10 @@ repos:
         args: [--fix, --exit-non-zero-on-fix]
         types_or: [python, pyi]
         # `plugin_fixtures/` joins `corpus/` here: both are Python consumed by
-        # `include_str!` to exercise the checker, not code meant to pass lint.
-        exclude: crates/ty_python_semantic/resources/(corpus|plugin_fixtures)/
+        # `include_str!` to exercise the checker, not code meant to pass lint. The
+        # plugin SDK under `ty_plugin_host/python/` is the same: it is prepended to
+        # sandboxed plugin source, so it must not gain linter-driven imports.
+        exclude: crates/(ty_python_semantic/resources/(corpus|plugin_fixtures)|ty_plugin_host/python)/
         require_serial: true
         priority: 1
 

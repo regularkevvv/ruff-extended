@@ -1170,7 +1170,7 @@ Runtime used to execute the plugin artifact.
 
 **Default value**: `"wasm"`
 
-**Type**: `wasm | subprocess | mock`
+**Type**: `wasm | subprocess | monty | mock`
 
 **Example usage**:
 
