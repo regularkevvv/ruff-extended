@@ -11,6 +11,8 @@ use std::{cmp, fmt};
 
 pub use self::changes::ChangeResult;
 use crate::CollectReporter;
+#[cfg(all(feature = "plugins-monty", not(target_arch = "wasm32")))]
+use crate::metadata::options::MontyMode;
 use crate::metadata::settings::PluginRuntimeSettings;
 use crate::metadata::settings::Settings;
 use crate::metadata::settings::file_settings;
@@ -129,7 +131,7 @@ impl SemanticPluginRuntimeState {
                     settings,
                     system,
                     PluginRuntimeSettings::Monty,
-                    Self::monty_runner(),
+                    Self::monty_runner(plugin_settings.monty_mode()),
                     |runner: &mut MontyRunner, plugin_id, artifact| {
                         runner.add_plugin(plugin_id, artifact)
                     },
@@ -151,22 +153,25 @@ impl SemanticPluginRuntimeState {
         }
     }
 
-    /// Prefer a `monty-pool` of worker subprocesses when the pool feature and a `monty` binary are
-    /// available; fall back to the in-process interpreter otherwise.
+    /// Worker execution is explicit: a startup failure must not change the isolation boundary.
     #[cfg(all(feature = "plugins-monty", not(target_arch = "wasm32")))]
-    fn monty_runner() -> Result<MontyRunner, ty_plugin_host::RuntimeError> {
-        #[cfg(feature = "plugins-monty-pool")]
-        {
-            match MontyRunner::pool(MontyLimits::default(), None) {
-                Ok(runner) => return Ok(runner),
-                Err(error) => {
-                    tracing::info!(
-                        "monty worker pool unavailable ({error}); running monty plugins in-process"
-                    );
+    fn monty_runner(mode: MontyMode) -> Result<MontyRunner, ty_plugin_host::RuntimeError> {
+        match mode {
+            MontyMode::InProcess => MontyRunner::new(MontyLimits::default()),
+            MontyMode::Worker => {
+                #[cfg(feature = "plugins-monty-pool")]
+                {
+                    MontyRunner::pool(MontyLimits::default(), None)
+                }
+
+                #[cfg(not(feature = "plugins-monty-pool"))]
+                {
+                    Err(ty_plugin_host::RuntimeError::UnsupportedRuntime(
+                        "Monty worker mode requires a build with `plugins-monty-pool`",
+                    ))
                 }
             }
         }
-        MontyRunner::new(MontyLimits::default())
     }
 
     /// Read manifests and artifacts for every trusted plugin on `runtime` and register them with
@@ -1401,6 +1406,8 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(feature = "plugins-monty", not(target_arch = "wasm32")))]
+    use super::{MontyMode, SemanticPluginRuntimeState};
     use ruff_db::Db as _;
     use ruff_db::files::{FileRootKind, system_path_to_file};
     use ruff_db::system::{DbWithWritableSystem as _, SystemPathBuf, TestSystem};
@@ -1416,6 +1423,25 @@ mod tests {
     use crate::db::testing::TestDb;
     use crate::watch::ChangeEvent;
     use crate::{Db, ProjectDatabase, ProjectMetadata, UseUv};
+
+    #[cfg(all(feature = "plugins-monty", not(target_arch = "wasm32")))]
+    #[test]
+    fn embedded_monty_mode_needs_no_worker() {
+        assert!(SemanticPluginRuntimeState::monty_runner(MontyMode::InProcess).is_ok());
+    }
+
+    #[cfg(all(
+        feature = "plugins-monty",
+        not(feature = "plugins-monty-pool"),
+        not(target_arch = "wasm32")
+    ))]
+    #[test]
+    fn monty_worker_mode_requires_pool_feature() {
+        let error = SemanticPluginRuntimeState::monty_runner(MontyMode::Worker)
+            .err()
+            .expect("worker mode requires its feature");
+        assert!(error.to_string().contains("plugins-monty-pool"));
+    }
 
     #[test]
     fn checks_use_available_script_environment_without_running_uv() -> anyhow::Result<()> {

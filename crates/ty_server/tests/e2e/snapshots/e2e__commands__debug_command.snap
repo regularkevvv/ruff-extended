@@ -178,6 +178,7 @@ Settings: Settings {
     },
     plugins: PluginSettings {
         enabled: false,
+        monty_mode: InProcess,
         plugins: [],
         environment_fingerprint: PluginEnvironmentFingerprint(
             0,

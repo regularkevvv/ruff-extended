@@ -224,6 +224,13 @@
         }
       ]
     },
+    "MontyMode": {
+      "type": "string",
+      "enum": [
+        "in-process",
+        "worker"
+      ]
+    },
     "OutputFormat": {
       "description": "The diagnostic output format.",
       "oneOf": [
@@ -419,6 +426,17 @@
           "type": [
             "boolean",
             "null"
+          ]
+        },
+        "monty-mode": {
+          "description": "How Python plugins execute in Monty.\n\nThe default `in-process` mode uses the interpreter embedded in ty. Select `worker` for\ncrash isolation and hard timeouts. Worker mode requires a `monty` executable and a build\nwith `plugins-monty-pool`; failure to start workers reports a plugin error.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MontyMode"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "plugin": {

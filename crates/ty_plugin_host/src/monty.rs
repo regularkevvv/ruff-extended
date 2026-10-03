@@ -13,6 +13,7 @@
 //!   resolved from `TY_MONTY_BIN` or `PATH`, so a crashed worker cannot take down `ty`.
 
 use std::collections::BTreeMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -194,12 +195,14 @@ impl MontyRunner {
 
         match &mut self.backend {
             Backend::InProcess { runs } => {
-                let run = MontyRun::new(
-                    script.clone(),
-                    &format!("{plugin_id}.py"),
-                    vec![REQUEST_GLOBAL.to_string()],
-                    CompileOptions::default(),
-                )
+                let run = catch_interpreter_panic(|| {
+                    MontyRun::new(
+                        script.clone(),
+                        &format!("{plugin_id}.py"),
+                        vec![REQUEST_GLOBAL.to_string()],
+                        CompileOptions::default(),
+                    )
+                })?
                 .map_err(|err| {
                     RuntimeError::Trap(format!("failed to compile plugin source: {err}"))
                 })?
@@ -222,9 +225,12 @@ impl MontyRunner {
         request_json: String,
         runs: &Mutex<BTreeMap<String, MontyRun>>,
     ) -> Result<PluginResponse, RuntimeError> {
-        let mut runs = runs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut runs = runs.lock().map_err(|_| {
+            RuntimeError::Trap(
+                "Monty interpreter state was invalidated by a panic; reload the project"
+                    .to_string(),
+            )
+        })?;
         let run = runs
             .get_mut(plugin.id())
             .ok_or(RuntimeError::UnsupportedRuntime(
@@ -323,11 +329,21 @@ impl PluginRunner for MontyRunner {
         })?;
 
         match &self.backend {
-            Backend::InProcess { runs } => self.execute_in_process(plugin, request_json, runs),
+            Backend::InProcess { runs } => {
+                catch_interpreter_panic(|| self.execute_in_process(plugin, request_json, runs))?
+            }
             #[cfg(feature = "plugins-monty-pool")]
             Backend::Pool(state) => self.execute_pool(plugin, request_json, state),
         }
     }
+}
+
+/// Unwinding invalidates the locked interpreter cache. Later calls reject its poisoned mutex
+/// rather than reusing interpreter state that may have been partially mutated.
+/// Native aborts, including stack overflow and allocator failure, cannot be caught here.
+fn catch_interpreter_panic<T>(f: impl FnOnce() -> T) -> Result<T, RuntimeError> {
+    catch_unwind(AssertUnwindSafe(f))
+        .map_err(|_| RuntimeError::Trap("Monty interpreter panicked".to_string()))
 }
 
 /// Resolve the `monty` worker binary: `TY_MONTY_BIN` wins, then `monty` on `PATH` (which is where
@@ -346,5 +362,45 @@ fn map_pool_error(err: PoolError) -> RuntimeError {
         PoolError::Timeout { .. } => RuntimeError::Timeout,
         PoolError::Runtime(exc) => RuntimeError::Trap(exc.to_string()),
         other => RuntimeError::Trap(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Backend, MontyLimits, MontyRunner, catch_interpreter_panic};
+    use crate::{LoadedPlugin, PluginRunner};
+    use ty_plugin_protocol::PluginRequest;
+    use ty_plugin_sdk::ManifestBuilder;
+
+    #[test]
+    fn interpreter_panic_invalidates_cached_state() {
+        let mut runner = MontyRunner::new(MontyLimits::default()).expect("runner builds");
+        runner
+            .add_plugin(
+                "example",
+                "def __ty_handle__(request):\n    return json.dumps(no_change())",
+            )
+            .expect("plugin compiles");
+        let plugin = LoadedPlugin {
+            manifest: ManifestBuilder::new("example", "Example", "0.1.0").build(),
+        };
+        runner
+            .execute(&plugin, &PluginRequest::Manifest)
+            .expect("interpreter works before panic");
+        let runs = match &runner.backend {
+            Backend::InProcess { runs } => runs,
+            #[cfg(feature = "plugins-monty-pool")]
+            Backend::Pool(_) => panic!("expected embedded interpreter"),
+        };
+        let error = catch_interpreter_panic(|| {
+            let _guard = runs.lock().expect("cache is valid before panic");
+            panic!("simulated interpreter panic");
+        })
+        .expect_err("interpreter panic is contained");
+        assert!(error.to_string().contains("interpreter panicked"));
+        let error = runner
+            .execute(&plugin, &PluginRequest::Manifest)
+            .expect_err("invalidated state is rejected");
+        assert!(error.to_string().contains("invalidated by a panic"));
     }
 }
