@@ -613,18 +613,6 @@ impl RouteTable {
         )
     }
 
-    pub fn call_state_method_on_subclass_pattern_plugins(
-        &self,
-        base_qualified_name: &str,
-        method_name: &str,
-    ) -> Vec<&str> {
-        matching_method_pattern_plugins(
-            &self.call_state_method_patterns_on_subclass,
-            base_qualified_name,
-            method_name,
-        )
-    }
-
     pub fn dependency_plugins(&self) -> &[String] {
         &self.dependency_plugins
     }

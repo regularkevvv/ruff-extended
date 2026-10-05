@@ -72,7 +72,7 @@ pub enum ObjectStateNode<'db> {
 #[derive(Debug, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
 pub struct ObjectStateFlow<'db> {
     pub nodes: Box<[ObjectStateNode<'db>]>,
-    pub reads: Box<[(ExpressionNodeKey, Option<ObjectStateId>)]>,
+    reads: Box<[(ExpressionNodeKey, Option<ObjectStateId>)]>,
     calls: Box<[(ExpressionNodeKey, Expression<'db>)]>,
 }
 
