@@ -568,7 +568,7 @@ mod tests {
             };
             let (receiver_members, result_members, fresh_result) =
                 match call.callee.expression.as_str() {
-                    "records.Record" => {
+                    "records.Record" | "records.Child" => {
                         let ty = if call.arguments.iter().any(|argument| {
                             argument
                                 .type_expr
@@ -619,7 +619,6 @@ mod tests {
         )
         .with_call_state_claims(
             vec![
-                "records.Record".to_string(),
                 "records.load".to_string(),
                 "records.shared".to_string(),
                 "records.touch".to_string(),
@@ -628,6 +627,10 @@ mod tests {
                 SemanticPluginMethodClaim::on_subclass_of("records.Record", "set_key"),
                 SemanticPluginMethodClaim::on_subclass_of("records.Record", "clear_key"),
             ],
+        );
+        let plugin = plugin.with_call_state_constructor_claims(
+            vec!["records.Record".to_string()],
+            vec!["records.Record".to_string()],
         );
         SemanticPlugins::init_or_update(&mut db, SemanticPluginEnvironment::new(1, vec![plugin]));
         Ok(db)
@@ -662,6 +665,24 @@ mod tests {
             assert_type(loaded.key, int)
             assert_type(load().key, int)
             assert_type(explicit.key, int)
+        "#,
+        )
+    }
+
+    #[test]
+    fn subclass_constructor_state_keeps_class_identity() -> anyhow::Result<()> {
+        check(
+            r#"
+            from typing_extensions import assert_type
+            from records import Child
+            child = Child()
+            assert_type(child, Child)
+            assert_type(child.key, None)
+            assert_type(Child(key=123).pk, int)
+            class Unrelated:
+                key: int | None
+            other = Unrelated()
+            assert_type(other.key, int | None)
         "#,
         )
     }

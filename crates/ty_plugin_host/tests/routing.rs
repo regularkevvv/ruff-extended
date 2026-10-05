@@ -295,10 +295,22 @@ fn manifest() -> PluginManifest {
 fn state_only_claims_build_routes() {
     let manifest = ty_plugin_sdk::ManifestBuilder::new("state", "State", "0.1.0")
         .claim_call_state("example.Record")
+        .claim_call_state_constructor("example.Exact")
+        .claim_call_state_constructors_on_subclass("example.Record")
         .claim_call_state_method("example.Record", "clear")
         .claim_call_state_method_on_subclass("example.Record", "set")
         .build();
     let environment = PluginEnvironment::from_manifests(vec![manifest]).expect("state capability");
+    assert_eq!(
+        environment.routes().call_state_plugins("example.Exact"),
+        ["state"]
+    );
+    assert_eq!(
+        environment
+            .routes()
+            .call_state_constructor_on_subclass_plugins("example.Record"),
+        ["state"]
+    );
     assert_eq!(
         environment.routes().call_state_plugins("example.Record"),
         ["state"]
@@ -321,4 +333,16 @@ fn state_only_claims_build_routes() {
             .call_return_plugins("example.Record")
             .is_empty()
     );
+}
+
+#[test]
+fn constructor_claims_require_state_capability() {
+    let mut manifest = ty_plugin_sdk::ManifestBuilder::new("state", "State", "0.1.0")
+        .claim_call_state_constructor("example.Record")
+        .build();
+    manifest.capabilities.call_state = false;
+    assert!(matches!(
+        PluginEnvironment::from_manifests(vec![manifest]),
+        Err(ty_plugin_host::HostError::CallCapabilityMissing { .. })
+    ));
 }

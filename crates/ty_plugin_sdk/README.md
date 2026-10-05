@@ -196,3 +196,8 @@ Set `preserves_other_objects = true` only when the call cannot mutate another ex
 Name aliases share receiver facts; branches union them. Unknown calls discard facts. Inherited
 state claims exclude overridden implementations. See the [object member state guide](https://github.com/regularkevvv/ty-extended/blob/main/docs/plugin-authoring.md#object-member-state)
 for contracts and conservative fallbacks.
+
+Protocol 0.7 adds constructor claims: `claim_call_state_constructor("pkg.Record")` selects
+one class, and `claim_call_state_constructors_on_subclass("pkg.Record")` selects its
+subclasses, including the base itself. Constructor hooks receive the constructed class name
+and arguments; they must account for custom initialization before guaranteeing fresh results.
