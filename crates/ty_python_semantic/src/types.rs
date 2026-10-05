@@ -164,6 +164,7 @@ mod method;
 mod mro;
 pub(crate) mod narrow;
 mod newtype;
+mod object_state;
 mod overrides;
 mod plugin;
 mod protocol_class;

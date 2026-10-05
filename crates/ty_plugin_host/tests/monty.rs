@@ -725,3 +725,32 @@ def __ty_handle__(request_json):
     host.execute("example.runner", &PluginRequest::Manifest)
         .expect("interpreter remains usable");
 }
+
+#[test]
+fn state_hook_round_trips_through_embedded_monty() {
+    let host = source_host(
+        MontyLimits::default(),
+        r#"
+set_manifest(manifest(id="example.runner", name="State", version="0.1.0",
+    capabilities=capabilities(call_state=True),
+    claims={"functions": [{"qualified-name": "example.runner"}]}))
+
+@on_call_state_of("example.runner")
+def state(request):
+    return call_state_patch(receiver_members={"key": type_expr("int", mode="annotation")},
+        preserves_other_objects=True)
+"#,
+    );
+    let PluginRequest::AdjustCallReturn(request) = call_request() else {
+        return;
+    };
+    let response = host
+        .execute("example.runner", &PluginRequest::AdjustCallState(request))
+        .expect("state hook");
+    let PluginResponse::CallStatePatch(patch) = response else {
+        panic!("expected state patch");
+    };
+    assert_eq!(patch.receiver_members["key"].expression, "int");
+    assert!(patch.preserves_other_objects);
+    assert!(!patch.fresh_result);
+}

@@ -50,6 +50,7 @@ mod interned_nodes;
 pub(crate) mod member;
 pub mod narrowing_constraints;
 pub mod node_key;
+pub mod object_state;
 pub mod place;
 pub mod platform;
 pub mod predicate;

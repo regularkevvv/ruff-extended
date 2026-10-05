@@ -266,6 +266,9 @@ use crate::member::ScopedMemberId;
 use crate::narrowing_constraints::{
     ConstraintKey, NarrowingConstraints, NarrowingConstraintsBuilder, ScopedNarrowingConstraint,
 };
+use crate::object_state::{
+    ObjectStateEvent, ObjectStateFlow, ObjectStateFlowBuilder, ObjectStateId,
+};
 use crate::place::{PlaceExprRef, ScopedPlaceId};
 use crate::predicate::{PredicateOrLiteral, Predicates, PredicatesBuilder, ScopedPredicateId};
 use crate::reachability_constraints::{
@@ -799,6 +802,7 @@ impl<'db> RetainedDefinitions<'db> {
 /// Applicable definitions and constraints for every use of a name.
 #[derive(Debug, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
 pub struct UseDefMap<'db> {
+    object_state: Option<Box<ObjectStateFlow<'db>>>,
     /// Definition states in this scope, plus an implicit "unbound"/"undeclared" definition at
     /// index zero.
     all_definitions: RetainedDefinitions<'db>,
@@ -941,6 +945,10 @@ pub enum ApplicableConstraints<'map, 'db> {
 }
 
 impl<'db> UseDefMap<'db> {
+    pub fn object_state(&self) -> Option<&ObjectStateFlow<'db>> {
+        self.object_state.as_deref()
+    }
+
     fn constraint_tables(&self) -> &ConstraintTables<'db> {
         self.constraint_tables
             .as_deref()
@@ -1653,6 +1661,7 @@ impl ReachableDefinitions {
 /// A snapshot of the definitions and constraints state at a particular point in control flow.
 #[derive(Clone, Debug)]
 pub(super) struct FlowSnapshot {
+    object_state: Option<ObjectStateId>,
     symbol_states: IndexVec<ScopedSymbolId, PendingPlaceState>,
     member_states: IndexVec<ScopedMemberId, PendingPlaceState>,
     reachability: ScopedReachabilityConstraintId,
@@ -2054,6 +2063,7 @@ pub(super) struct SingleSymbolSnapshot {
 
 #[derive(Debug)]
 pub(super) struct UseDefMapBuilder<'db> {
+    object_state: Option<Box<ObjectStateFlowBuilder<'db>>>,
     /// Append-only history of declarations and bindings, including their usage state.
     all_definitions: IndexVec<ScopedDefinitionId, DefinitionEntry<'db>>,
 
@@ -2138,8 +2148,48 @@ pub(super) struct UseDefMapBuilder<'db> {
 }
 
 impl<'db> UseDefMapBuilder<'db> {
+    pub(super) fn record_object_call(
+        &mut self,
+        key: crate::ExpressionNodeKey,
+        expression: crate::expression::Expression<'db>,
+    ) {
+        self.object_state
+            .get_or_insert_with(Box::default)
+            .record_call(key, expression);
+        self.checkpoint_state.record_binding_change();
+    }
+
+    pub(super) fn object_call(
+        &self,
+        key: crate::ExpressionNodeKey,
+    ) -> Option<crate::expression::Expression<'db>> {
+        self.object_state.as_ref().and_then(|flow| flow.call(key))
+    }
+
+    pub(super) fn record_object_state(&mut self, event: ObjectStateEvent<'db>) {
+        self.object_state
+            .get_or_insert_with(Box::default)
+            .record(event);
+        self.checkpoint_state.record_binding_change();
+    }
+
+    pub(super) fn object_state_cursor(&self) -> Option<ObjectStateId> {
+        self.object_state.as_ref().and_then(|flow| flow.current)
+    }
+
+    pub(super) fn restore_object_state_cursor(&mut self, cursor: Option<ObjectStateId>) {
+        if let Some(flow) = &mut self.object_state {
+            flow.current = cursor;
+        }
+    }
+
+    pub(super) fn record_object_read(&mut self, key: crate::ExpressionNodeKey) {
+        self.object_state.get_or_insert_with(Box::default).read(key);
+    }
+
     pub(super) fn new(scope_kind: ScopeKind) -> Self {
         Self {
+            object_state: None,
             all_definitions: IndexVec::from_iter([DefinitionEntry::Undefined]),
             predicates: PredicatesBuilder::default(),
             predicate_narrowing_targets: Vec::new(),
@@ -3020,6 +3070,7 @@ impl<'db> UseDefMapBuilder<'db> {
     /// Take a snapshot of the current visible-places state.
     pub(super) fn snapshot(&self) -> FlowSnapshot {
         FlowSnapshot {
+            object_state: self.object_state.as_ref().and_then(|flow| flow.current),
             symbol_states: self.symbol_states.clone(),
             member_states: self.member_states.clone(),
             reachability: self.reachability,
@@ -3052,6 +3103,9 @@ impl<'db> UseDefMapBuilder<'db> {
 
     /// Restore the current builder places state to the given snapshot.
     pub(super) fn restore(&mut self, snapshot: FlowSnapshot) {
+        if let Some(flow) = &mut self.object_state {
+            flow.current = snapshot.object_state;
+        }
         self.checkpoint_state.restore(snapshot.checkpoint_state);
         // We never remove places from `place_states` (it's an IndexVec, and the place
         // IDs must line up), so the current number of known places must always be equal to or
@@ -3097,6 +3151,16 @@ impl<'db> UseDefMapBuilder<'db> {
             return;
         }
 
+        if let Some(flow) = &mut self.object_state {
+            self.reachability_constraints.mark_used(self.reachability);
+            self.reachability_constraints
+                .mark_used(snapshot.reachability);
+            flow.join(
+                snapshot.object_state,
+                self.reachability,
+                snapshot.reachability,
+            );
+        }
         self.checkpoint_state.merge(snapshot.checkpoint_state);
 
         // We never remove places from `place_states` (it's an IndexVec, and the place
@@ -3291,6 +3355,7 @@ impl<'db> UseDefMapBuilder<'db> {
         let all_definitions = RetainedDefinitions::new(self.all_definitions);
 
         UseDefMap {
+            object_state: self.object_state.map(|flow| Box::new(flow.finish())),
             all_definitions,
             constraint_tables,
             interned_bindings: Arc::new(interned_bindings),

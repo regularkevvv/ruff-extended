@@ -99,3 +99,25 @@ fn type_expression_without_snapshot_remains_compatible() {
 
     assert!(type_expr.snapshot.is_none());
 }
+
+#[test]
+fn state_patch_defaults_to_invalidation_and_requires_fresh_results()
+-> Result<(), Box<dyn std::error::Error>> {
+    let response: PluginResponse = serde_json::from_str(
+        r#"{"kind":"call-state-patch","receiver-members":{"key":{"expression":"int","mode":"annotation"}}}"#,
+    )?;
+    let PluginResponse::CallStatePatch(patch) = response else {
+        return Err("expected state patch".into());
+    };
+    assert!(!patch.preserves_other_objects);
+    assert!(!patch.fresh_result);
+    assert!(patch.result_members.is_empty());
+    assert_eq!(patch.receiver_members["key"].expression, "int");
+    assert_eq!(
+        serde_json::from_str::<PluginResponse>(&serde_json::to_string(
+            &PluginResponse::CallStatePatch(patch.clone())
+        )?)?,
+        PluginResponse::CallStatePatch(patch)
+    );
+    Ok(())
+}

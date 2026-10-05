@@ -2223,6 +2223,16 @@ impl PluginsOptions {
                 Vec::new()
             };
 
+            let (call_state_claims, call_state_method_on_subclass_claims) =
+                if manifest.capabilities.call_state {
+                    (
+                        call_claim_names(manifest),
+                        call_method_on_subclass_claims(manifest),
+                    )
+                } else {
+                    (Vec::new(), Vec::new())
+                };
+
             if class_transform_claims.is_empty()
                 && class_member_claims.is_empty()
                 && instance_member_claims.is_empty()
@@ -2231,6 +2241,8 @@ impl PluginsOptions {
                 && mutation_subclass_claims.is_empty()
                 && call_signature_claims.is_empty()
                 && call_return_claims.is_empty()
+                && call_state_claims.is_empty()
+                && call_state_method_on_subclass_claims.is_empty()
                 && call_signature_method_on_subclass_claims.is_empty()
                 && call_return_method_on_subclass_claims.is_empty()
                 && !project_index_participates
@@ -2257,6 +2269,7 @@ impl PluginsOptions {
                     call_signature_method_on_subclass_claims,
                     call_return_method_on_subclass_claims,
                 )
+                .with_call_state_claims(call_state_claims, call_state_method_on_subclass_claims)
                 .with_instance_member_on_subclass_claims(instance_member_on_subclass_claims)
                 .with_mutation_claims(mutation_class_claims, mutation_subclass_claims)
                 .with_settings_module_claims(settings_module_claims)
@@ -4348,6 +4361,48 @@ mod plugin_tests {
     }
 
     #[test]
+    fn state_only_plugin_participates_in_semantic_environment() {
+        let manifest = json!({
+            "id": "state", "name": "State", "version": "0.1.0",
+            "protocol-version": {"major": 0, "minor": 6},
+            "ty-compatibility": {"requirement": ">=0.0.0"},
+            "runtime": {"kind": "mock"},
+            "capabilities": {"call-state": true},
+            "claims": {
+                "functions": [{"qualified-name": "example.Record"}],
+                "methods": [{"kind": "on-subclass-of", "base-qualified-name": "example.Record", "method-name": "set_key"}]
+            }
+        }).to_string();
+        let db = project_database(
+            r#"
+            [plugins]
+            enabled = true
+            [[plugins.plugin]]
+            id = "state"
+            path = ".ty/plugins/state.mock"
+            runtime = "mock"
+            manifest-path = ".ty/plugins/state.plugin.json"
+        "#,
+            [
+                ("/project/.ty/plugins/state.mock", "plugin"),
+                ("/project/.ty/plugins/state.plugin.json", &manifest),
+            ],
+        );
+        assert_plugin_diagnostics(&db, []);
+        let plugins = SemanticPlugins::environment_or_empty(&db).plugins();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].call_state_claims(), ["example.Record"]);
+        assert_eq!(
+            plugins[0].call_state_method_on_subclass_claims(),
+            [SemanticPluginMethodClaim::on_subclass_of(
+                "example.Record",
+                "set_key"
+            )]
+        );
+        assert!(plugins[0].call_return_claims().is_empty());
+    }
+
+    #[test]
     fn subclass_class_transform_claim_participates_in_semantic_environment() {
         let db = project_database(
             r#"
@@ -4583,7 +4638,7 @@ mod plugin_tests {
             &db,
             [(
                 Severity::Error,
-                "Plugin `pydantic` uses unsupported protocol version 99.1; ty supports 0.5",
+                "Plugin `pydantic` uses unsupported protocol version 99.1; ty supports 0.6",
             )],
         );
     }

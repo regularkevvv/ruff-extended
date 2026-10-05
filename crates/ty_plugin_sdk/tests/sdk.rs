@@ -161,3 +161,37 @@ fn handle_json_reports_a_decode_error_for_garbage_input() {
     let error = plugin.handle_json("not json").unwrap_err();
     assert!(error.to_string().contains("decode plugin request"));
 }
+
+#[test]
+fn state_claims_and_dispatch() -> Result<(), Box<dyn std::error::Error>> {
+    struct StatePlugin;
+    impl Plugin for StatePlugin {
+        fn manifest(&self) -> PluginManifest {
+            ManifestBuilder::new("state", "State", "0.1.0")
+                .claim_call_state("example.Record")
+                .claim_call_state_method("example.Record", "clear")
+                .claim_call_state_method_on_subclass("example.Record", "set")
+                .build()
+        }
+        fn adjust_call_state(&self, _request: &CallRequest) -> PluginResponse {
+            PluginResponse::CallStatePatch(ty_plugin_sdk::protocol::CallStatePatch {
+                receiver_members: [("key".to_string(), TypeExpr::annotation("int"))].into(),
+                ..Default::default()
+            })
+        }
+    }
+    let plugin = StatePlugin;
+    let manifest = plugin.manifest();
+    assert!(manifest.capabilities.call_state);
+    assert!(!manifest.capabilities.call_return);
+    assert_eq!(manifest.claims.functions.len(), 1);
+    assert_eq!(manifest.claims.methods.len(), 2);
+    let request = PluginRequest::AdjustCallState(call_request());
+    let response: PluginResponse =
+        serde_json::from_str(&plugin.handle_json(&serde_json::to_string(&request)?)?)?;
+    let PluginResponse::CallStatePatch(patch) = response else {
+        return Err("expected state patch".into());
+    };
+    assert_eq!(patch.receiver_members["key"].expression, "int");
+    Ok(())
+}

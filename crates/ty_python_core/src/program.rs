@@ -158,6 +158,8 @@ pub struct SemanticPlugin {
     call_signature_claims: Box<[String]>,
     /// Qualified names of callees whose call return type this plugin adjusts.
     call_return_claims: Box<[String]>,
+    call_state_claims: Box<[String]>,
+    call_state_method_on_subclass_claims: Box<[SemanticPluginMethodClaim]>,
     project_index_enabled: bool,
     config_json: String,
     strict_settings: bool,
@@ -187,6 +189,8 @@ impl SemanticPlugin {
             mutation_subclass_claims: Box::new([]),
             call_signature_claims: call_signature_claims.into(),
             call_return_claims: call_return_claims.into(),
+            call_state_claims: Box::new([]),
+            call_state_method_on_subclass_claims: Box::new([]),
             project_index_enabled: false,
             config_json: "{}".to_string(),
             strict_settings: false,
@@ -194,6 +198,29 @@ impl SemanticPlugin {
             call_signature_method_on_subclass_claims: Box::new([]),
             call_return_method_on_subclass_claims: Box::new([]),
         }
+    }
+
+    #[must_use]
+    pub fn with_call_state_claims(
+        mut self,
+        exact: impl Into<Box<[String]>>,
+        inherited: impl Into<Box<[SemanticPluginMethodClaim]>>,
+    ) -> Self {
+        self.call_state_claims = exact.into();
+        self.call_state_method_on_subclass_claims = inherited.into();
+        self
+    }
+
+    pub fn call_state_claims(&self) -> &[String] {
+        &self.call_state_claims
+    }
+
+    pub fn call_state_method_on_subclass_claims(&self) -> &[SemanticPluginMethodClaim] {
+        &self.call_state_method_on_subclass_claims
+    }
+
+    pub fn tracks_call_state(&self) -> bool {
+        !self.call_state_claims.is_empty() || !self.call_state_method_on_subclass_claims.is_empty()
     }
 
     #[must_use]

@@ -38,7 +38,7 @@ edition = "2024"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
-ty_plugin_sdk = "0.0.6"
+ty_plugin_sdk = "0.0.7"
 ```
 
 Implement `Plugin`, claim the matching hook in the manifest, and export it:
@@ -100,7 +100,7 @@ attributes, settings, or mutations it declared. Useful builder methods include:
 
 - `claim_class_transform` and `claim_subclass_transform`;
 - `claim_class_member`, `claim_instance_member`, and subclass member claims;
-- `claim_call_signature` and `claim_call_return`, including method variants;
+- `claim_call_signature`, `claim_call_return`, and `claim_call_state`, including method variants;
 - `project_index`, settings claims, and cross-symbol contribution targets;
 - `claim_mutations` and `claim_mutations_on_subclass`;
 - `stub_overlay`, `config_schema`, and `default_config`.
@@ -117,6 +117,7 @@ versioned independently from ty-extended.
 | `resolve_instance_member` | `instance-member`         | `MemberPatch`           |
 | `adjust_call_signature`   | `call-signature`          | `CallSignaturePatch`    |
 | `adjust_call_return`      | `call-return`             | `CallReturnPatch`       |
+| `adjust_call_state`       | `call-state`              | `CallStatePatch`        |
 | `build_project_index`     | `project-index`           | `ProjectIndexResponse`  |
 | `additional_dependencies` | `additional-dependencies` | `Vec<PluginDependency>` |
 | `validate_mutation`       | `mutation-validation`     | `MutationResponse`      |
@@ -184,3 +185,14 @@ guide](https://github.com/regularkevvv/ty-extended/blob/main/docs/plugin-authori
 end-to-end packaging workflow and the [runtime
 guide](https://github.com/regularkevvv/ty-extended/blob/main/docs/plugin-runtime.md) for host
 loading, sandboxing, and failure behavior.
+
+## Object state
+
+Protocol 0.6 supports `adjust_call_state` independently of a call's return type. Return
+`dsl::call_state(CallStatePatch { receiver_members, ..Default::default() })` to describe
+members after successful synchronous completion. `result_members` requires `fresh_result = true`.
+Set `preserves_other_objects = true` only when the call cannot mutate another existing object.
+
+Name aliases share receiver facts; branches union them. Unknown calls discard facts. Inherited
+state claims exclude overridden implementations. See the [object member state guide](https://github.com/regularkevvv/ty-extended/blob/main/docs/plugin-authoring.md#object-member-state)
+for contracts and conservative fallbacks.

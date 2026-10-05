@@ -6,7 +6,7 @@ use ruff_db::files::File;
 use ty_plugin_protocol::{PluginRequest, PluginResponse};
 use ty_python_core::{Db as PythonCoreDb, ProgramFile};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue, get_size2::GetSize)]
 pub struct SemanticPluginRuntimeError {
     message: String,
     hint: String,
