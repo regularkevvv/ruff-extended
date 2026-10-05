@@ -2233,6 +2233,24 @@ impl PluginsOptions {
                     (Vec::new(), Vec::new())
                 };
 
+            let mut call_state_constructor_claims = Vec::new();
+            let mut call_state_constructor_subclass_claims = Vec::new();
+            if manifest.capabilities.call_state {
+                for claim in &manifest.claims.constructors {
+                    match &claim.kind {
+                        ClassClaimKind::Exact { qualified_name } => {
+                            call_state_constructor_claims.push(qualified_name.clone());
+                        }
+                        ClassClaimKind::SubclassOf {
+                            base_qualified_name,
+                        } => {
+                            call_state_constructor_subclass_claims
+                                .push(base_qualified_name.clone());
+                        }
+                    }
+                }
+            }
+
             if class_transform_claims.is_empty()
                 && class_member_claims.is_empty()
                 && instance_member_claims.is_empty()
@@ -2242,6 +2260,8 @@ impl PluginsOptions {
                 && call_signature_claims.is_empty()
                 && call_return_claims.is_empty()
                 && call_state_claims.is_empty()
+                && call_state_constructor_claims.is_empty()
+                && call_state_constructor_subclass_claims.is_empty()
                 && call_state_method_on_subclass_claims.is_empty()
                 && call_signature_method_on_subclass_claims.is_empty()
                 && call_return_method_on_subclass_claims.is_empty()
@@ -2270,6 +2290,10 @@ impl PluginsOptions {
                     call_return_method_on_subclass_claims,
                 )
                 .with_call_state_claims(call_state_claims, call_state_method_on_subclass_claims)
+                .with_call_state_constructor_claims(
+                    call_state_constructor_claims,
+                    call_state_constructor_subclass_claims,
+                )
                 .with_instance_member_on_subclass_claims(instance_member_on_subclass_claims)
                 .with_mutation_claims(mutation_class_claims, mutation_subclass_claims)
                 .with_settings_module_claims(settings_module_claims)
@@ -4369,10 +4393,10 @@ mod plugin_tests {
             "runtime": {"kind": "mock"},
             "capabilities": {"call-state": true},
             "claims": {
-                "functions": [{"qualified-name": "example.Record"}],
-                "methods": [{"kind": "on-subclass-of", "base-qualified-name": "example.Record", "method-name": "set_key"}]
+                "constructors": [{"kind": "subclass-of", "base-qualified-name": "example.Record"}]
             }
-        }).to_string();
+        })
+        .to_string();
         let db = project_database(
             r#"
             [plugins]
@@ -4391,14 +4415,13 @@ mod plugin_tests {
         assert_plugin_diagnostics(&db, []);
         let plugins = SemanticPlugins::environment_or_empty(&db).plugins();
         assert_eq!(plugins.len(), 1);
-        assert_eq!(plugins[0].call_state_claims(), ["example.Record"]);
+        assert!(plugins[0].call_state_claims().is_empty());
         assert_eq!(
-            plugins[0].call_state_method_on_subclass_claims(),
-            [SemanticPluginMethodClaim::on_subclass_of(
-                "example.Record",
-                "set_key"
-            )]
+            plugins[0].call_state_constructor_subclass_claims(),
+            ["example.Record"]
         );
+        assert!(plugins[0].call_state_method_on_subclass_claims().is_empty());
+        assert!(plugins[0].tracks_call_state());
         assert!(plugins[0].call_return_claims().is_empty());
     }
 
@@ -4638,7 +4661,7 @@ mod plugin_tests {
             &db,
             [(
                 Severity::Error,
-                "Plugin `pydantic` uses unsupported protocol version 99.1; ty supports 0.6",
+                "Plugin `pydantic` uses unsupported protocol version 99.1; ty supports 0.7",
             )],
         );
     }

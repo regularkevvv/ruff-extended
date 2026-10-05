@@ -99,3 +99,8 @@ values after successful synchronous completion. `result-members` is applied only
 `fresh-result: true`, a guarantee that the result is distinct from all existing objects.
 `preserves-other-objects` defaults to false; the checker discards existing facts before applying
 the patch. See the [object member state guide](https://github.com/regularkevvv/ty-extended/blob/main/docs/plugin-authoring.md#object-member-state).
+
+Protocol 0.7 adds constructor claims: `claim_call_state_constructor("pkg.Record")` selects
+one class, and `claim_call_state_constructors_on_subclass("pkg.Record")` selects its
+subclasses, including the base itself. Constructor hooks receive the constructed class name
+and arguments; they must account for custom initialization before guaranteeing fresh results.

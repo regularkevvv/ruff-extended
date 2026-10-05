@@ -224,6 +224,31 @@ impl ManifestBuilder {
         self
     }
 
+    /// Claim constructors of subclasses of a base class for the `call-state` hook.
+    #[must_use]
+    pub fn claim_call_state_constructors_on_subclass(
+        mut self,
+        base_qualified_name: impl Into<String>,
+    ) -> Self {
+        self.manifest.capabilities.call_state = true;
+        self.manifest
+            .claims
+            .constructors
+            .push(ClassClaim::subclass_of(base_qualified_name));
+        self
+    }
+
+    /// Claim one class constructor for the `call-state` hook.
+    #[must_use]
+    pub fn claim_call_state_constructor(mut self, qualified_name: impl Into<String>) -> Self {
+        self.manifest.capabilities.call_state = true;
+        self.manifest
+            .claims
+            .constructors
+            .push(ClassClaim::exact(qualified_name));
+        self
+    }
+
     /// Claim a method for the `call-state` hook. Overrides need their own claims.
     #[must_use]
     pub fn claim_call_state_method(

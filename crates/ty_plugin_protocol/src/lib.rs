@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 6 };
+pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 7 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -151,6 +151,9 @@ pub struct PluginClaims {
     pub decorators: Vec<SymbolClaim>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub functions: Vec<SymbolClaim>,
+    /// Class constructors selected by exact class or base class.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub constructors: Vec<ClassClaim>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub methods: Vec<MethodClaim>,
     #[serde(skip_serializing_if = "Vec::is_empty")]

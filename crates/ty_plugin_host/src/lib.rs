@@ -188,6 +188,7 @@ pub struct RouteTable {
     call_signatures: BTreeMap<String, Vec<String>>,
     call_returns: BTreeMap<String, Vec<String>>,
     call_states: BTreeMap<String, Vec<String>>,
+    call_state_constructor_subclasses: BTreeMap<String, Vec<String>>,
     call_signature_methods_on_subclass: BTreeMap<MethodRouteKey, Vec<String>>,
     call_return_methods_on_subclass: BTreeMap<MethodRouteKey, Vec<String>>,
     call_state_methods_on_subclass: BTreeMap<MethodRouteKey, Vec<String>>,
@@ -395,6 +396,26 @@ impl RouteTable {
             }
 
             if capabilities.call_state {
+                for claim in &claims.constructors {
+                    match &claim.kind {
+                        ClassClaimKind::Exact { qualified_name } => {
+                            routes
+                                .call_states
+                                .entry(qualified_name.clone())
+                                .or_default()
+                                .push(plugin_id.clone());
+                        }
+                        ClassClaimKind::SubclassOf {
+                            base_qualified_name,
+                        } => {
+                            routes
+                                .call_state_constructor_subclasses
+                                .entry(base_qualified_name.clone())
+                                .or_default()
+                                .push(plugin_id.clone());
+                        }
+                    }
+                }
                 for symbol in &claims.functions {
                     routes
                         .call_states
@@ -554,6 +575,15 @@ impl RouteTable {
     pub fn call_state_plugins(&self, qualified_name: &str) -> &[String] {
         self.call_states
             .get(qualified_name)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    pub fn call_state_constructor_on_subclass_plugins(
+        &self,
+        base_qualified_name: &str,
+    ) -> &[String] {
+        self.call_state_constructor_subclasses
+            .get(base_qualified_name)
             .map_or(&[], Vec::as_slice)
     }
 
@@ -880,6 +910,12 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<(), HostError> {
         && !manifest.capabilities.call_return
         && !manifest.capabilities.call_state
     {
+        return Err(HostError::CallCapabilityMissing {
+            plugin_id: manifest.id.clone(),
+        });
+    }
+
+    if !manifest.claims.constructors.is_empty() && !manifest.capabilities.call_state {
         return Err(HostError::CallCapabilityMissing {
             plugin_id: manifest.id.clone(),
         });

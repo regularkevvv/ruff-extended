@@ -1576,6 +1576,33 @@ fn matching_call_plugin<'a, 'db>(
             return true;
         }
 
+        if matches!(hook, CallHook::State)
+            && let PluginCallee::Constructor {
+                qualified_name,
+                instance_ty,
+            } = callee
+            && (plugin
+                .call_state_constructor_claims()
+                .iter()
+                .any(|name| name == qualified_name)
+                || plugin
+                    .call_state_constructor_subclass_claims()
+                    .iter()
+                    .any(|base_name| {
+                        let Some(class) = instance_ty.nominal_class(db, env) else {
+                            return false;
+                        };
+                        let Some(Type::ClassLiteral(base)) =
+                            resolve_plugin_qualified_type_expr_value(db, env, base_name)
+                        else {
+                            return false;
+                        };
+                        class.is_subtype_of_class_literal(db, base)
+                    }))
+        {
+            return true;
+        }
+
         let method_claims = match hook {
             CallHook::Signature => plugin.call_signature_method_on_subclass_claims(),
             CallHook::Return => plugin.call_return_method_on_subclass_claims(),

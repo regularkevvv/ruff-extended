@@ -733,7 +733,8 @@ fn state_hook_round_trips_through_embedded_monty() {
         r#"
 set_manifest(manifest(id="example.runner", name="State", version="0.1.0",
     capabilities=capabilities(call_state=True),
-    claims={"functions": [{"qualified-name": "example.runner"}]}))
+    claims=claims(functions=[symbol_claim("example.runner")],
+        constructors=[class_claim_subclass_of("example.Record")])))
 
 @on_call_state_of("example.runner")
 def state(request):
