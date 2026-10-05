@@ -22,7 +22,7 @@ wire messages, or building protocol tooling.
 
 ```toml
 [dependencies]
-ty_plugin_protocol = "0.0.6"
+ty_plugin_protocol = "0.0.7"
 ```
 
 ## Protocol Model
@@ -91,3 +91,11 @@ See the [plugin authoring
 guide](https://github.com/regularkevvv/ty-extended/blob/main/docs/plugin-authoring.md) to build a
 complete WASM plugin and the [`ty_plugin_sdk` API documentation](https://docs.rs/ty_plugin_sdk)
 for the author-facing interface.
+
+## Call state (protocol 0.6)
+
+`AdjustCallState(CallRequest)` returns `CallStatePatch`. `receiver-members` describes member
+values after successful synchronous completion. `result-members` is applied only with
+`fresh-result: true`, a guarantee that the result is distinct from all existing objects.
+`preserves-other-objects` defaults to false; the checker discards existing facts before applying
+the patch. See the [object member state guide](https://github.com/regularkevvv/ty-extended/blob/main/docs/plugin-authoring.md#object-member-state).

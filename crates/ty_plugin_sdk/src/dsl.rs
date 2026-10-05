@@ -5,7 +5,7 @@
 //! [`TypeExpr::annotation`]/[`TypeExpr::expression`] on the protocol crate.
 
 use ty_plugin_protocol::{
-    CallReturnPatch, CallSignaturePatch, CallableSignature, ClassPatch, FieldPatch,
+    CallReturnPatch, CallSignaturePatch, CallStatePatch, CallableSignature, ClassPatch, FieldPatch,
     MemberAccessPatch, MemberPatch, MemberPatchMode, Parameter, ParameterKind, PluginDiagnostic,
     PluginResponse, TypeExpr,
 };
@@ -173,6 +173,12 @@ pub fn call_return(return_type: TypeExpr) -> PluginResponse {
         diagnostics: Vec::new(),
         result_metadata: None,
     })
+}
+
+/// A response describing object members after successful call completion.
+#[must_use]
+pub fn call_state(patch: CallStatePatch) -> PluginResponse {
+    PluginResponse::CallStatePatch(patch)
 }
 
 /// A [`PluginResponse::CallSignaturePatch`] replacing a call's signature (no diagnostics).

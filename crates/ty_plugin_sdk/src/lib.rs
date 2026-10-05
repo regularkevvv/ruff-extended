@@ -65,6 +65,12 @@ pub trait Plugin {
         PluginResponse::NoChange
     }
 
+    /// Describe member state after a claimed synchronous call succeeds.
+    fn adjust_call_state(&self, request: &CallRequest) -> PluginResponse {
+        let _ = request;
+        PluginResponse::NoChange
+    }
+
     /// Hook for the `additional-dependencies` capability: declare extra files whose contents feed
     /// the plugin's fingerprint.
     fn additional_dependencies(&self, request: &DependencyRequest) -> PluginResponse {
@@ -91,6 +97,7 @@ pub trait Plugin {
             PluginRequest::ResolveInstanceMember(request) => self.resolve_instance_member(request),
             PluginRequest::AdjustCallSignature(request) => self.adjust_call_signature(request),
             PluginRequest::AdjustCallReturn(request) => self.adjust_call_return(request),
+            PluginRequest::AdjustCallState(request) => self.adjust_call_state(request),
             PluginRequest::AdditionalDependencies(request) => self.additional_dependencies(request),
             PluginRequest::ValidateMutation(request) => self.validate_mutation(request),
         }

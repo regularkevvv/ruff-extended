@@ -214,6 +214,49 @@ impl ManifestBuilder {
         self
     }
 
+    /// Claim a function or constructor for the `call-state` hook.
+    #[must_use]
+    pub fn claim_call_state(mut self, qualified_name: impl Into<String>) -> Self {
+        self.manifest.capabilities.call_state = true;
+        self.manifest.claims.functions.push(SymbolClaim {
+            qualified_name: qualified_name.into(),
+        });
+        self
+    }
+
+    /// Claim a method for the `call-state` hook. Overrides need their own claims.
+    #[must_use]
+    pub fn claim_call_state_method(
+        mut self,
+        class_qualified_name: impl Into<String>,
+        method_name: impl Into<String>,
+    ) -> Self {
+        self.manifest.capabilities.call_state = true;
+        self.manifest
+            .claims
+            .methods
+            .push(MethodClaim::exact(class_qualified_name, method_name));
+        self
+    }
+
+    /// Claim an inherited method, excluding overrides of the base implementation.
+    #[must_use]
+    pub fn claim_call_state_method_on_subclass(
+        mut self,
+        base_qualified_name: impl Into<String>,
+        method_name: impl Into<String>,
+    ) -> Self {
+        self.manifest.capabilities.call_state = true;
+        self.manifest
+            .claims
+            .methods
+            .push(MethodClaim::on_subclass_of(
+                base_qualified_name,
+                method_name,
+            ));
+        self
+    }
+
     /// Claim a method for the `call-signature` hook and enable the capability.
     #[must_use]
     pub fn claim_call_signature_method(

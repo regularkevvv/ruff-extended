@@ -187,12 +187,15 @@ pub struct RouteTable {
     instance_contribution_targets: BTreeMap<String, Vec<String>>,
     call_signatures: BTreeMap<String, Vec<String>>,
     call_returns: BTreeMap<String, Vec<String>>,
+    call_states: BTreeMap<String, Vec<String>>,
     call_signature_methods_on_subclass: BTreeMap<MethodRouteKey, Vec<String>>,
     call_return_methods_on_subclass: BTreeMap<MethodRouteKey, Vec<String>>,
+    call_state_methods_on_subclass: BTreeMap<MethodRouteKey, Vec<String>>,
     /// Pattern method claims can't be keyed by an exact method name, so they're stored per
     /// owner base as `(method_name_pattern, plugin_id)` pairs and filtered at lookup.
     call_signature_method_patterns_on_subclass: BTreeMap<String, Vec<MethodPatternRoute>>,
     call_return_method_patterns_on_subclass: BTreeMap<String, Vec<MethodPatternRoute>>,
+    call_state_method_patterns_on_subclass: BTreeMap<String, Vec<MethodPatternRoute>>,
     dependency_plugins: Vec<String>,
     project_index_plugins: Vec<String>,
     settings_plugins: BTreeMap<String, Vec<String>>,
@@ -391,6 +394,53 @@ impl RouteTable {
                 }
             }
 
+            if capabilities.call_state {
+                for symbol in &claims.functions {
+                    routes
+                        .call_states
+                        .entry(symbol.qualified_name.clone())
+                        .or_default()
+                        .push(plugin_id.clone());
+                }
+                for method in &claims.methods {
+                    match &method.kind {
+                        MethodClaimKind::Exact {
+                            class_qualified_name,
+                            method_name,
+                        } => {
+                            routes
+                                .call_states
+                                .entry(method_qualified_name(class_qualified_name, method_name))
+                                .or_default()
+                                .push(plugin_id.clone());
+                        }
+                        MethodClaimKind::OnSubclassOf {
+                            base_qualified_name,
+                            method_name,
+                        } => {
+                            routes
+                                .call_state_methods_on_subclass
+                                .entry(MethodRouteKey::new(base_qualified_name, method_name))
+                                .or_default()
+                                .push(plugin_id.clone());
+                        }
+                        MethodClaimKind::OnSubclassOfMatching {
+                            base_qualified_name,
+                            method_name_pattern,
+                        } => {
+                            routes
+                                .call_state_method_patterns_on_subclass
+                                .entry(base_qualified_name.clone())
+                                .or_default()
+                                .push(MethodPatternRoute::new(
+                                    method_name_pattern,
+                                    plugin_id.clone(),
+                                ));
+                        }
+                    }
+                }
+            }
+
             if capabilities.additional_dependencies {
                 routes.dependency_plugins.push(plugin_id.clone());
             }
@@ -501,6 +551,12 @@ impl RouteTable {
             .map_or(&[], Vec::as_slice)
     }
 
+    pub fn call_state_plugins(&self, qualified_name: &str) -> &[String] {
+        self.call_states
+            .get(qualified_name)
+            .map_or(&[], Vec::as_slice)
+    }
+
     pub fn call_signature_method_on_subclass_plugins(
         &self,
         base_qualified_name: &str,
@@ -517,6 +573,16 @@ impl RouteTable {
         method_name: &str,
     ) -> &[String] {
         self.call_return_methods_on_subclass
+            .get(&MethodRouteKey::new(base_qualified_name, method_name))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    pub fn call_state_method_on_subclass_plugins(
+        &self,
+        base_qualified_name: &str,
+        method_name: &str,
+    ) -> &[String] {
+        self.call_state_methods_on_subclass
             .get(&MethodRouteKey::new(base_qualified_name, method_name))
             .map_or(&[], Vec::as_slice)
     }
@@ -731,6 +797,7 @@ pub enum HookKind {
     ResolveInstanceMember,
     AdjustCallSignature,
     AdjustCallReturn,
+    AdjustCallState,
     AdditionalDependencies,
     BuildProjectIndex,
     ValidateMutation,
@@ -746,6 +813,7 @@ impl From<&PluginRequest> for HookKind {
             PluginRequest::ResolveInstanceMember(_) => Self::ResolveInstanceMember,
             PluginRequest::AdjustCallSignature(_) => Self::AdjustCallSignature,
             PluginRequest::AdjustCallReturn(_) => Self::AdjustCallReturn,
+            PluginRequest::AdjustCallState(_) => Self::AdjustCallState,
             PluginRequest::AdditionalDependencies(_) => Self::AdditionalDependencies,
             PluginRequest::ValidateMutation(_) => Self::ValidateMutation,
         }
@@ -810,6 +878,7 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<(), HostError> {
     if (!manifest.claims.functions.is_empty() || !manifest.claims.methods.is_empty())
         && !manifest.capabilities.call_signature
         && !manifest.capabilities.call_return
+        && !manifest.capabilities.call_state
     {
         return Err(HostError::CallCapabilityMissing {
             plugin_id: manifest.id.clone(),

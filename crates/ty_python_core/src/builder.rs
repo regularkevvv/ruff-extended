@@ -44,6 +44,7 @@ use crate::definition::{
 use crate::expression::{Expression, ExpressionContext, ExpressionKind};
 use crate::frozen::{FrozenMap, FrozenSet};
 use crate::member::MemberExprBuilder;
+use crate::object_state::{ObjectReference, ObjectStateEvent, ObjectStateTracking};
 use crate::place::{
     PlaceExpr, PlaceTable, PlaceTableBuilder, PossiblyNarrowedPlacesBuilder, ScopedPlaceId,
     match_subject_place_expressions,
@@ -55,6 +56,7 @@ use crate::predicate::{
     SequencePatternPredicateKind, StarImportPlaceholderPredicate, StatementCall,
     SubjectElementPatternPredicate,
 };
+use crate::program::{SemanticPlugin, SemanticPlugins};
 use crate::re_exports::exported_names;
 use crate::reachability_constraints::{
     ReachabilityConstraintsBuilder, ScopedReachabilityConstraintId,
@@ -236,6 +238,7 @@ impl ConditionFlowSnapshot {
 pub(super) struct SemanticIndexBuilder<'db, 'ast> {
     // Builder state
     db: &'db dyn Db,
+    object_state_tracking: ObjectStateTracking,
     file: ProgramFile<'db>,
     source_type: PySourceType,
     module: &'ast ParsedModuleRef,
@@ -324,6 +327,12 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
     ) -> Self {
         let mut builder = Self {
             db,
+            object_state_tracking: ObjectStateTracking::from(
+                SemanticPlugins::environment_or_empty(db)
+                    .plugins()
+                    .iter()
+                    .any(SemanticPlugin::tracks_call_state),
+            ),
             file,
             source_type: file.file(db).source_type(db),
             module: module_ref,
@@ -1567,6 +1576,12 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
 
     fn delete_binding(&mut self, place: ScopedPlaceId) {
         self.current_use_def_map_mut().delete_binding(place);
+        if self.object_state_tracking.is_enabled()
+            && let Some(symbol) = place.as_symbol()
+        {
+            let name = self.current_place_table().symbol(symbol).name().clone();
+            self.record_object_binding_name(name, None);
+        }
     }
 
     /// Push a new [`Definition`] onto the list of definitions
@@ -1732,6 +1747,21 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
 
         let definition_id = self.current_use_def_map().next_definition_id();
         record(self.current_use_def_map_mut(), place);
+        if self.object_state_tracking.is_enabled()
+            && !is_loop_header
+            && let Some(symbol) = place.as_symbol()
+        {
+            let name = self.current_place_table().symbol(symbol).name().clone();
+            let value = match self.current_assignment() {
+                Some(CurrentAssignment::Assign {
+                    node, unpack: None, ..
+                }) => Some(&*node.value),
+                Some(CurrentAssignment::AnnAssign { node, .. }) => node.value.as_deref(),
+                Some(CurrentAssignment::Named(node)) => Some(&*node.value),
+                _ => None,
+            };
+            self.record_object_binding_name(name, value);
+        }
 
         if !is_loop_header {
             self.delete_associated_bindings(place);
@@ -3442,6 +3472,26 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
             .get_or_init(|| source_text(self.db, self.file.file(self.db)))
     }
 
+    fn record_object_invalidation(&mut self) {
+        if self.object_state_tracking.is_enabled() {
+            self.current_use_def_map_mut()
+                .record_object_state(ObjectStateEvent::Invalidate);
+        }
+    }
+
+    fn record_object_binding_name(&mut self, name: Name, value: Option<&ast::Expr>) {
+        let value = match value {
+            Some(ast::Expr::Name(name)) => ObjectReference::Name(name.id.clone()),
+            Some(value @ ast::Expr::Call(_)) => self
+                .current_use_def_map()
+                .object_call(ExpressionNodeKey::from(value))
+                .map_or(ObjectReference::Unknown, ObjectReference::Call),
+            _ => ObjectReference::Unknown,
+        };
+        self.current_use_def_map_mut()
+            .record_object_state(ObjectStateEvent::Bind { name, value });
+    }
+
     fn visit_expr_with_context(&mut self, expr: &'ast ast::Expr, context: ExpressionContext) {
         self.with_semantic_checker(|semantic, builder| semantic.visit_expr(expr, builder));
 
@@ -3501,6 +3551,15 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                 }
 
                 walk_expr(self, expr);
+                if self.object_state_tracking.is_enabled() {
+                    if *ctx == ast::ExprContext::Load {
+                        self.current_use_def_map_mut()
+                            .record_object_read(expr.into());
+                    } else if !expr.is_name_expr() {
+                        self.current_use_def_map_mut()
+                            .record_object_state(ObjectStateEvent::Invalidate);
+                    }
+                }
 
                 let is_use = deferred_effects
                     .as_ref()
@@ -3638,8 +3697,43 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                     self.mark_current_comprehension_async();
                 }
             }
-            ast::Expr::Call(_) | ast::Expr::BinOp(_) => {
+            ast::Expr::Call(_) => {
                 walk_expr(self, expr);
+                // A failed call may have partially mutated its receiver, so handlers cannot
+                // retain pre-call member facts either.
+                if self.object_state_tracking.is_enabled() {
+                    let expression = Expression::new(
+                        self.db,
+                        self.current_scope_id(),
+                        AstNodeRef::new(self.module, expr),
+                        None,
+                        ExpressionKind::Normal,
+                    );
+                    let before = self.current_use_def_map().object_state_cursor();
+                    self.current_use_def_map_mut()
+                        .record_object_state(ObjectStateEvent::Invalidate);
+                    self.record_exception_checkpoint();
+                    self.current_use_def_map_mut()
+                        .restore_object_state_cursor(before);
+                    self.current_use_def_map_mut()
+                        .record_object_call(expr.into(), expression);
+                } else {
+                    self.record_exception_checkpoint();
+                }
+            }
+            ast::Expr::BinOp(_) => {
+                walk_expr(self, expr);
+                if self.object_state_tracking.is_enabled() {
+                    let expression = Expression::new(
+                        self.db,
+                        self.current_scope_id(),
+                        AstNodeRef::new(self.module, expr),
+                        None,
+                        ExpressionKind::Normal,
+                    );
+                    self.current_use_def_map_mut()
+                        .record_object_state(ObjectStateEvent::Operation(expression));
+                }
                 self.record_exception_checkpoint();
             }
             ast::Expr::UnaryOp(unary) => {
@@ -3648,6 +3742,7 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                 } else {
                     self.visit_expr_with_context(&unary.operand, ExpressionContext::Value);
                 }
+                self.record_object_invalidation();
                 self.record_exception_checkpoint_if(
                     unary.op != ast::UnaryOp::Not
                         || !Self::condition_evaluation_is_known_safe(&unary.operand),
@@ -3657,6 +3752,9 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                 self.visit_expr(compare.first_operand());
                 for (_, op, right) in compare.iter() {
                     self.visit_expr(right);
+                    if !matches!(op, ast::CmpOp::Is | ast::CmpOp::IsNot) {
+                        self.record_object_invalidation();
+                    }
                     self.record_exception_checkpoint_if(!matches!(
                         op,
                         ast::CmpOp::Is | ast::CmpOp::IsNot
@@ -3673,11 +3771,13 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                     self.generator_functions.insert(scope);
                 }
                 walk_expr(self, expr);
+                self.record_object_invalidation();
                 self.record_exception_checkpoint();
             }
             ast::Expr::Await(_) => {
                 self.mark_current_comprehension_async();
                 walk_expr(self, expr);
+                self.record_object_invalidation();
                 self.record_exception_checkpoint();
             }
             _ => {
@@ -4679,6 +4779,7 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                 } in items
                 {
                     self.visit_expr(context_expr);
+                    self.record_object_invalidation();
                     self.record_exception_checkpoint();
 
                     self.exception_context_stack_manager
@@ -4700,6 +4801,7 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                 self.visit_body(body);
 
                 for item in items.iter().rev() {
+                    self.record_object_invalidation();
                     let mut exceptional_entries = self
                         .exception_context_stack_manager
                         .finish_context_manager_context()
@@ -5558,8 +5660,20 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
     }
 
     fn visit_stmt(&mut self, stmt: &'ast ast::Stmt) {
+        if self.object_state_tracking.is_enabled()
+            && matches!(stmt, ast::Stmt::For(_) | ast::Stmt::While(_))
+        {
+            self.current_use_def_map_mut()
+                .record_object_state(ObjectStateEvent::Reset);
+        }
         self.push_statement(CurrentStatement::default());
         self.visit_stmt_impl(stmt);
+        if self.object_state_tracking.is_enabled()
+            && matches!(stmt, ast::Stmt::For(_) | ast::Stmt::While(_))
+        {
+            self.current_use_def_map_mut()
+                .record_object_state(ObjectStateEvent::Reset);
+        }
         let mut current_statement = self.pop_statement();
 
         // We currently only consider certain types of statements to introduce constraints

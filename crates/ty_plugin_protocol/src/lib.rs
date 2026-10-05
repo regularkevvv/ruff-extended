@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 5 };
+pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 6 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -131,6 +131,7 @@ pub struct PluginCapabilities {
     pub instance_member: bool,
     pub call_signature: bool,
     pub call_return: bool,
+    pub call_state: bool,
     pub additional_dependencies: bool,
     pub project_index: bool,
     pub cross_symbol_contributions: bool,
@@ -465,6 +466,7 @@ pub enum PluginRequest {
     ResolveInstanceMember(ResolveMemberRequest),
     AdjustCallSignature(CallRequest),
     AdjustCallReturn(CallRequest),
+    AdjustCallState(CallRequest),
     AdditionalDependencies(DependencyRequest),
     /// Boxed because `MutationRequest` is far larger than the rest, so inlining it
     /// would grow every request. `Box` is transparent to serde, so the wire format is
@@ -880,6 +882,7 @@ pub enum PluginResponse {
     MemberPatch(MemberPatch),
     CallSignaturePatch(CallSignaturePatch),
     CallReturnPatch(CallReturnPatch),
+    CallStatePatch(CallStatePatch),
     Dependencies(DependenciesResponse),
     MutationDiagnostics(MutationResponse),
     NoChange,
@@ -1066,6 +1069,23 @@ pub struct CallReturnPatch {
     pub diagnostics: Vec<PluginDiagnostic>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_metadata: Option<serde_json::Value>,
+}
+
+/// Member facts that hold after a synchronous call completes successfully.
+///
+/// Missing members retain their ordinary declared types. Unknown calls invalidate all facts.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct CallStatePatch {
+    pub receiver_members: BTreeMap<String, TypeExpr>,
+    pub result_members: BTreeMap<String, TypeExpr>,
+    /// The result is a new object, distinct from all previously existing objects.
+    /// Result member facts are ignored unless this guarantee is provided.
+    pub fresh_result: bool,
+    /// The call cannot mutate any pre-existing object other than its receiver.
+    /// It also cannot rebind names in the caller's module or enclosing scopes.
+    /// Without this guarantee all existing member facts are discarded first.
+    pub preserves_other_objects: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

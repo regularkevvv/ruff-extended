@@ -1508,7 +1508,7 @@ fn function_qualified_name<'db>(db: &'db dyn Db, function: FunctionType<'db>) ->
 }
 
 /// Runtime failure information that can be reported by inference callers with source context.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue, get_size2::GetSize)]
 pub(crate) struct PluginRuntimeDiagnostic {
     plugin_id: String,
     error: SemanticPluginRuntimeError,
@@ -1570,6 +1570,7 @@ fn matching_call_plugin<'a, 'db>(
         let claims = match hook {
             CallHook::Signature => plugin.call_signature_claims(),
             CallHook::Return => plugin.call_return_claims(),
+            CallHook::State => plugin.call_state_claims(),
         };
         if claims.iter().any(|claim| claim == callee.qualified_name()) {
             return true;
@@ -1578,6 +1579,7 @@ fn matching_call_plugin<'a, 'db>(
         let method_claims = match hook {
             CallHook::Signature => plugin.call_signature_method_on_subclass_claims(),
             CallHook::Return => plugin.call_return_method_on_subclass_claims(),
+            CallHook::State => plugin.call_state_method_on_subclass_claims(),
         };
 
         method_claims.iter().any(|claim| {
@@ -1590,6 +1592,13 @@ fn matching_call_plugin<'a, 'db>(
                     .is_some_and(|name| protocol::method_name_pattern_matches(pattern, name)),
             };
             name_matches
+                && (!matches!(hook, CallHook::State)
+                    || callee.qualified_name()
+                        == format!(
+                            "{}.{}",
+                            claim.base_qualified_name(),
+                            callee.method_name().unwrap_or_default()
+                        ))
                 && callee_receiver_is_subclass_of(db, env, callee, claim.base_qualified_name())
         })
     })
@@ -1620,6 +1629,7 @@ fn callee_receiver_is_subclass_of(
 enum CallHook {
     Signature,
     Return,
+    State,
 }
 
 /// If a plugin claims the call signature of `callable_type`, return a replacement callable to
@@ -1781,6 +1791,89 @@ pub(crate) fn plugin_adjusted_call_return<'db>(
     )))
 }
 
+pub(crate) fn plugin_claims_call_state(db: &dyn Db, file: File, callable_type: Type<'_>) -> bool {
+    let env = &plugin_program_environment(db, file);
+    plugin_callee(db, env, callable_type).is_some_and(|callee| {
+        matching_call_plugin(
+            db,
+            env,
+            SemanticPlugins::environment_or_empty(db).plugins(),
+            &callee,
+            CallHook::State,
+        )
+        .is_some()
+    })
+}
+
+/// Run the state hook independently of return-type adjustment.
+pub(crate) fn plugin_adjusted_call_state<'db>(
+    db: &'db dyn Db,
+    file: File,
+    callable_type: Type<'db>,
+    arguments: &ast::Arguments,
+    call_arguments: &CallArguments<'_, 'db>,
+) -> Result<Option<super::object_state::CallStateEffects<'db>>, PluginRuntimeDiagnostic> {
+    let env = &plugin_program_environment(db, file);
+    let Some(callee) = plugin_callee(db, env, callable_type) else {
+        return Ok(None);
+    };
+    let Some(plugin) = matching_call_plugin(
+        db,
+        env,
+        SemanticPlugins::environment_or_empty(db).plugins(),
+        &callee,
+        CallHook::State,
+    ) else {
+        return Ok(None);
+    };
+    let request = plugin_call_request(
+        db,
+        env,
+        plugin,
+        file,
+        &callee,
+        arguments,
+        Some(call_arguments),
+        None,
+        CallHook::State,
+        false,
+    );
+    let protocol::PluginResponse::CallStatePatch(patch) =
+        execute_call_plugin(db, plugin, &request, CallHook::State)?
+    else {
+        return Ok(None);
+    };
+    let virtual_types = plugin_project_index_virtual_types(db, env, plugin);
+    let convert = |members: std::collections::BTreeMap<String, protocol::TypeExpr>, self_type| {
+        members
+            .into_iter()
+            .map(|(name, ty)| {
+                (
+                    Name::from(name),
+                    plugin_type_expr_to_type_with_context(
+                        db,
+                        env,
+                        &ty,
+                        PluginTypeExprContext {
+                            self_type,
+                            scope: Some(global_scope(db, db.program_file(file))),
+                            virtual_types,
+                            ..PluginTypeExprContext::default()
+                        },
+                    ),
+                )
+            })
+            .collect()
+    };
+    Ok(Some(super::object_state::CallStateEffects {
+        receiver_members: convert(patch.receiver_members, callee.receiver_ty()),
+        result_members: convert(patch.result_members, None),
+        fresh_result: patch.fresh_result,
+        has_receiver: callee.receiver_ty().is_some(),
+        preserves_other_objects: patch.preserves_other_objects,
+    }))
+}
+
 /// Run the first semantic plugin claiming mutation validation for `receiver_ty`.
 #[expect(clippy::too_many_arguments)]
 pub(crate) fn plugin_mutation_diagnostics<'db>(
@@ -1881,6 +1974,7 @@ fn plugin_call_request<'db>(
     match hook {
         CallHook::Signature => protocol::PluginRequest::AdjustCallSignature(request),
         CallHook::Return => protocol::PluginRequest::AdjustCallReturn(request),
+        CallHook::State => protocol::PluginRequest::AdjustCallState(request),
     }
 }
 
@@ -2122,6 +2216,7 @@ fn execute_call_plugin(
         SemanticPluginRuntime::Mock => Ok(match hook {
             CallHook::Signature => mock_plugin_execute_call_signature(request),
             CallHook::Return => mock_plugin_execute_call_return(request),
+            CallHook::State => protocol::PluginResponse::NoChange,
         }),
         SemanticPluginRuntime::InProcess
         | SemanticPluginRuntime::Wasm

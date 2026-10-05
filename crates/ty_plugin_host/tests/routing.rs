@@ -290,3 +290,35 @@ fn manifest() -> PluginManifest {
         stub_overlays: Vec::new(),
     }
 }
+
+#[test]
+fn state_only_claims_build_routes() {
+    let manifest = ty_plugin_sdk::ManifestBuilder::new("state", "State", "0.1.0")
+        .claim_call_state("example.Record")
+        .claim_call_state_method("example.Record", "clear")
+        .claim_call_state_method_on_subclass("example.Record", "set")
+        .build();
+    let environment = PluginEnvironment::from_manifests(vec![manifest]).expect("state capability");
+    assert_eq!(
+        environment.routes().call_state_plugins("example.Record"),
+        ["state"]
+    );
+    assert_eq!(
+        environment
+            .routes()
+            .call_state_plugins("example.Record.clear"),
+        ["state"]
+    );
+    assert_eq!(
+        environment
+            .routes()
+            .call_state_method_on_subclass_plugins("example.Record", "set"),
+        ["state"]
+    );
+    assert!(
+        environment
+            .routes()
+            .call_return_plugins("example.Record")
+            .is_empty()
+    );
+}

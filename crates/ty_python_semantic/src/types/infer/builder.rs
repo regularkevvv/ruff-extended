@@ -27,6 +27,7 @@ use strum::IntoEnumIterator;
 use ty_module_resolver::{ImportingFile, ModuleName, resolve_module};
 use ty_plugin_protocol as protocol;
 use ty_python_core::ast_ids::HasScopedUseId;
+use ty_python_core::program::{SemanticPlugin, SemanticPlugins};
 use ty_python_core::statement::StatementInner;
 
 use super::{
@@ -9888,6 +9889,20 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             }
         };
 
+        if let Some(expression) = self
+            .index
+            .use_def_map(self.scope().file_scope_id(db))
+            .object_state()
+            .and_then(|flow| flow.call(call_expression.into()))
+            && SemanticPlugins::environment_or_empty(db)
+                .plugins()
+                .iter()
+                .any(SemanticPlugin::tracks_call_state)
+            && let Err(diagnostic) = crate::types::object_state::call_state_effects(db, expression)
+        {
+            self.report_plugin_runtime_error(call_expression, diagnostic);
+        }
+
         typeguard::bind_type_guard_return_type(db, self.scope(), return_ty, &bindings, arguments)
     }
 
@@ -11265,10 +11280,19 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         } = attribute;
 
         match ctx {
-            ExprContext::Load => self
-                .infer_attribute_load(attribute)
-                .unwrap_or_else(|recovery_ty| recovery_ty)
-                .inner_type(),
+            ExprContext::Load => {
+                let default = self
+                    .infer_attribute_load(attribute)
+                    .unwrap_or_else(|recovery_ty| recovery_ty)
+                    .inner_type();
+                crate::types::object_state::refined_member_type(
+                    self.db(),
+                    self.scope(),
+                    attribute,
+                    default,
+                    self.expression_type(value),
+                )
+            }
             ExprContext::Store => {
                 self.infer_expression(value, TypeContext::default());
                 Type::Never

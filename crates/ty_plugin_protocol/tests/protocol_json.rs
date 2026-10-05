@@ -61,6 +61,7 @@ fn serializes_manifest() {
         "instance-member": false,
         "call-signature": false,
         "call-return": false,
+        "call-state": false,
         "additional-dependencies": false,
         "project-index": true,
         "cross-symbol-contributions": false,
