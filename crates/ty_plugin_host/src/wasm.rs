@@ -14,9 +14,11 @@
 //! no access to the filesystem, environment, clock, or network — only the two functions above.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use wasmtime::{
-    Config, Engine, Instance, Module, Store, StoreLimits, StoreLimitsBuilder, Trap, TypedFunc,
+    Cache, CacheConfig, Config, Engine, Instance, Module, Store, StoreLimits, StoreLimitsBuilder,
+    Trap, TypedFunc,
 };
 
 use ty_plugin_protocol::{PluginRequest, PluginResponse};
@@ -61,19 +63,45 @@ pub struct WasmRunner {
     engine: Engine,
     modules: BTreeMap<String, Module>,
     limits: WasmLimits,
+    cache: Option<Cache>,
 }
 
 impl WasmRunner {
     /// Create a runner whose calls are bounded by `limits`.
     pub fn new(limits: WasmLimits) -> Result<Self, RuntimeError> {
+        Self::new_with_cache(limits, None)
+    }
+
+    /// Cache compiled native modules across runners in a trusted, absolute user cache directory.
+    ///
+    /// Wasmtime keys entries by module contents, compiler version, target and engine settings.
+    /// Unavailable caches fall back to compilation. Relative paths are ignored because a project
+    /// directory is not a trusted source of native executable code.
+    pub fn new_with_cache(
+        limits: WasmLimits,
+        directory: Option<&Path>,
+    ) -> Result<Self, RuntimeError> {
+        let cache = directory.filter(|path| path.is_absolute()).and_then(|directory| {
+            let mut config = CacheConfig::new();
+            config.with_directory(directory);
+            match Cache::new(config) {
+                Ok(cache) => Some(cache),
+                Err(error) => {
+                    tracing::warn!(%error, "WASM compilation cache unavailable; compiling without it");
+                    None
+                }
+            }
+        });
         let mut config = Config::new();
         config.consume_fuel(true);
+        config.cache(cache.clone());
         let engine =
             Engine::new(&config).map_err(|err| RuntimeError::Trap(engine_message(&err)))?;
         Ok(Self {
             engine,
             modules: BTreeMap::new(),
             limits,
+            cache,
         })
     }
 
@@ -93,10 +121,26 @@ impl WasmRunner {
         plugin_id: impl Into<String>,
         wasm: impl AsRef<[u8]>,
     ) -> Result<(), RuntimeError> {
+        let plugin_id = plugin_id.into();
+        let (hits, misses) = self.cache_counts();
         let module = Module::new(&self.engine, wasm)
             .map_err(|err| RuntimeError::Trap(format!("failed to compile plugin module: {err}")))?;
-        self.modules.insert(plugin_id.into(), module);
+        let (new_hits, new_misses) = self.cache_counts();
+        tracing::debug!(
+            plugin = %plugin_id,
+            cache_enabled = self.cache.is_some(),
+            cache_hits = new_hits - hits,
+            cache_misses = new_misses - misses,
+            "Loaded WASM plugin module"
+        );
+        self.modules.insert(plugin_id, module);
         Ok(())
+    }
+
+    fn cache_counts(&self) -> (usize, usize) {
+        self.cache
+            .as_ref()
+            .map_or((0, 0), |cache| (cache.cache_hits(), cache.cache_misses()))
     }
 }
 
@@ -199,4 +243,153 @@ fn classify_call_error(err: &wasmtime::Error, store: &mut Store<StoreState>) -> 
 /// Render a non-trap engine error (config/fuel setup) as a message.
 fn engine_message(err: &wasmtime::Error) -> String {
     err.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+    use std::thread;
+
+    use tempfile::TempDir;
+    use wasmtime::{Cache, CacheConfig, Config, Engine, Instance, Module, Store};
+
+    use super::{WasmLimits, WasmRunner};
+
+    const MODULE: &str = "(module (func (export \"value\") (result i32) i32.const 7))";
+
+    fn runner(directory: &Path, source: &str) -> WasmRunner {
+        WasmRunner::new_with_cache(WasmLimits::default(), Some(directory))
+            .expect("engine builds")
+            .with_plugin("example", source)
+            .expect("module loads")
+    }
+
+    fn value(runner: &WasmRunner) -> i32 {
+        let mut store = Store::new(&runner.engine, ());
+        store.set_fuel(1000).expect("fuel is enabled");
+        let instance = Instance::new(&mut store, &runner.modules["example"], &[])
+            .expect("module instantiates");
+        instance
+            .get_typed_func::<(), i32>(&mut store, "value")
+            .expect("export exists")
+            .call(&mut store, ())
+            .expect("export runs")
+    }
+
+    #[test]
+    fn compiled_code_survives_runner_restart_and_preserves_fuel() {
+        let directory = TempDir::new().expect("temporary cache");
+        let cold = runner(directory.path(), MODULE);
+        assert_eq!(cold.cache_counts(), (0, 1));
+        assert_eq!(value(&cold), 7);
+        drop(cold);
+
+        let warm = runner(directory.path(), MODULE);
+        assert_eq!(warm.cache_counts(), (1, 0));
+        assert_eq!(value(&warm), 7);
+        let mut store = Store::new(&warm.engine, ());
+        store.set_fuel(0).expect("fuel is enabled");
+        let instance =
+            Instance::new(&mut store, &warm.modules["example"], &[]).expect("module instantiates");
+        assert!(
+            instance
+                .get_typed_func::<(), i32>(&mut store, "value")
+                .expect("export exists")
+                .call(&mut store, ())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn module_changes_invalidate_compiled_code() {
+        let directory = TempDir::new().expect("temporary cache");
+        assert_eq!(value(&runner(directory.path(), MODULE)), 7);
+        let changed = runner(directory.path(), &MODULE.replace("const 7", "const 9"));
+        assert_eq!(changed.cache_counts(), (0, 1));
+        assert_eq!(value(&changed), 9);
+        let restored = runner(directory.path(), MODULE);
+        assert_eq!(restored.cache_counts(), (1, 0));
+        assert_eq!(value(&restored), 7);
+    }
+
+    #[test]
+    fn engine_settings_invalidate_compiled_code() {
+        let directory = TempDir::new().expect("temporary cache");
+        drop(runner(directory.path(), MODULE));
+        let mut cache_config = CacheConfig::new();
+        cache_config.with_directory(directory.path());
+        let cache = Cache::new(cache_config).expect("cache builds");
+        let mut config = Config::new();
+        config.cache(Some(cache.clone()));
+        // The production engine uses fuel instrumentation; this engine does not.
+        let engine = Engine::new(&config).expect("engine builds");
+        Module::new(&engine, MODULE).expect("module compiles for changed engine");
+        assert_eq!((cache.cache_hits(), cache.cache_misses()), (0, 1));
+    }
+
+    #[test]
+    fn invalid_cache_entries_are_recompiled() {
+        let directory = TempDir::new().expect("temporary cache");
+        drop(runner(directory.path(), MODULE));
+        let modules =
+            fs::read_dir(directory.path().join("modules")).expect("cache contains modules");
+        let mut corrupted = 0;
+        for compiler in modules {
+            for entry in fs::read_dir(compiler.expect("compiler entry").path())
+                .expect("compiler cache directory")
+            {
+                let path = entry.expect("module entry").path();
+                if path.is_file() && path.extension().is_none() {
+                    fs::write(path, b"invalid compressed entry").expect("corrupt test cache");
+                    corrupted += 1;
+                }
+            }
+        }
+        assert_eq!(corrupted, 1);
+        let recovered = runner(directory.path(), MODULE);
+        assert_eq!(recovered.cache_counts(), (0, 1));
+        assert_eq!(value(&recovered), 7);
+        assert_eq!(runner(directory.path(), MODULE).cache_counts(), (1, 0));
+    }
+
+    #[test]
+    fn cache_failure_and_relative_paths_keep_compilation_available() {
+        let directory = TempDir::new().expect("temporary cache");
+        let file = directory.path().join("file");
+        fs::write(&file, "not a directory").expect("create file");
+        let unavailable = runner(&file, MODULE);
+        assert!(unavailable.cache.is_none());
+        assert_eq!(value(&unavailable), 7);
+        let relative = runner(Path::new("untrusted-project-cache"), MODULE);
+        assert!(relative.cache.is_none());
+        assert_eq!(value(&relative), 7);
+    }
+
+    #[test]
+    fn concurrent_runners_share_cache_without_partial_artifacts() {
+        let directory = TempDir::new().expect("temporary cache");
+        thread::scope(|scope| {
+            let threads: Vec<_> = (0..4)
+                .map(|_| scope.spawn(|| value(&runner(directory.path(), MODULE))))
+                .collect();
+            for thread in threads {
+                assert_eq!(thread.join().expect("runner finishes"), 7);
+            }
+        });
+        assert_eq!(runner(directory.path(), MODULE).cache_counts(), (1, 0));
+    }
+
+    #[test]
+    fn plugin_input_cannot_supply_native_artifacts() {
+        let uncached = WasmRunner::new(WasmLimits::default()).expect("engine builds");
+        let compiled = Module::new(&uncached.engine, MODULE)
+            .expect("module compiles")
+            .serialize()
+            .expect("module serializes");
+        let directory = TempDir::new().expect("temporary cache");
+        let mut cached = WasmRunner::new_with_cache(WasmLimits::default(), Some(directory.path()))
+            .expect("engine builds");
+        assert!(cached.add_plugin("untrusted", compiled).is_err());
+    }
 }
