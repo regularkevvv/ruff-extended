@@ -38,13 +38,14 @@ which = { workspace = true, optional = true }
 ty_plugin_protocol = { workspace = true }
 ty_plugin_examples = { workspace = true }
 ty_plugin_sdk = { workspace = true }
+tempfile = { workspace = true }
 
 [features]
 default = ["mock"]
 mock = []
 # Non-default production backend: embeds wasmtime to execute real `.wasm` plugin artifacts. Enabled
 # for native builds that want to run WASM plugins; never enabled for the `wasm32` `ty_wasm` build.
-plugins-wasm = ["dep:wasmtime", "dep:serde_json"]
+plugins-wasm = ["dep:wasmtime", "dep:serde_json", "dep:tracing"]
 # Monty backend: runs Python plugin source inside the sandboxed `monty` interpreter. The base
 # feature executes plugins in-process; `plugins-monty-pool` adds crash isolation through
 # `monty-pool` worker subprocesses.

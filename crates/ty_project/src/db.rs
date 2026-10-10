@@ -112,11 +112,19 @@ impl SemanticPluginRuntimeState {
 
             #[cfg(all(feature = "plugins-wasm", not(target_arch = "wasm32")))]
             {
+                let cache_directory = system
+                    .cache_dir()
+                    .map(|directory| directory.join("plugins/wasm"));
                 let (host, errors) = Self::load_runtime_plugins(
                     settings,
                     system,
                     PluginRuntimeSettings::Wasm,
-                    WasmRunner::new(WasmLimits::default()),
+                    WasmRunner::new_with_cache(
+                        WasmLimits::default(),
+                        cache_directory
+                            .as_ref()
+                            .map(|directory| directory.as_std_path()),
+                    ),
                     |runner: &mut WasmRunner, plugin_id, artifact| {
                         runner.add_plugin(plugin_id, artifact)
                     },

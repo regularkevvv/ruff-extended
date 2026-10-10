@@ -81,6 +81,8 @@ allow-build-scripts = [
     "wasm-bindgen",
     "wasm-bindgen-shared",
     "wasmtime",
+    # Records the compiler version (and executable mtime for Git builds) in cache keys.
+    "wasmtime-internal-cache",
     "wasmtime-internal-core",
     "wasmtime-internal-cranelift",
     "wasmtime-internal-unwinder",
