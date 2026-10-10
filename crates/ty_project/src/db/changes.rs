@@ -101,7 +101,10 @@ impl ProjectDatabase {
         );
         // The initial uv metadata request may have failed before a workspace could be discovered.
         let uv_enabled = metadata.use_uv().workspace_discovery_enabled();
-        let virtual_environment = project.program_settings(self).virtual_environment.clone();
+        let virtual_environment = project
+            .program_settings(self)
+            .virtual_environment()
+            .map(SystemPath::to_path_buf);
         let python_path = metadata.configured_python_path(self.system()).or_else(|| {
             PythonEnvironment::virtual_environment_candidate(Some(&project_root), self.system())
                 .map(|(path, _)| SystemPath::absolute(path, self.system().current_directory()))
@@ -433,6 +436,7 @@ impl ProjectDatabase {
                 }
                 Err(error) => {
                     tracing::error!("Failed to resolve program settings: {error}");
+                    project.update_environment_error(self, &error);
                 }
             }
         }

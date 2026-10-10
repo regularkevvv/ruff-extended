@@ -47,8 +47,9 @@ use ty_plugin_protocol::{
 };
 use ty_python_core::platform::PythonPlatform;
 use ty_python_core::program::{
-    MisconfigurationStrategy, ProgramSettings, SemanticPlugin, SemanticPluginEnvironment,
-    SemanticPluginMemberClaim, SemanticPluginMethodClaim, SemanticPluginRuntime,
+    MisconfigurationStrategy, ProgramSettings, PythonEnvironmentError, SemanticPlugin,
+    SemanticPluginEnvironment, SemanticPluginMemberClaim, SemanticPluginMethodClaim,
+    SemanticPluginRuntime,
 };
 use ty_python_semantic::lint::{Level, LintSource, RuleSelection};
 use ty_python_semantic::{
@@ -234,6 +235,14 @@ impl Options {
             configured => configured.map_err(ToProgramSettingsError::PythonEnvironment),
         };
 
+        let python_environment_error = match &python_environment {
+            Err(ToProgramSettingsError::PythonEnvironment(error)) => Some(PythonEnvironmentError {
+                message: error.to_string().into(),
+                last_usable: None,
+            }),
+            _ => None,
+        };
+
         // If in safe-mode, fallback to None if this fails instead of erroring.
         let python_environment = strategy
             .fallback_opt(python_environment, |_| {
@@ -334,9 +343,10 @@ impl Options {
                 python_platform,
                 search_paths,
                 semantic_plugins,
-                virtual_environment: python_environment
-                    .filter(PythonEnvironment::is_virtual)
-                    .map(|environment| environment.sys_prefix().to_path_buf()),
+                python_environment: match python_environment_error {
+                    Some(error) => Err(error),
+                    None => Ok(python_environment),
+                },
             },
             diagnostics,
         ))
@@ -946,7 +956,7 @@ pub struct EnvironmentOptions {
     /// to reflect the differing contents of the standard library across Python versions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[option(
-        default = r#""3.14""#,
+        default = r#""3.15""#,
         value_type = r#""3.7" | "3.8" | "3.9" | "3.10" | "3.11" | "3.12" | "3.13" | "3.14" | "3.15""#,
         example = r#"
             python-version = "3.12"
