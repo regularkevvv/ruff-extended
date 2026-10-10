@@ -13,11 +13,14 @@ use ruff_index::{IndexVec, newtype_index};
 
 use crate::types::constraints::sequents::{Sequent, SequentGroup, SequentMap};
 use crate::types::constraints::variables::Constraint;
+use crate::types::constraints::variables::Constraint::{
+    ConcreteEquivalence, ConcreteLower, ConcreteUpper, TypeVarEquivalence, TypeVarRange,
+};
 use crate::types::constraints::{
     ConstraintAssignment, ConstraintId, ConstraintSetStorage, Node, NodeId, PathVisitor,
     SourceOrderId, TypeVarId,
 };
-use crate::{Db, FxIndexMap, ProgramEnvironment};
+use crate::{Db, FxIndexMap, FxIndexSet, ProgramEnvironment};
 
 /// The position of an assignment in insertion order.
 #[newtype_index]
@@ -57,6 +60,11 @@ pub(crate) struct PathAssignments {
     sequent_antecedents: FxHashMap<ConstraintAssignment, Vec<usize>>,
     /// Each assignment's source constraint and greatest remaining per-path fuel.
     pub(super) assignments: FxIndexMap<ConstraintAssignment, (ConstraintId, u16)>,
+    /// Constraints that have been _replaced_ with other constraints on this path, because a
+    /// sequent substituted an exact type for some typevar.
+    substituted_constraints: FxIndexSet<ConstraintId>,
+    /// Substitutions awaiting admission of their replacement assignment.
+    pending_substitutions: Vec<(ConstraintId, ConstraintId)>,
     /// Positions in `assignments`, cleared when their branch is left. Fuel stays in the map so
     /// replenishment and rollback do not need to update these indices.
     positive_assignment_indices: IndexVec<ConstraintId, Option<AssignmentIndex>>,
@@ -94,6 +102,31 @@ pub(crate) struct PathAssignments {
 /// The total amount of fuel that we are willing to spend for this path traversal. This was
 /// chosen empirically, to balance performance with accurate ecosystem diagnostics.
 const OVERALL_FUEL_BUDGET: u16 = 256;
+
+/// Whether two constraints with disjoint, complete supports can still derive sequents.
+///
+/// A concrete lower/upper, lower/equality, or upper/equality pair can relate its type variables
+/// through a shared concrete pivot. Every other pair requires a shared type variable.
+fn can_interact_without_shared_typevars(left: Constraint<'_>, right: Constraint<'_>) -> bool {
+    match (left, right) {
+        (ConcreteLower(_), ConcreteUpper(_) | ConcreteEquivalence(_))
+        | (ConcreteUpper(_) | ConcreteEquivalence(_), ConcreteLower(_))
+        | (ConcreteUpper(_), ConcreteEquivalence(_))
+        | (ConcreteEquivalence(_), ConcreteUpper(_)) => true,
+        (
+            ConcreteLower(_)
+            | ConcreteUpper(_)
+            | ConcreteEquivalence(_)
+            | TypeVarRange(_)
+            | TypeVarEquivalence(_),
+            ConcreteLower(_)
+            | ConcreteUpper(_)
+            | ConcreteEquivalence(_)
+            | TypeVarRange(_)
+            | TypeVarEquivalence(_),
+        ) => false,
+    }
+}
 
 /// The maximum number of "trips through the sequent map" that we are willing to take for a
 /// derived constraint. This records how far removed we are from a constraint that comes
@@ -150,6 +183,8 @@ impl Default for PathAssignments {
             sequents: Vec::default(),
             sequent_antecedents: FxHashMap::default(),
             assignments: FxIndexMap::default(),
+            substituted_constraints: FxIndexSet::default(),
+            pending_substitutions: Vec::default(),
             positive_assignment_indices: IndexVec::default(),
             negative_assignment_indices: IndexVec::default(),
             fuel_undo: Vec::default(),
@@ -242,6 +277,8 @@ impl PathAssignments {
             sequents: Vec::default(),
             sequent_antecedents: FxHashMap::default(),
             assignments: FxIndexMap::default(),
+            substituted_constraints: FxIndexSet::default(),
+            pending_substitutions: Vec::default(),
             positive_assignment_indices: IndexVec::default(),
             negative_assignment_indices: IndexVec::default(),
             fuel_undo: Vec::default(),
@@ -452,6 +489,7 @@ impl PathAssignments {
         // pass along the range of which assignments are new, and so that we can reset back to this
         // point before returning.
         let start = self.assignments.len();
+        let substituted_constraints_start = self.substituted_constraints.len();
         let fuel_undo_start = self.fuel_undo.len();
         let previous_remaining_overall_fuel = self.remaining_overall_fuel;
 
@@ -497,6 +535,7 @@ impl PathAssignments {
         // Reset back to where we were before following this edge, so that the caller can reuse a
         // single instance for the entire BDD traversal.
         self.assignment_queue.clear();
+        self.pending_substitutions.clear();
         // A branch can replenish an assignment more than once. Restore in reverse order while
         // every referenced assignment still exists.
         for (index, previous_fuel) in self.fuel_undo.drain(fuel_undo_start..).rev() {
@@ -514,6 +553,8 @@ impl PathAssignments {
             }
         }
         self.assignments.truncate(start);
+        self.substituted_constraints
+            .truncate(substituted_constraints_start);
         self.remaining_overall_fuel = previous_remaining_overall_fuel;
         result
     }
@@ -529,6 +570,10 @@ impl PathAssignments {
                 ConstraintAssignment::Negative(_) | ConstraintAssignment::Unconstrained(_) => None,
             },
         )
+    }
+
+    pub(super) fn constraint_is_substituted(&self, constraint: ConstraintId) -> bool {
+        self.substituted_constraints.contains(&constraint)
     }
 
     fn assignment_holds(&self, assignment: ConstraintAssignment) -> bool {
@@ -630,7 +675,11 @@ impl PathAssignments {
                         }
                     }
                     Sequent::PairImplication {
-                        ante1, ante2, post, ..
+                        ante1,
+                        ante2,
+                        post,
+                        is_substitution,
+                        ..
                     } => {
                         let ante1 = storage.intern_constraint(db, env, *ante1);
                         let ante2 = storage.intern_constraint(db, env, *ante2);
@@ -648,6 +697,7 @@ impl PathAssignments {
                             ante2,
                             post,
                             fuel_cost,
+                            is_substitution: *is_substitution,
                         }
                     }
                     Sequent::SingleImplication { ante, post, .. } => {
@@ -735,24 +785,25 @@ impl PathAssignments {
         }
 
         let constraint_data = storage.constraint_data(constraint);
-        let map = SequentMap::for_constraint(db, env, constraint_data);
-        let added = self.add_sequents(db, env, storage, map);
+        if let Some(map) = SequentMap::for_constraint(db, env, constraint_data) {
+            let added = self.add_sequents(db, env, storage, map);
 
-        // `projection_source_order` depends on knowing the order that sequents were discovered for
-        // each constraint. Since we are salsa-caching sequent derivation, we don't have easy
-        // access to that in ConstraintSetStorage, so we need to maintain a local view of that
-        // information here.
-        self.single_replay_consequents.insert(
-            constraint,
-            self.sequents[added]
-                .iter()
-                .filter_map(|sequent| match sequent {
-                    Sequent::SingleImplication { post, .. }
-                    | Sequent::PairImplication { post, .. } => Some(*post),
-                    _ => None,
-                })
-                .collect(),
-        );
+            // `projection_source_order` depends on knowing the order that sequents were discovered for
+            // each constraint. Since we are salsa-caching sequent derivation, we don't have easy
+            // access to that in ConstraintSetStorage, so we need to maintain a local view of that
+            // information here.
+            self.single_replay_consequents.insert(
+                constraint,
+                self.sequents[added]
+                    .iter()
+                    .filter_map(|sequent| match sequent {
+                        Sequent::SingleImplication { post, .. }
+                        | Sequent::PairImplication { post, .. } => Some(*post),
+                        _ => None,
+                    })
+                    .collect(),
+            );
+        }
 
         for existing_index in 0..self.discovered.len() {
             let (existing, _) = self
@@ -767,21 +818,22 @@ impl PathAssignments {
             let existing_support = storage.constraint_support(*existing);
             let constraint_support = storage.constraint_support(constraint);
 
-            // Independent typevars must be checked for disjoint or invalid constraints, but are
-            // otherwise already constrained and do not participate in sequent discovery.
-            if !existing_support.overlaps_with(constraint_support)
-                && existing_support
+            if existing_support.is_complete()
+                && constraint_support.is_complete()
+                && !existing_support.overlaps_with(constraint_support)
+            {
+                // Independent typevars must be checked for disjoint or invalid constraints, but
+                // are otherwise already constrained and do not participate in sequent discovery.
+                let independent = existing_support
                     .iter()
                     .chain(constraint_support.iter())
-                    .any(|typevar| self.independent_typevars.contains(&typevar))
-                && existing_support.is_complete()
-                && constraint_support.is_complete()
-            {
-                continue;
-            }
+                    .any(|typevar| self.independent_typevars.contains(&typevar));
 
-            if SequentMap::pair_cannot_produce_sequents(db, env, existing_data, constraint_data) {
-                continue;
+                if independent
+                    || !can_interact_without_shared_typevars(existing_data, constraint_data)
+                {
+                    continue;
+                }
             }
 
             let (a, a_data, b, b_data) = if existing_index < constraint_index {
@@ -789,12 +841,15 @@ impl PathAssignments {
             } else {
                 (constraint, constraint_data, *existing, existing_data)
             };
-            if !self.elaborated_pairs.insert((a, b)) {
+            if self.elaborated_pairs.contains(&(a, b)) {
                 // We've already elaborated this pair of constraints.
                 continue;
             }
 
-            let map = SequentMap::for_constraint_pair(db, env, a_data, b_data);
+            let Some(map) = SequentMap::for_constraint_pair(db, env, a_data, b_data) else {
+                continue;
+            };
+            self.elaborated_pairs.insert((a, b));
             let added = self.add_sequents(db, env, storage, map);
 
             // `projection_source_order` depends on knowing the order that sequents were discovered for
@@ -824,6 +879,19 @@ impl PathAssignments {
     ) -> Result<(), PathAssignmentConflict> {
         while let Some((assignment, fuel)) = self.assignment_queue.pop_front() {
             self.add_assignment(db, env, storage, assignment, source_constraint, fuel)?;
+        }
+        // Either fuel limit can prevent a replacement from being admitted. Keep the original
+        // evidence until the replacement actually holds, including when another derivation
+        // supplied it. Process in discovery order to avoid replacing both sides of a cycle.
+        for (original, replacement) in self.pending_substitutions.drain(..) {
+            if self
+                .positive_assignment_indices
+                .get(replacement)
+                .is_some_and(Option::is_some)
+                && !self.substituted_constraints.contains(&replacement)
+            {
+                self.substituted_constraints.insert(original);
+            }
         }
         Ok(())
     }
@@ -989,9 +1057,18 @@ impl PathAssignments {
                 ante1,
                 ante2,
                 post,
+                is_substitution,
                 fuel_cost,
             } => {
-                self.check_pair_implication(db, storage, ante1, ante2, post, fuel_cost);
+                self.check_pair_implication(
+                    db,
+                    storage,
+                    ante1,
+                    ante2,
+                    post,
+                    is_substitution,
+                    fuel_cost,
+                );
                 Ok(())
             }
             Sequent::SingleImplication {
@@ -1095,6 +1172,7 @@ impl PathAssignments {
         Ok(())
     }
 
+    #[expect(clippy::too_many_arguments)]
     fn check_pair_implication<'db>(
         &mut self,
         db: &'db dyn Db,
@@ -1102,6 +1180,7 @@ impl PathAssignments {
         ante1: ConstraintId,
         ante2: ConstraintId,
         post: ConstraintId,
+        is_substitution: bool,
         fuel_cost: u16,
     ) {
         if storage
@@ -1116,6 +1195,9 @@ impl PathAssignments {
         let Some(ante2_fuel) = self.max_remaining_fuel_for(ante2.when_true()) else {
             return;
         };
+        if is_substitution {
+            self.pending_substitutions.push((ante1, post));
+        }
         let available_fuel = ante1_fuel.min(ante2_fuel);
         if let Some(post_fuel) = available_fuel.checked_sub(fuel_cost) {
             self.enqueue_assignment(
@@ -1473,12 +1555,13 @@ mod tests {
             .storage
             .borrow()
             .calculate_source_orders(set.source_order);
+        let inferable = TypeVarSet::from_typevars(db, [t]);
         let expected = CandidateSolutions::compute(
             db,
             &env,
             &mut builder.storage.borrow_mut(),
             set.node,
-            TypeVarSet::from_typevars(db, [t]),
+            inferable,
             set.source_order,
         );
 
@@ -1496,7 +1579,8 @@ mod tests {
                 remaining_paths,
                 remaining_visits,
             };
-            let mut walker = SolutionWalker::new(source_orders.clone());
+            let mut walker =
+                SolutionWalker::new(db, &mut storage, source_orders.clone(), inferable, set.node);
             assert_eq!(
                 walker.visit_node(
                     db,
@@ -1512,7 +1596,8 @@ mod tests {
             drop(walker);
 
             let mut limits = UnboundedSolutionLimits;
-            let mut walker = SolutionWalker::new(source_orders.clone());
+            let mut walker =
+                SolutionWalker::new(db, &mut storage, source_orders.clone(), inferable, set.node);
             let ControlFlow::Continue(()) = walker.visit_node(
                 db,
                 &env,

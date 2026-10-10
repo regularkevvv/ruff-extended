@@ -120,6 +120,8 @@ pub(super) enum Sequent<C, FuelCost = ()> {
         ante1: C,
         ante2: C,
         post: C,
+        /// Whether this sequent represents a _substitution_ of `ante1` with `post`.
+        is_substitution: bool,
         fuel_cost: FuelCost,
     },
 }
@@ -289,6 +291,22 @@ impl<'db> SequentMap<'db> {
             ante1,
             ante2,
             post,
+            is_substitution: false,
+            fuel_cost: (),
+        });
+    }
+
+    fn add_substitution(
+        &mut self,
+        substituted: Constraint<'db>,
+        ante: Constraint<'db>,
+        post: Constraint<'db>,
+    ) {
+        self.pending.push(Sequent::PairImplication {
+            ante1: substituted,
+            ante2: ante,
+            post,
+            is_substitution: true,
             fuel_cost: (),
         });
     }
@@ -304,11 +322,33 @@ impl<'db> SequentMap<'db> {
     /// Returns a sequent map containing the sequents that we can infer from a single constraint in
     /// isolation. This method is cached so that we only perform this work once per
     /// constraint.
+    ///
+    /// Returns `None` without caching if we can quickly determine that there are no sequents.
     pub(super) fn for_constraint(
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
         constraint: Constraint<'db>,
-    ) -> &'db Self {
+    ) -> Option<&'db Self> {
+        // Most individual constraints produce no sequents. Avoid interning the query arguments
+        // and retaining an empty Salsa result for those cases. Keep the checks in sync with the
+        // single-constraint `add_sequents` methods below.
+        let may_produce_sequents = match constraint {
+            Constraint::ConcreteLower(bound) => {
+                bound.bound == bound.typevar.domain(db).bottom(db)
+                    || bound.bound == bound.typevar.domain(db).top(db)
+            }
+            Constraint::ConcreteUpper(bound) => {
+                bound.bound == bound.typevar.domain(db).top(db)
+                    || bound.bound == bound.typevar.domain(db).bottom(db)
+            }
+            Constraint::ConcreteEquivalence(_) => false,
+            Constraint::TypeVarRange(bound) => bound.left.is_same_typevar_as(db, bound.right),
+            Constraint::TypeVarEquivalence(bound) => bound.left.is_same_typevar_as(db, bound.right),
+        };
+        if !may_produce_sequents {
+            return None;
+        }
+
         #[salsa::tracked(
             returns(ref),
             cycle_initial=|_, _, _, _| SequentMap::default(),
@@ -331,11 +371,13 @@ impl<'db> SequentMap<'db> {
             map
         }
 
-        for_constraint_inner(db, env.program(db), constraint)
+        Some(for_constraint_inner(db, env.program(db), constraint))
     }
 
     /// Returns a sequent map containing the sequents that we can infer from a pair of constraints.
     /// This method is cached so that we only perform this work once per constraint pair.
+    ///
+    /// Returns `None` without caching if we can quickly determine that there are no sequents.
     ///
     /// (Note that this method is _not_ commutative; you should provide `left` and `right` in the
     /// order that they appear in the source code, so that we can construct derived constraints
@@ -345,7 +387,28 @@ impl<'db> SequentMap<'db> {
         env: &ProgramEnvironment<'db>,
         left: Constraint<'db>,
         right: Constraint<'db>,
-    ) -> &'db Self {
+    ) -> Option<&'db Self> {
+        // Currently, the only pattern we look for is when two concrete lower-bound constraints
+        // have disjoint bounds. Given `l₁ ≤ T ∧ l₂ ≤ T`, the only sequent we could theoretically
+        // produce is `(l₁ | l₂) ≤ T`. But we don't store that as a single constraint; we always
+        // break that apart into the two smaller constraints that we started with.
+        if let Constraint::ConcreteLower(left) = left
+            && let Constraint::ConcreteLower(right) = right
+            && left.typevar.is_same_typevar_as(db, right.typevar)
+            && left
+                .bound
+                .when_trivially_disjoint_from(
+                    db,
+                    env,
+                    right.bound,
+                    &ConstraintSetBuilder::new(),
+                    TypeVarSet::None,
+                )
+                .is_trivially_always_satisfied()
+        {
+            return None;
+        }
+
         #[salsa::tracked(
             returns(ref),
             cycle_initial=|_, _, _, _, _| SequentMap::default(),
@@ -370,37 +433,7 @@ impl<'db> SequentMap<'db> {
             map
         }
 
-        for_constraint_pair_inner(db, env.program(db), left, right)
-    }
-
-    /// Quickly determines whether two constraints cannot possibly produce any sequents when passed
-    /// to [`for_constraint_pair`][Self::for_constraint_pair]. If this returns `true`, it is safe
-    /// to skip calling `for_constraint_pair` for this pair of constraints.
-    pub(super) fn pair_cannot_produce_sequents(
-        db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
-        left: Constraint<'db>,
-        right: Constraint<'db>,
-    ) -> bool {
-        // Currently, the only pattern we look for is when two concrete lower-bound constraints
-        // have disjoint bounds. Given `l₁ ≤ T ∧ l₂ ≤ T`, the only sequent we could theoretically
-        // produce is `(l₁ | l₂) ≤ T`. But we don't store that as a single constraint; we always
-        // break that apart into the two smaller constraints that we started with.
-
-        let Constraint::ConcreteLower(left) = left else {
-            return false;
-        };
-        let Constraint::ConcreteLower(right) = right else {
-            return false;
-        };
-        if !left.typevar.is_same_typevar_as(db, right.typevar) {
-            return false;
-        }
-
-        let builder = ConstraintSetBuilder::new();
-        left.bound
-            .when_trivially_disjoint_from(db, env, right.bound, &builder, TypeVarSet::None)
-            .is_trivially_always_satisfied()
+        Some(for_constraint_pair_inner(db, env.program(db), left, right))
     }
 }
 
@@ -798,7 +831,11 @@ impl<'db> Constraint<'db> {
         };
         let provenance = ConstraintProvenance::derived(left.provenance(), right.provenance());
         let derived = left.into_lower_bound().map(provenance, replacement);
-        map.add_pair_implication(left.into(), right.into(), derived.into());
+        if right.is_equivalence() {
+            map.add_substitution(left.into(), right.into(), derived.into());
+        } else {
+            map.add_pair_implication(left.into(), right.into(), derived.into());
+        }
     }
 
     fn add_covariant_upper_tightened_sequent(
@@ -832,7 +869,11 @@ impl<'db> Constraint<'db> {
         };
         let provenance = ConstraintProvenance::derived(left.provenance(), right.provenance());
         let derived = left.into_upper_bound().map(provenance, replacement);
-        map.add_pair_implication(left.into(), right.into(), derived.into());
+        if right.is_equivalence() {
+            map.add_substitution(left.into(), right.into(), derived.into());
+        } else {
+            map.add_pair_implication(left.into(), right.into(), derived.into());
+        }
     }
 
     fn add_covariant_equivalence_tightened_sequent(
@@ -866,7 +907,7 @@ impl<'db> Constraint<'db> {
         };
         let provenance = ConstraintProvenance::derived(left.provenance(), right.provenance());
         let derived = left.map(provenance, replacement);
-        map.add_pair_implication(left.into(), right.into(), derived.into());
+        map.add_substitution(left.into(), right.into(), derived.into());
     }
 
     fn add_contravariant_tightened_sequent(
@@ -897,7 +938,11 @@ impl<'db> Constraint<'db> {
             )
         {
             let derived = lower.into_lower_bound().map(provenance, replacement);
-            map.add_pair_implication(lower.into(), upper.into(), derived.into());
+            if upper.is_equivalence() {
+                map.add_substitution(lower.into(), upper.into(), derived.into());
+            } else {
+                map.add_pair_implication(lower.into(), upper.into(), derived.into());
+            }
         }
 
         // If β contains T contravariantly, substitute α for T:
@@ -919,7 +964,11 @@ impl<'db> Constraint<'db> {
             )
         {
             let derived = upper.into_upper_bound().map(provenance, replacement);
-            map.add_pair_implication(lower.into(), upper.into(), derived.into());
+            if lower.is_equivalence() {
+                map.add_substitution(upper.into(), lower.into(), derived.into());
+            } else {
+                map.add_pair_implication(lower.into(), upper.into(), derived.into());
+            }
         }
     }
 
@@ -955,7 +1004,7 @@ impl<'db> Constraint<'db> {
         };
         let provenance = ConstraintProvenance::derived(left.provenance(), right.provenance());
         let derived = left.map(provenance, replacement);
-        map.add_pair_implication(left.into(), right.into(), derived.into());
+        map.add_substitution(left.into(), right.into(), derived.into());
     }
 
     fn add_covariant_lower_weakened_sequent(
@@ -1060,7 +1109,7 @@ impl<'db> Constraint<'db> {
         };
         let provenance = ConstraintProvenance::derived(left.provenance(), right.provenance());
         let derived = left.map(provenance, replacement);
-        map.add_pair_implication(left.into(), right.into(), derived.into());
+        map.add_substitution(left.into(), right.into(), derived.into());
     }
 
     fn add_contravariant_lower_weakened_sequent(
@@ -1165,7 +1214,7 @@ impl<'db> Constraint<'db> {
         };
         let provenance = ConstraintProvenance::derived(left.provenance(), right.provenance());
         let derived = left.map(provenance, replacement);
-        map.add_pair_implication(left.into(), right.into(), derived.into());
+        map.add_substitution(left.into(), right.into(), derived.into());
     }
 
     fn add_invariant_weakened_sequent(
@@ -1200,7 +1249,7 @@ impl<'db> Constraint<'db> {
         };
         let provenance = ConstraintProvenance::derived(left.provenance(), right.provenance());
         let derived = left.map(provenance, replacement);
-        map.add_pair_implication(left.into(), right.into(), derived.into());
+        map.add_substitution(left.into(), right.into(), derived.into());
     }
 }
 
@@ -1700,17 +1749,20 @@ impl<'db> ConcreteEquivalenceBound<'db> {
         _reversed: bool,
     ) {
         // Given constraints `T = α` and `T ≤ U`, `α ≤ U` must also hold.
+        // Retaining the equality makes this an equivalent replacement for `T ≤ U`, so the
+        // fixed `T` does not remain in `U`'s inference bounds.
         if self.typevar.is_same_typevar_as(db, other.left) {
             let provenance = ConstraintProvenance::derived(self.provenance, other.provenance);
             let derived = ConcreteLowerBound::new(provenance, other.right, self.bound);
-            map.add_pair_implication(self.into(), other.into(), derived.into());
+            map.add_substitution(other.into(), self.into(), derived.into());
         }
 
         // Given constraints `T = α` and `U ≤ T`, `U ≤ α` must also hold.
+        // The retained equality likewise makes this an equivalent replacement for `U ≤ T`.
         if self.typevar.is_same_typevar_as(db, other.right) {
             let provenance = ConstraintProvenance::derived(self.provenance, other.provenance);
             let derived = ConcreteUpperBound::new(provenance, other.left, self.bound);
-            map.add_pair_implication(self.into(), other.into(), derived.into());
+            map.add_substitution(other.into(), self.into(), derived.into());
         }
 
         // We can infer sequents from `T = α` and `S ≤ U` if α _contains_ S or U.
@@ -1739,7 +1791,7 @@ impl<'db> ConcreteEquivalenceBound<'db> {
         if let Some(other_typevar) = other_typevar {
             let provenance = ConstraintProvenance::derived(self.provenance, other.provenance);
             let derived = ConcreteEquivalenceBound::new(provenance, other_typevar, self.bound);
-            map.add_pair_implication(self.into(), other.into(), derived.into());
+            map.add_substitution(other.into(), self.into(), derived.into());
         }
 
         // We can infer sequents from `T = α` and `S = U` if α _contains_ U.
@@ -1985,6 +2037,30 @@ mod tests {
     }
 
     #[test]
+    fn disjoint_lower_bounds_skip_empty_sequent_maps() {
+        let db = setup_db();
+        let db = &db;
+        let env = db.program_environment();
+        let t = create_typevar(db, "T");
+        let left = Constraint::from(ConcreteLowerBound::new(
+            ConstraintProvenance::Evidence,
+            t,
+            Type::int_literal(0),
+        ));
+        let right = Constraint::from(ConcreteLowerBound::new(
+            ConstraintProvenance::Evidence,
+            t,
+            Type::int_literal(1),
+        ));
+
+        assert!(SequentMap::for_constraint(db, &env, left).is_none());
+        assert!(SequentMap::for_constraint(db, &env, right).is_none());
+        for (left, right) in [(left, right), (right, left)] {
+            assert!(SequentMap::for_constraint_pair(db, &env, left, right).is_none());
+        }
+    }
+
+    #[test]
     fn overlapping_lower_bounds_do_not_skip_nonempty_sequent_map() {
         let db = setup_db();
         let db = &db;
@@ -2009,14 +2085,11 @@ mod tests {
         for (left, right) in [(left, right), (right, left)] {
             let sequents = SequentMap::for_constraint_pair(db, &env, left, right);
 
-            assert!(
+            assert!(sequents.is_some_and(|sequents| {
                 sequents
                     .all_sequents()
                     .any(|sequent| matches!(sequent, Sequent::SingleImplication { .. }))
-            );
-            assert!(!SequentMap::pair_cannot_produce_sequents(
-                db, &env, left, right
-            ));
+            }));
         }
     }
 }

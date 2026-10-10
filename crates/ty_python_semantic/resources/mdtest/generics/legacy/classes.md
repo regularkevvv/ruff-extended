@@ -595,6 +595,132 @@ Stop2T = TypeVar("Stop2T", default=int)
 class Bad(Generic[Start2T, Stop2T, StepT]): ...
 ```
 
+## Narrowing class objects of final generic classes
+
+A specialized alias is distinct from the bare class object, even when the specialization matches the
+default type argument. Excluding the bare class with `is not` keeps the alias reachable, so we still
+check the return type in that branch.
+
+```py
+from typing import final
+from typing_extensions import Generic, TypeVar
+
+U = TypeVar("U", default=str)
+
+@final
+class P(Generic[U]): ...
+
+T = TypeVar("T", bound=P[str])
+
+def create(cls: type[T]) -> int:
+    if cls is not P:
+        reveal_type(cls)  # revealed: type[T@create] & ~<class 'P'>
+        return cls()  # error: [invalid-return-type]
+    return 0
+
+create(P[str])
+```
+
+## Narrowing class objects against a final protocol
+
+A class can implement a final protocol without being the protocol class itself. Excluding the
+protocol class leaves the implementing class reachable.
+
+```py
+from typing import Protocol, TypeVar, final
+
+@final
+class P(Protocol):
+    value: int
+
+class Impl:
+    value: int
+
+T = TypeVar("T", bound=Impl)
+
+def create(cls: type[T]) -> int:
+    if cls is not P:
+        reveal_type(cls)  # revealed: type[T@create] & ~<class 'P'>
+        return cls()  # error: [invalid-return-type]
+    return 0
+
+create(Impl)
+```
+
+## Class objects and specialized final protocols
+
+Implementing a specialized protocol does not make the implementing class object the protocol's
+specialized alias.
+
+```py
+from typing import Protocol, TypeVar, final
+from ty_extensions._internal import TypeOf
+
+U = TypeVar("U")
+
+@final
+class P(Protocol[U]):
+    value: U
+
+class Impl:
+    value: int
+
+T = TypeVar("T", bound=Impl)
+
+def as_protocol_class(cls: type[T]) -> TypeOf[P[int]]:
+    return cls  # error: [invalid-return-type]
+```
+
+## Narrowing class objects against a final TypedDict
+
+Two TypedDicts can have compatible fields without being the same class object. Excluding one class
+leaves the other reachable.
+
+```py
+from typing import TypeVar, TypedDict, final
+
+@final
+class Shape(TypedDict):
+    value: int
+
+class Other(TypedDict):
+    value: int
+
+T = TypeVar("T", bound=Other)
+
+def create(cls: type[T]) -> int:
+    if cls is not Shape:
+        reveal_type(cls)  # revealed: type[T@create] & ~<class 'Shape'>
+        return "wrong"  # error: [invalid-return-type]
+    return 0
+
+create(Other)
+```
+
+## Class objects and specialized final TypedDicts
+
+Compatible TypedDict fields do not make another class object a specialized alias of the final
+TypedDict.
+
+```py
+from typing import Generic, TypeVar, TypedDict, final
+from ty_extensions._internal import TypeOf
+
+U = TypeVar("U")
+
+@final
+class Shape(TypedDict, Generic[U]):
+    value: U
+
+class Other(TypedDict):
+    value: int
+
+T = TypeVar("T", bound=Other)
+
+def as_shape_class(cls: type[T]) -> TypeOf[Shape[int]]:
+    return cls  # error: [invalid-return-type]
+```
+
 ## A subclass of a fully specialized generic is not generic
 
 A subclass is generic only if its bases leave at least one type variable unspecialized. Omitting a
@@ -685,6 +811,67 @@ If a typevar does not provide a default, we use `Unknown`:
 
 ```py
 reveal_type(C())  # revealed: C[Unknown]
+```
+
+## Inferring generic class parameters from bounded receivers
+
+The nominal specialization of a generic class can be inferred from the upper bound of `Self`:
+
+```py
+from typing_extensions import Generic, TypeVar
+
+T = TypeVar("T", default=None, covariant=True)
+
+class Box(Generic[T]):
+    def get(self) -> T:
+        reveal_type(read(self))  # revealed: T@Box
+        reveal_type(identity(self))  # revealed: Self@get
+        return read(self)
+
+def read(box: Box[T]) -> T:
+    raise NotImplementedError
+
+def identity(value: T) -> T:
+    return value
+```
+
+The same applies to a type variable with an explicit upper bound:
+
+```py
+S = TypeVar("S", bound=Box[int])
+
+def _(box: S) -> None:
+    reveal_type(read(box))  # revealed: int
+    reveal_type(identity(box))  # revealed: S@_
+```
+
+The specialization inferred from the bound cannot violate the bounds of a constrained type variable:
+
+```py
+ConstrainedT = TypeVar("ConstrainedT", int, str)
+
+def combine(box: Box[ConstrainedT], value: ConstrainedT) -> ConstrainedT:
+    return value
+
+def _(box: S) -> None:
+    reveal_type(combine(box, 1))  # revealed: int
+    # error: [invalid-argument-type] "does not satisfy constraints"
+    combine(box, "")
+```
+
+A type variable cannot be substituted for its bound in non-covariant position:
+
+```py
+ContravariantT = TypeVar("ContravariantT", contravariant=True)
+
+class Consumer(Generic[ContravariantT]):
+    def consume(self, value: ContravariantT) -> None: ...
+
+def accept_list(boxes: list[Box[T]]) -> None: ...
+def accept_consumer(consumer: Consumer[Box[T]]) -> None: ...
+def _(boxes: list[S], consumer: Consumer[S]) -> None:
+    accept_list(boxes)  # error: [invalid-argument-type]
+    accept_consumer(consumer)  # error: [invalid-argument-type]
 ```
 
 ## Inferring generic class parameters from constructors
@@ -927,7 +1114,11 @@ class Box(Generic[T, U]):
         return result
 
     def wrong_wrap(self, value: T) -> "Box[T, T]":
-        return Box[T, Self](value, self)  # error: [invalid-return-type]
+        # TODO: Only report the return error. The explicitly specialized constructor accepts
+        # `value: T` and `self: Self`; the incompatible return context should not reject them.
+        # error: [invalid-argument-type]
+        # error: [invalid-return-type]
+        return Box[T, Self](value, self)
 ```
 
 ### Constructing through a classmethod receiver
@@ -1857,10 +2048,34 @@ def use_union(value: A | B):
     reveal_type(value.value)
 
 def use_typevar(value: U):
-    # TODO: This should not error once member lookup supports union upper bounds.
-    # error: [invalid-attribute-access] "Invalid access to descriptor attribute `value`"
     # revealed: int | str
     reveal_type(value.value)
+```
+
+## Self methods on narrowed union-bounded type variables
+
+Narrowing a union-bounded type variable preserves both the type variable and the narrowing when
+binding `Self` to each member of the upper bound.
+
+```py
+from typing_extensions import Self, TypeVar
+
+class A:
+    def f(self) -> list[Self]:
+        return [self]
+
+class B:
+    def f(self) -> set[Self]:
+        return {self}
+
+class Marker: ...
+
+T = TypeVar("T", bound=A | B)
+
+def f(obj: T):
+    if isinstance(obj, Marker):
+        reveal_type(obj)  # revealed: T@f & Marker
+        reveal_type(obj.f())  # revealed: list[T@f & Marker & A] | set[T@f & Marker & B]
 ```
 
 ## Correlated constrained receiver calls
@@ -2387,6 +2602,30 @@ class WithOverloadedMethod(Generic[T]):
 reveal_type(WithOverloadedMethod[int].method)
 ```
 
+## Instance attributes with substituted type variables
+
+Instance attributes are specialized once, even when the type arguments refer to the class's own type
+parameters.
+
+```py
+from typing import Generic, TypeVar
+
+T = TypeVar("T")
+U = TypeVar("U")
+
+class Pair(Generic[T, U]):
+    def __init__(self, first: T, second: U):
+        self.first: T = first
+        self.second: U = second
+
+    def swapped(self, other: "Pair[U, T]"):
+        reveal_type(other.first)  # revealed: U@Pair
+        reveal_type(other.second)  # revealed: T@Pair
+
+    def nested(self, other: "Pair[list[T], U]"):
+        reveal_type(other.first)  # revealed: list[T@Pair]
+```
+
 ## Materialized `TypeIs` return types
 
 A generic `TypeIs` in the return type of a class method is materialized along with the outer class:
@@ -2420,6 +2659,72 @@ An explicit `TypeIs[Any]` return type remains unmaterialized:
 def _(top: Top[Predicate[Any]], bottom: Bottom[Predicate[Any]], value: object) -> None:
     reveal_type(top.unrelated(value))  # revealed: TypeIs[Any @ value]
     reveal_type(bottom.unrelated(value))  # revealed: TypeIs[Any @ value]
+```
+
+## Materialized recursive generic protocols
+
+Materialization leaves recursive return types unchanged when a receiver annotation names a fixed
+specialization:
+
+```py
+from __future__ import annotations
+
+from typing import Protocol, TypeVar
+from ty_extensions import Bottom, Top, static_assert
+from ty_extensions._internal import is_equivalent_to
+
+T_co = TypeVar("T_co", covariant=True)
+
+class Fixed(Protocol[T_co]):
+    def read(self: Fixed[int]) -> Fixed[tuple[T_co, T_co]]: ...
+
+static_assert(is_equivalent_to(Fixed[int], Top[Fixed[int]]))
+static_assert(is_equivalent_to(Fixed[int], Bottom[Fixed[int]]))
+```
+
+The receiver itself can name a growing specialization:
+
+```py
+class Growing(Protocol[T_co]):
+    def child(self) -> Growing[tuple[T_co, T_co]]: ...
+    def read(self: Growing[tuple[T_co, T_co]]) -> T_co: ...
+
+static_assert(is_equivalent_to(Growing[int], Top[Growing[int]]))
+```
+
+Overloads can require different receiver specializations:
+
+```py
+from typing import overload
+
+class Overloaded(Protocol[T_co]):
+    def child(self) -> Overloaded[tuple[T_co, T_co]]: ...
+    @overload
+    def read(self: Overloaded[int]) -> int: ...
+    @overload
+    def read(self: Overloaded[str]) -> str: ...
+
+static_assert(is_equivalent_to(Overloaded[int], Top[Overloaded[int]]))
+```
+
+Static bounds and constraints also leave materialization unchanged, including when the receiver's
+type argument grows:
+
+```py
+BoundedT = TypeVar("BoundedT", bound=object, covariant=True)
+
+class Bounded(Protocol[BoundedT]):
+    def read(self: Bounded[tuple[BoundedT, BoundedT]]) -> int: ...
+
+static_assert(is_equivalent_to(Bounded[int], Top[Bounded[int]]))
+static_assert(is_equivalent_to(Bounded[int], Bottom[Bounded[int]]))
+
+ConstrainedT = TypeVar("ConstrainedT", int, tuple[object, ...], covariant=True)
+
+class Constrained(Protocol[ConstrainedT]):
+    def read(self: Constrained[tuple[ConstrainedT, ConstrainedT]]) -> int: ...
+
+static_assert(is_equivalent_to(Constrained[int], Top[Constrained[int]]))
 ```
 
 ## `Callable` return annotations preserve enclosing generic context
@@ -2661,6 +2966,80 @@ def probe(value: Tree[int, str]):
     child = FirstChild(value)
     reveal_type(child)  # revealed: FirstChild[str]
     reveal_type(child.value)  # revealed: str
+```
+
+## Recursive constructor type context
+
+An invariant constructor can use a recursive type alias as context, including when its `__new__`
+method returns `Self`.
+
+```py
+from typing import Generic, TypeAlias, TypeVar
+from typing_extensions import Self
+
+T = TypeVar("T")
+
+class Box(Generic[T]):
+    value: T
+
+    def __new__(cls, value: T) -> Self:
+        return super().__new__(cls)
+
+Nested: TypeAlias = Box["Nested | int"]
+
+def copy(value: Nested) -> Nested:
+    return Box(value.value)
+
+def invalid() -> Nested:
+    return Box("wrong")  # error: [invalid-return-type]
+```
+
+## Aliased `Self` in explicit receivers
+
+Specializing a generic class also specializes the upper bound of `Self` inside type alias arguments.
+
+```py
+from typing_extensions import Generic, Self, TypeAlias, TypeVar
+
+T = TypeVar("T")
+Identity: TypeAlias = T
+
+class Box(Generic[T]):
+    def mutate(self: Identity[Self], value: T) -> None: ...
+
+def check(box: Box[int]) -> None:
+    box.mutate(1)
+```
+
+## Unannotated subclass defaults inherit specialized declarations
+
+An inherited annotation is specialized using the subclass's base arguments before it provides
+context for an initializer. A further generic subclass retains its own type variables.
+
+```py
+from typing import Generic, TypeVar
+
+T = TypeVar("T")
+U = TypeVar("U")
+
+class Base(Generic[T]):
+    items: list[T]
+
+class Integers(Base[int]):
+    items = []
+
+reveal_type(Integers.items)  # revealed: list[int]
+reveal_type(Integers().items)  # revealed: list[int]
+
+class Invalid(Base[int]):
+    items = ["wrong"]  # error: [invalid-assignment]
+
+class Child(Base[U]):
+    items = []
+
+def check(child: Child[str]) -> None:
+    reveal_type(child.items)  # revealed: list[str]
+    child.items.append(1)  # error: [invalid-argument-type]
 ```
 
 [crtp]: https://en.wikipedia.org/wiki/Curiously_recurring_template_pattern

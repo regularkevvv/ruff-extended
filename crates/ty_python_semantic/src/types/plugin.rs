@@ -2124,7 +2124,7 @@ fn plugin_call_argument_summaries<'db>(
                 name,
                 kind,
                 type_expr: call_arguments
-                    .and_then(|arguments| arguments.argument_types(index))
+                    .and_then(|arguments| arguments.source_types(index))
                     .and_then(CallArgumentTypes::get_default)
                     .map(|ty| plugin_type_expr_from_type(db, env, ty)),
                 value: plugin_literal_value_from_expr(expression),

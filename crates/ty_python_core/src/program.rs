@@ -1,7 +1,7 @@
 use crate::{Db, platform::PythonPlatform};
 
 use ruff_db::files::File;
-use ruff_db::system::SystemPath;
+use ruff_db::system::{SystemPath, SystemPathBuf};
 use ruff_db::vendored::VendoredFileSystem;
 use ruff_python_ast::PythonVersion;
 use salsa::Setter;
@@ -34,6 +34,7 @@ impl<'db> Program<'db> {
             // Plugin configuration is registered separately, through `SemanticPlugins`: this
             // constructor runs inside a tracked query, which cannot create Salsa inputs.
             semantic_plugins: _,
+            virtual_environment: _,
         } = settings;
 
         let resolver_environment =
@@ -64,6 +65,11 @@ pub struct ProgramSettings {
     pub python_platform: PythonPlatform,
     pub search_paths: SearchPaths,
     pub semantic_plugins: SemanticPluginEnvironment,
+    /// The root of the resolved virtual environment, if any. File watchers use this to observe
+    /// `pyvenv.cfg` and directory changes without resolving the environment again. System Python
+    /// installations are very unlikely to be deleted and recreated, so we exclude them to avoid
+    /// recursively watching a system prefix such as `/usr`.
+    pub virtual_environment: Option<SystemPathBuf>,
 }
 
 /// The semantic plugin environment configured for the project.
@@ -460,6 +466,7 @@ impl ProgramSettings {
             python_platform: PythonPlatform::default(),
             search_paths: SearchPaths::empty(vendored),
             semantic_plugins: SemanticPluginEnvironment::default(),
+            virtual_environment: None,
         }
     }
 }
