@@ -2,7 +2,7 @@
 name = "ty_plugin_sdk"
 version = "0.0.9"
 edition.workspace = true
-rust-version.workspace = true
+rust-version = "1.96"
 homepage = "https://github.com/regularkevvv/ty-extended"
 documentation = "https://docs.rs/ty_plugin_sdk"
 repository = "https://github.com/regularkevvv/ruff-extended"
