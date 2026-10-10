@@ -666,7 +666,52 @@ class WithBackportedDefault(Generic[Unpack[Ts]]):
 reveal_type(WithBackportedDefault().attr)  # revealed: tuple[int, str]
 ```
 
+### Gradual specializations
+
+A type variable tuple remains assignable to an explicitly gradual specialization of its generic
+class, or its top materialization.
+
+```py
+from typing import Any, Generic, TypeVarTuple
+from ty_extensions import Bottom, Top
+
+Ts = TypeVarTuple("Ts")
+
+class Array(Generic[*Ts]):
+    values: tuple[*Ts]
+
+    def erase_shape(self) -> "Array[*tuple[Any, ...]]":
+        return self
+
+    def erase_shape_top(self) -> "Top[Array[*tuple[Any, ...]]]":
+        return self
+
+    def erase_shape_bottom(self) -> "Bottom[Array[*tuple[Any, ...]]]":
+        return self  # error: [invalid-return-type]
+
+    def fixed_shape(self) -> "Top[Array[Any]]":
+        return self  # error: [invalid-return-type]
+```
+
 ## Functions
+
+### Immediate list arguments
+
+The elements of a list constructed in the call retain their individual positions when inferring a
+variadic return. Elements consumed by an earlier parameter are excluded from the return.
+
+```py
+from typing_extensions import TypeVarTuple, Unpack
+
+Ts = TypeVarTuple("Ts")
+
+def tail(head: int, *args: Unpack[Ts]) -> tuple[Unpack[Ts]]:
+    return args
+
+reveal_type(tail(*[1, "two", b"three"]))  # revealed: tuple[Literal["two"], Literal[b"three"]]
+reveal_type(tail(*[1], *["two", b"three"]))  # revealed: tuple[Literal["two"], Literal[b"three"]]
+reveal_type(tail(*[1]))  # revealed: tuple[()]
+```
 
 ### Partials with bound variadic arguments
 

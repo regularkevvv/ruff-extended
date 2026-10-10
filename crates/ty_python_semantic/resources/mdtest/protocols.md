@@ -1436,6 +1436,33 @@ def needs_something_hashable(x: Hashable):
 needs_something_hashable([])  # error: [invalid-argument-type]
 ```
 
+## Unannotated protocol defaults retain inherited declarations
+
+A default in a protocol subclass preserves the inherited member type. Both protocol writes and
+structural implementations use the annotation, so a narrower default does not narrow the interface.
+
+```py
+from typing import ClassVar, Protocol
+
+class Base(Protocol):
+    value: int | str
+    shared: ClassVar[int | str]
+
+class WithDefaults(Base, Protocol):
+    value = "default"
+    shared = "default"
+
+class Implementation:
+    value: int | str = 1
+    shared: ClassVar[int | str] = 1
+
+def check(protocol: WithDefaults, implementation: Implementation) -> None:
+    reveal_type(protocol.value)  # revealed: int | str
+    protocol.value = 1
+    protocol.shared = 1  # error: [invalid-attribute-access]
+    result: WithDefaults = implementation
+```
+
 ## Diagnostics for protocols with invalid attribute members
 
 This is a short appendix to the previous section with the `snapshot-diagnostics` directive enabled
@@ -7170,6 +7197,48 @@ def invalid(value: Chain[list[int]]) -> None:
 
 def valid(value: Chain[Iterable[int]]) -> None:
     reveal_type(value.flatten())  # revealed: Chain[int]
+```
+
+### Structurally equivalent recursive protocol specializations as receivers
+
+Comparing the `child` return types of `Node[str]` and `Node[int]` leads back to the same comparison.
+No other member uses `T`, so their structures match at every depth. Thus `Node[str]` satisfies the
+`Node[int]` receiver of `read`, even though `str` is not a subtype of `int`.
+
+```toml
+[environment]
+python-version = "3.12"
+```
+
+```py
+from __future__ import annotations
+
+from typing import Protocol, TypeVar
+from ty_extensions import static_assert
+from ty_extensions._internal import is_subtype_of
+
+class Node[T](Protocol):
+    def child(self) -> Node[T]: ...
+    def read(self: Node[int]) -> int: ...
+
+class Readable(Protocol):
+    def read(self) -> int: ...
+
+static_assert(is_subtype_of(Node[str], Node[int]))
+
+def check(node: Node[str]) -> Readable:
+    return node  # no diagnostic
+
+T = TypeVar("T", covariant=True)
+
+class LegacyNode(Protocol[T]):
+    def child(self) -> LegacyNode[T]: ...
+    def read(self: LegacyNode[int]) -> int: ...
+
+static_assert(is_subtype_of(LegacyNode[str], LegacyNode[int]))
+
+def check_legacy(node: LegacyNode[str]) -> Readable:
+    return node  # no diagnostic
 ```
 
 ### Explicit receivers on overloaded recursive protocol methods

@@ -15,12 +15,11 @@ use ruff_python_ast::PythonVersion;
 use salsa::Database as _;
 use salsa::plumbing::AsId;
 use ty_python_core::definition::Definition;
-use ty_python_core::program::{Program, ProgramSettings, SemanticPluginEnvironment};
+use ty_python_core::program::Program;
 use ty_python_core::scope::FileScopeId;
 use ty_python_core::{
     ProgramFile, TestProgramDb as _, global_scope, place_table, semantic_index, use_def_map,
 };
-use ty_site_packages::{PythonVersionSource, PythonVersionWithSource};
 
 use super::*;
 
@@ -119,41 +118,10 @@ fn same_file_at_different_python_versions() -> anyhow::Result<()> {
     db.write_dedented("src/py312_dependency.py", "value: int = 312")?;
 
     let file = system_path_to_file(&db, "src/main.py").expect("file to exist");
-    let default_program = db.program();
-    let search_paths = default_program.search_paths(&db).clone();
-    let python_platform = default_program.python_platform(&db).clone();
-    let py311 = ProgramFile::new(
-        &db,
-        file,
-        Program::from_settings(
-            &db,
-            &ProgramSettings {
-                python_version: PythonVersionWithSource {
-                    version: PythonVersion::PY311,
-                    source: PythonVersionSource::Default,
-                },
-                python_platform: python_platform.clone(),
-                search_paths: search_paths.clone(),
-                semantic_plugins: SemanticPluginEnvironment::default(),
-            },
-        ),
-    );
-    let py312 = ProgramFile::new(
-        &db,
-        file,
-        Program::from_settings(
-            &db,
-            &ProgramSettings {
-                python_version: PythonVersionWithSource {
-                    version: PythonVersion::PY312,
-                    source: PythonVersionSource::Default,
-                },
-                python_platform,
-                search_paths,
-                semantic_plugins: SemanticPluginEnvironment::default(),
-            },
-        ),
-    );
+    let py311 = db.program().program_file(&db, file);
+    let mut settings = db.program_settings().clone();
+    settings.python_version.version = PythonVersion::PY312;
+    let py312 = Program::from_settings(&db, &settings).program_file(&db, file);
 
     let check = |file, expected_type, expect_invalid_syntax, expect_unresolved_import| {
         let diagnostics = crate::check_file_unwrap(&db, file);
@@ -206,33 +174,16 @@ fn program_file_changes_with_python_version() -> anyhow::Result<()> {
         (program_file.as_id(), program_file.python_file(&db).as_id())
     };
 
-    let equivalent_program = Program::from_settings(
-        &db,
-        &ProgramSettings {
-            python_version: db.program_settings().python_version.clone(),
-            python_platform: program.python_platform(&db).clone(),
-            search_paths: program.search_paths(&db).clone(),
-            semantic_plugins: SemanticPluginEnvironment::default(),
-        },
-    );
+    let mut settings = db.program_settings().clone();
+    let equivalent_program = Program::from_settings(&db, &settings);
     assert_eq!(program, equivalent_program);
     assert_eq!(
         program_file_id,
         equivalent_program.program_file(&db, file).as_id()
     );
 
-    let py312_program = Program::from_settings(
-        &db,
-        &ProgramSettings {
-            python_version: PythonVersionWithSource {
-                version: PythonVersion::PY312,
-                source: PythonVersionSource::Default,
-            },
-            python_platform: program.python_platform(&db).clone(),
-            search_paths: program.search_paths(&db).clone(),
-            semantic_plugins: SemanticPluginEnvironment::default(),
-        },
-    );
+    settings.python_version.version = PythonVersion::PY312;
+    let py312_program = Program::from_settings(&db, &settings);
 
     let program_file = py312_program.program_file(&db, file);
     assert_ne!(program_file_id, program_file.as_id());
@@ -1345,6 +1296,40 @@ fn parameter_default_presence_invalidates_caller() -> anyhow::Result<()> {
 }
 
 #[test]
+fn dynamic_class_metaclass_updates_after_base_change() -> anyhow::Result<()> {
+    let mut db = setup_db();
+    let base = "\
+class Meta1(type): ...
+class Meta2(type): ...
+class Base(metaclass=Meta1): ...
+";
+    db.write_files([
+        ("/src/base.py", base),
+        (
+            "/src/main.py",
+            "\
+from typing_extensions import reveal_type
+from base import Base
+
+C = type('C', (Base,), {})
+reveal_type(type(C))
+",
+        ),
+    ])?;
+    assert_revealed_type(&db, "/src/main.py", "<class 'Meta1'>");
+
+    db.write_file(
+        "/src/base.py",
+        base.replace("metaclass=Meta1", "metaclass=Meta2"),
+    )?;
+    assert_revealed_type(&db, "/src/main.py", "<class 'Meta2'>");
+
+    db.write_file("/src/base.py", base)?;
+    assert_revealed_type(&db, "/src/main.py", "<class 'Meta1'>");
+    Ok(())
+}
+
+#[test]
 fn field_specifier_default_value_invalidates_caller() -> anyhow::Result<()> {
     let mut db = setup_db();
     let field_source = r#"from typing import Any
@@ -1382,6 +1367,60 @@ class Model(ModelBase):
 
     db.write_file("/src/fields.py", field_source)?;
     assert_file_diagnostics(&db, "/src/main.py", &[]);
+    Ok(())
+}
+
+#[test]
+fn recursive_protocol_materialization_tracks_member_type_changes() -> anyhow::Result<()> {
+    // Changing an imported type must invalidate the cached proof even when the protocol and its
+    // consumer are unchanged. Cover both direct inspection and the type-parameter proof needed
+    // for growing specializations.
+    const STATIC: &str = "Payload = int\n";
+    const GRADUAL: &str = "from typing import Any\nPayload = Any\n";
+    const FAILURE: &str =
+        "Static assertion error: argument of type `ConstraintSet[Literal[False]]` is always falsy";
+
+    let mut db = setup_db();
+    db.write_dedented(
+        "/src/node.py",
+        r#"
+        from __future__ import annotations
+        from typing import Protocol, TypeVar
+        from other import Payload
+
+        class Node(Protocol):
+            def payload(self) -> Payload: ...
+            def edit(self, nodes: list[Node]) -> list[Node]: ...
+
+        T = TypeVar("T", covariant=True)
+
+        class GenericNode(Protocol[T]):
+            def child(self) -> GenericNode[tuple[T, T]]: ...
+            def read(self: GenericNode[int]) -> int: ...
+            def payload(self) -> Payload: ...
+        "#,
+    )?;
+    db.write_dedented(
+        "/src/main.py",
+        r#"
+        from node import GenericNode, Node
+        from ty_extensions import Top, static_assert
+        from ty_extensions._internal import is_subtype_of
+
+        static_assert(is_subtype_of(Top[Node], Node))
+        static_assert(is_subtype_of(Top[GenericNode[int]], GenericNode[int]))
+        "#,
+    )?;
+
+    for (payload, diagnostics) in [
+        (STATIC, &[][..]),
+        (GRADUAL, &[FAILURE, FAILURE][..]),
+        (STATIC, &[][..]),
+    ] {
+        db.write_file("/src/other.py", payload)?;
+        assert_file_diagnostics(&db, "/src/main.py", diagnostics);
+    }
+
     Ok(())
 }
 

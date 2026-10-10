@@ -16,10 +16,7 @@ use ruff_db::system::{
 use ruff_db::vendored::VendoredFileSystem;
 use ruff_python_parser::{Mode, ParseOptions, parse_unchecked};
 use ty_module_resolver::{Db as ModuleResolverDb, SearchPathSettings};
-use ty_python_core::platform::PythonPlatform;
-use ty_python_core::program::{
-    FallibleStrategy, ProgramSettings, SemanticPluginEnvironment, SemanticPlugins,
-};
+use ty_python_core::program::{FallibleStrategy, ProgramSettings, SemanticPlugins};
 use ty_python_core::{Db as _, ProgramFile, TestProgramDb};
 use ty_python_semantic::dependency::DependencyMetadata;
 use ty_python_semantic::lint::LintRegistry;
@@ -67,17 +64,12 @@ impl TestDb {
             .create_directory_all(&src_root)
             .unwrap();
 
-        let program_settings = ProgramSettings {
-            python_version: PythonVersionWithSource::default(),
-            python_platform: PythonPlatform::default(),
-            search_paths: SearchPathSettings::new(vec![src_root])
-                .to_search_paths(db.system(), db.vendored(), &FallibleStrategy)
-                .expect("Valid search path settings"),
-            semantic_plugins: SemanticPluginEnvironment::default(),
-        };
-        program_settings.search_paths.try_register_static_roots(&db);
-        SemanticPlugins::init(&db, program_settings.semantic_plugins.clone());
-        db.program_settings = program_settings;
+        let search_paths = SearchPathSettings::new(vec![src_root])
+            .to_search_paths(db.system(), db.vendored(), &FallibleStrategy)
+            .expect("Valid search path settings");
+        search_paths.try_register_static_roots(&db);
+        db.program_settings.search_paths = search_paths;
+        SemanticPlugins::init(&db, db.program_settings.semantic_plugins.clone());
 
         db
     }

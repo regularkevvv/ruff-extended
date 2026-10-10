@@ -420,9 +420,8 @@ impl<'db> Type<'db> {
         env: &ProgramEnvironment<'db>,
         target: Type<'db>,
     ) -> bool {
-        let constraints = ConstraintSetBuilder::new();
-        self.when_assignable_to(db, env, target, &constraints, TypeVarSet::None)
-            .is_always_satisfied(db, env)
+        self.when_assignable_to_owned(db, env, target, TypeVarSet::None)
+            .query(|_constraints, when| when.is_always_satisfied(db, env))
     }
 
     /// Re-run the assignability check with error context collection enabled.
@@ -545,6 +544,55 @@ impl<'db> Type<'db> {
             inferable,
             TypeRelation::Assignability,
         )
+    }
+
+    pub(super) fn when_assignable_to_owned(
+        self,
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+        target: Type<'db>,
+        inferable: TypeVarSet<'db>,
+    ) -> Cow<'db, OwnedConstraintSet<'db>> {
+        #[salsa::tracked(
+            returns(ref),
+            cycle_initial=|_, _, _, _| OwnedConstraintSet::always(),
+            heap_size=ruff_memory_usage::heap_size,
+        )]
+        fn when_assignable_to_owned_impl<'db>(
+            db: &'db dyn Db,
+            types: TypePair<'db>,
+            inferable: TypeVarSet<'db>,
+        ) -> OwnedConstraintSet<'db> {
+            let program = types.program(db);
+            let env = ProgramEnvironment::from_program(program);
+            let constraints = ConstraintSetBuilder::new();
+            constraints.into_owned(|constraints| {
+                let source = types.first(db);
+                let target = types.second(db);
+
+                source.has_relation_to(
+                    db,
+                    &env,
+                    target,
+                    constraints,
+                    inferable,
+                    TypeRelation::Assignability,
+                )
+            })
+        }
+
+        self.assert_not_recursive_var();
+        target.assert_not_recursive_var();
+        if self.is_trivially_constraint_set_assignable_to(db, target) {
+            return Cow::Owned(OwnedConstraintSet::always());
+        }
+
+        let program = env.program(db);
+        Cow::Borrowed(when_assignable_to_owned_impl(
+            db,
+            TypePair::new(db, program, self, target),
+            inferable,
+        ))
     }
 
     /// Returns whether constraint-set assignability is known to be unconditionally satisfied
@@ -1670,12 +1718,10 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
     /// well as source constraints so that `T: (Y, Z)` can still be related to
     /// `type[Y] | type[Z]`.
     ///
-    /// Exact class objects also have an over-approximated instance projection. For `T: (Y, Z)`
-    /// where `Z` extends `Y`, instance subtyping would incorrectly simplify
-    /// `type[T] & <class 'Y'>` to `type[T]`: both `Y` and `Z` instances are subtypes of `Y`, but
-    /// only the class object `Y` satisfies `klass is Y`. The exception is a type variable whose
-    /// upper bound normalizes to this exact class object. That can only happen for a final class,
-    /// so the exact object is the only valid specialization of the type variable.
+    /// Class literals have an over-approximated instance projection unless the class is final,
+    /// nominal, and non-generic. For `T: (Y, Z)` where `Z` extends `Y`, instance subtyping would
+    /// incorrectly simplify `type[T] & <class 'Y'>` to `type[T]`: both `Y` and `Z` instances are
+    /// subtypes of `Y`, but only the class object `Y` satisfies `klass is Y`.
     ///
     /// Return `None` for targets without a `.to_instance()` projection, allowing other type-pair
     /// branches to decide their relation.
@@ -1687,9 +1733,6 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
     ) -> Option<ConstraintSet<'db, 'c>> {
         let source_i = source_subclass.into_type_var()?;
         let env = self.env;
-        let is_exact_upper_bound =
-            source_subclass.exact_typevar_upper_bound(db, env) == Some(target);
-
         if self.is_metaclass_instance(db, target) {
             return Some(self.check_type_pair(
                 db,
@@ -1699,7 +1742,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
         }
 
         let projection = target.to_instance(db, env)?;
-        if projection.is_exact() || is_exact_upper_bound {
+        if projection.is_exact() {
             return Some(self.check_type_pair(
                 db,
                 Type::TypeVar(source_i),
@@ -2169,8 +2212,8 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
                 self.never()
             }
 
-            // `type[T]` is a subtype of the class object `A` if every instance of `T` is a subtype
-            // of an instance of `A`. If `A` is a metaclass instance (instance of a specific
+            // When `A` has an exact instance projection, `type[T]` is a subtype of `A` if `T`
+            // is a subtype of that projection. If `A` is a metaclass instance (instance of a specific
             // subclass of `type`), we instead compare in the metaclass-instance domain, since
             // collapsing `A` through `to_instance()` would erase it to `object` (we have no
             // precise representation for "all instances of any classes with a given metaclass").

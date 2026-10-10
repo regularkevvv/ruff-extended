@@ -3023,24 +3023,21 @@ impl<'db> StaticClassLiteral<'db> {
 
                 Some(Type::function_like_callable(db, signature))
             }
-            (field_policy @ CodeGeneratorKind::DataclassLike(_), "__slots__")
-                if env.python_version(db) >= PythonVersion::PY310 =>
-            {
-                self.has_dataclass_param(db, field_policy, DataclassFlags::SLOTS)
-                    .then(|| {
-                        if let Some(slots) = self.slot_names(db) {
-                            return Type::heterogeneous_tuple(
-                                db,
-                                env,
-                                slots.iter().map(|name| Type::string_literal(db, name)),
-                            );
-                        }
+            (field_policy @ CodeGeneratorKind::DataclassLike(_), "__slots__") => self
+                .has_dataclass_param(db, field_policy, DataclassFlags::SLOTS)
+                .then(|| {
+                    if let Some(slots) = self.slot_names(db) {
+                        return Type::heterogeneous_tuple(
+                            db,
+                            env,
+                            slots.iter().map(|name| Type::string_literal(db, name)),
+                        );
+                    }
 
-                        let fields = self.fields(db, specialization, field_policy);
-                        let slots = fields.keys().map(|name| Type::string_literal(db, name));
-                        Type::heterogeneous_tuple(db, env, slots)
-                    })
-            }
+                    let fields = self.fields(db, specialization, field_policy);
+                    let slots = fields.keys().map(|name| Type::string_literal(db, name));
+                    Type::heterogeneous_tuple(db, env, slots)
+                }),
             (CodeGeneratorKind::TypedDict, name) => synthesize_typed_dict_method(
                 db,
                 env,
@@ -3516,14 +3513,7 @@ impl<'db> StaticClassLiteral<'db> {
             // want to improve this, we could instead pass a definition-kind filter to the use-def map
             // query, or to the `symbol_from_declarations` call below. Doing so would potentially require
             // us to generate a union of `__init__` methods.
-            if declarations.clone().any_reachable(db, |declaration| {
-                declaration.is_defined_and(|declaration| {
-                    !matches!(
-                        declaration.kind(db),
-                        DefinitionKind::AnnotatedAssignment(..)
-                    )
-                })
-            }) {
+            if !declarations.clone().contains_only_annotated_assignments(db) {
                 continue;
             }
 
