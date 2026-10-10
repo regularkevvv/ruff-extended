@@ -1223,6 +1223,59 @@ reveal_type(generic_context(into_regular_callable(A)))
 reveal_type(A(x=1))  # revealed: A[int]
 ```
 
+### Inherited dataclass converters
+
+A subclass specializes an inherited converter's input type for its synthesized methods and attribute
+assignments.
+
+```py
+from typing import Any, Callable, dataclass_transform
+
+def field(*, converter: Callable[..., Any]) -> Any: ...
+@dataclass_transform(field_specifiers=(field,))
+def model[T](cls: type[T]) -> type[T]:
+    return cls
+
+@model
+class Base[T]:
+    @staticmethod
+    def convert(value: T) -> T:
+        return value
+
+    value: T = field(converter=convert)
+
+@model
+class Child(Base[str]): ...
+
+reveal_type(Child.__init__)  # revealed: (self: Child, value: str) -> None
+child = Child("a")
+reveal_type(child.value)  # revealed: str
+Child(1)  # error: [invalid-argument-type]
+
+child.value = "b"  # no diagnostic
+child.value = 1  # error: [invalid-assignment]
+
+reveal_type(Child.__replace__)  # revealed: (self: Child, *, value: str = ...) -> Child
+child.__replace__(value="b")  # no diagnostic
+child.__replace__(value=1)  # error: [invalid-argument-type]
+```
+
+Specialization also propagates through an intermediate generic subclass with a nested field type.
+
+```py
+@model
+class Nested[U](Base[list[U]]): ...
+
+@model
+class Indirect(Nested[str]): ...
+
+reveal_type(Indirect.__init__)  # revealed: (self: Indirect, value: list[str]) -> None
+indirect = Indirect(["a"])
+Indirect([1])  # error: [invalid-argument-type]
+indirect.value = ["b"]  # no diagnostic
+indirect.value = [1]  # error: [invalid-assignment]
+```
+
 ### Class typevar has another typevar as a default
 
 ```py
@@ -2488,6 +2541,160 @@ class Child[U](Base[U]):
 def check(child: Child[str]) -> None:
     reveal_type(child.items)  # revealed: list[str]
     child.items.append(1)  # error: [invalid-argument-type]
+```
+
+## Calling differently specialized bound methods
+
+Each arm retains the relationship between its receiver and the class's type argument, whether the
+union is formed before or after accessing the method.
+
+```py
+from typing import Self
+
+class Box[T]:
+    value: T
+
+    def pair(self) -> tuple[Self, T]:
+        return self, self.value
+
+    def pair_with_values(self, values: list[T]) -> tuple[Self, T]:
+        return self, self.value
+
+def pairs[T](a: Box[str], b: Box[T], cond: bool):
+    box = a if cond else b
+    # revealed: tuple[Box[str], str] | tuple[Box[T@pairs], T@pairs]
+    reveal_type(box.pair())
+
+def pairs_reversed[T](a: Box[str], b: Box[T], cond: bool):
+    box = b if cond else a
+    # revealed: tuple[Box[T@pairs_reversed], T@pairs_reversed] | tuple[Box[str], str]
+    reveal_type(box.pair())
+
+def bound_pairs[T](a: Box[str], b: Box[T], cond: bool):
+    pair = a.pair if cond else b.pair
+    # revealed: tuple[Box[str], str] | tuple[Box[T@bound_pairs], T@bound_pairs]
+    reveal_type(pair())
+
+def bound_pairs_reversed[T](a: Box[str], b: Box[T], cond: bool):
+    pair = b.pair if cond else a.pair
+    # revealed: tuple[Box[T@bound_pairs_reversed], T@bound_pairs_reversed] | tuple[Box[str], str]
+    reveal_type(pair())
+```
+
+An expected return type also provides context for the call:
+
+```py
+def contextual_argument[T](a: Box[str], b: Box[T], cond: bool) -> tuple[Box[str], str] | tuple[Box[T], T]:
+    box = a if cond else b
+    return box.pair_with_values([])  # no diagnostic
+
+def inferred_result[T](a: Box[str], b: Box[T], cond: bool):
+    box = a if cond else b
+    # revealed: tuple[Box[str], str] | tuple[Box[T@inferred_result], T@inferred_result]
+    reveal_type(box.pair_with_values([]))
+
+def wrong_return[T](a: Box[str], b: Box[T], cond: bool) -> tuple[Box[str], str]:
+    box = a if cond else b
+    return box.pair()  # error: [invalid-return-type]
+```
+
+## Calling a union of generic methods
+
+A method's type parameter is inferred from the argument without changing the caller's type
+parameters or the receiver's specialization.
+
+```py
+from typing import Self
+
+class Box[T]:
+    value: T
+
+    def pair[U](self, value: U) -> tuple[Self, T, U]:
+        return self, self.value, value
+
+def call[T, U](a: Box[str], b: Box[T], cond: bool, value: U):
+    pair = a.pair if cond else b.pair
+    # revealed: tuple[Box[str], str, U@call] | tuple[Box[T@call], T@call, U@call]
+    reveal_type(pair(value))
+
+def wrong_return[T, U](a: Box[str], b: Box[T], cond: bool, value: U) -> tuple[Box[str], str, int]:
+    pair = a.pair if cond else b.pair
+    return pair(value)  # error: [invalid-return-type]
+```
+
+## Dictionary methods on unions
+
+Methods on differently specialized dictionaries accept the shared key type and retain the value
+types from both alternatives.
+
+```toml
+[environment]
+python-version = "3.12"
+```
+
+```py
+def compare[T](first: dict[str, T], second: dict[str, int]) -> None:
+    for current in (first, second):
+        for key, data in current.items():  # no diagnostic
+            reveal_type(data)  # revealed: T@compare | int
+            reveal_type(current.get(key))  # revealed: T@compare | None | int
+```
+
+## Attribute override specialization
+
+Inherited attribute and property contracts use the superclass specialization. A mutable attribute
+cannot narrow that specialized type, while a read-only property can.
+
+```py
+class Base[T]:
+    value: T
+
+    @property
+    def readonly(self) -> T:
+        raise NotImplementedError
+
+class Same(Base[int]):
+    value: int
+
+    @property
+    def readonly(self) -> bool:
+        return True
+
+class Narrow(Base[int]):
+    value: bool  # error: [invalid-mutable-override]
+
+class Incompatible(Base[int]):
+    value: str  # error: [invalid-attribute-override]
+
+    @property
+    def readonly(self) -> str:  # error: [invalid-property-type-override]
+        return ""
+```
+
+An initialized attribute must satisfy the same specialized contract. Further subclasses do not
+repeat an incompatibility already introduced by the parent.
+
+```py
+class WithDefault(Base[int]):
+    value: str = ""  # error: [invalid-attribute-override]
+
+class Grandchild(WithDefault):
+    value: str = ""  # no diagnostic
+```
+
+A new concrete inheritance path can introduce a conflict absent from a parent's gradual
+specialization. That conflict must still be reported.
+
+```py
+from typing import Any
+
+class Gradual(Base[Any]):
+    value: str
+
+class Concrete(Base[int]): ...
+
+class NewConflict(Gradual, Concrete):
+    value: str  # error: [invalid-attribute-override]
 ```
 
 [crtp]: https://en.wikipedia.org/wiki/Curiously_recurring_template_pattern

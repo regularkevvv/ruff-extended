@@ -423,9 +423,9 @@ impl<'db> KnownInstanceType<'db> {
             Self::Literal(ty) => ty
                 .recursive_type_normalized_impl(db, env, div, true)
                 .map(Self::Literal),
-            Self::Annotated(ty) => Some(Self::Annotated(
-                ty.recursive_type_normalized_impl(db, env, div, true),
-            )),
+            Self::Annotated(ty) => ty
+                .recursive_type_normalized_impl(db, env, div, nested)
+                .map(Self::Annotated),
             Self::TypeGenericAlias(ty) => ty
                 .recursive_type_normalized_impl(db, env, div, true)
                 .map(Self::TypeGenericAlias),
@@ -637,6 +637,9 @@ impl<'db> KnownInstanceType<'db> {
                     wrapper.apply_type_mapping_impl(db, type_mapping, tcx, visitor),
                 ))
             }
+            KnownInstanceType::Field(field) => Type::KnownInstance(KnownInstanceType::Field(
+                field.apply_type_mapping_impl(db, type_mapping, tcx, visitor),
+            )),
             KnownInstanceType::FunctoolsPartial(partial) => {
                 Type::KnownInstance(KnownInstanceType::FunctoolsPartial(
                     partial.apply_type_mapping_impl(db, type_mapping, tcx, visitor),
@@ -672,7 +675,6 @@ impl<'db> KnownInstanceType<'db> {
             | KnownInstanceType::SubscriptedGeneric(_)
             | KnownInstanceType::TypeAliasType(_)
             | KnownInstanceType::Deprecated(_)
-            | KnownInstanceType::Field(_)
             | KnownInstanceType::ConstraintSet(_)
             | KnownInstanceType::ConstraintSetSolution(_)
             | KnownInstanceType::GenericContext(_)
@@ -753,6 +755,34 @@ pub struct FieldInstance<'db> {
 impl get_size2::GetSize for FieldInstance<'_> {}
 
 impl<'db> FieldInstance<'db> {
+    fn apply_type_mapping_impl(
+        self,
+        db: &'db dyn Db,
+        type_mapping: &TypeMapping<'_, 'db>,
+        tcx: TypeContext<'db>,
+        visitor: &ApplyTypeMappingVisitor<'_, 'db>,
+    ) -> Self {
+        let default_type = self
+            .default_type(db)
+            .map(|ty| ty.apply_type_mapping_impl(db, type_mapping, tcx, visitor));
+        // The converter's input is a callable parameter, so it is contravariant.
+        let converter = self.converter(db).map(|(input_ty, output_ty)| {
+            (
+                input_ty.apply_type_mapping_impl(db, &type_mapping.flip(), tcx, visitor),
+                output_ty.apply_type_mapping_impl(db, type_mapping, tcx, visitor),
+            )
+        });
+        Self::new(
+            db,
+            default_type,
+            self.init(db),
+            self.kw_only(db),
+            self.alias(db),
+            converter,
+            self.strict(db),
+        )
+    }
+
     fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
@@ -1062,11 +1092,12 @@ impl<'db> AnnotatedType<'db> {
         env: &ProgramEnvironment<'db>,
         div: Type<'db>,
         nested: bool,
-    ) -> Self {
+    ) -> Option<Self> {
+        // The wrapped type is nested even when the runtime Annotated object is not.
         let base = self
             .base(db)
-            .recursive_type_normalized_impl(db, env, div, nested)
-            .unwrap_or(div);
+            .recursive_type_normalized_impl(db, env, div, true);
+        let base = if nested { base? } else { base.unwrap_or(div) };
         let metadata = self
             .metadata(db)
             .iter()
@@ -1077,7 +1108,7 @@ impl<'db> AnnotatedType<'db> {
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        Self::new(db, base, metadata, self.transparent(db))
+        Some(Self::new(db, base, metadata, self.transparent(db)))
     }
 }
 

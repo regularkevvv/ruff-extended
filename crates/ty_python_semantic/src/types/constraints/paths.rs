@@ -11,7 +11,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use ruff_index::{IndexVec, newtype_index};
 
-use crate::types::constraints::sequents::{Sequent, SequentGroup, SequentMap};
+use crate::types::constraints::sequents::{
+    GroupedSequents, InternedSequentConstraint, Sequent, SequentGroup, SequentMap,
+};
 use crate::types::constraints::variables::Constraint;
 use crate::types::constraints::variables::Constraint::{
     ConcreteEquivalence, ConcreteLower, ConcreteUpper, TypeVarEquivalence, TypeVarRange,
@@ -304,53 +306,15 @@ impl PathAssignments {
     where
         V: PathVisitor,
     {
-        self.visit_inner(db, env, storage, node, visitor, false)
-    }
-
-    /// Visits the paths of the negation of `node`, without constructing that negation eagerly.
-    pub(super) fn visit_negated<'db, V>(
-        &mut self,
-        db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
-        storage: &mut ConstraintSetStorage<'db>,
-        node: NodeId,
-        visitor: &mut V,
-    ) -> ControlFlow<V::Break, V::Result>
-    where
-        V: PathVisitor,
-    {
-        self.visit_inner(db, env, storage, node, visitor, true)
-    }
-
-    fn visit_inner<'db, V>(
-        &mut self,
-        db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
-        storage: &mut ConstraintSetStorage<'db>,
-        node: NodeId,
-        visitor: &mut V,
-        negated: bool,
-    ) -> ControlFlow<V::Break, V::Result>
-    where
-        V: PathVisitor,
-    {
         visitor.visit_node()?;
         match node.node() {
-            Node::AlwaysTrue if negated => visitor.visit_unsatisfied(db, storage, self),
             Node::AlwaysTrue => visitor.visit_satisfied(db, storage, self),
-
-            Node::AlwaysFalse if negated => visitor.visit_satisfied(db, storage, self),
             Node::AlwaysFalse => visitor.visit_unsatisfied(db, storage, self),
 
             Node::Interior(interior) => {
                 let interior_value = visitor.enter_interior(db, storage, interior)?;
                 let interior = storage.interior_node_data(node);
 
-                let true_subtree = if negated {
-                    interior.if_true.or(storage, interior.if_uncertain)
-                } else {
-                    interior.if_true
-                };
                 let if_true = self.walk_edge(
                     db,
                     env,
@@ -360,7 +324,7 @@ impl PathAssignments {
                         let subtree = if found_conflict {
                             visitor.visit_impossible(db, storage, path)
                         } else {
-                            path.visit_inner(db, env, storage, true_subtree, visitor, negated)
+                            path.visit(db, env, storage, interior.if_true, visitor)
                         };
                         match subtree {
                             ControlFlow::Continue(subtree) => visitor.visit_edge(
@@ -376,48 +340,31 @@ impl PathAssignments {
                     },
                 )?;
 
-                let if_uncertain = if negated {
-                    let subtree = visitor.visit_impossible(db, storage, self)?;
-                    visitor.visit_edge(db, storage, &interior_value, subtree, self, 0..0)?
-                } else {
-                    self.walk_edge(
-                        db,
-                        env,
-                        storage,
-                        interior.constraint.when_unconstrained(),
-                        |storage, path, new_range, found_conflict| {
-                            let subtree = if found_conflict {
-                                visitor.visit_impossible(db, storage, path)
-                            } else {
-                                path.visit_inner(
-                                    db,
-                                    env,
-                                    storage,
-                                    interior.if_uncertain,
-                                    visitor,
-                                    false,
-                                )
-                            };
-                            match subtree {
-                                ControlFlow::Continue(subtree) => visitor.visit_edge(
-                                    db,
-                                    storage,
-                                    &interior_value,
-                                    subtree,
-                                    path,
-                                    new_range,
-                                ),
-                                ControlFlow::Break(b) => ControlFlow::Break(b),
-                            }
-                        },
-                    )?
-                };
+                let if_uncertain = self.walk_edge(
+                    db,
+                    env,
+                    storage,
+                    interior.constraint.when_unconstrained(),
+                    |storage, path, new_range, found_conflict| {
+                        let subtree = if found_conflict {
+                            visitor.visit_impossible(db, storage, path)
+                        } else {
+                            path.visit(db, env, storage, interior.if_uncertain, visitor)
+                        };
+                        match subtree {
+                            ControlFlow::Continue(subtree) => visitor.visit_edge(
+                                db,
+                                storage,
+                                &interior_value,
+                                subtree,
+                                path,
+                                new_range,
+                            ),
+                            ControlFlow::Break(b) => ControlFlow::Break(b),
+                        }
+                    },
+                )?;
 
-                let false_subtree = if negated {
-                    interior.if_false.or(storage, interior.if_uncertain)
-                } else {
-                    interior.if_false
-                };
                 let if_false = self.walk_edge(
                     db,
                     env,
@@ -427,7 +374,7 @@ impl PathAssignments {
                         let subtree = if found_conflict {
                             visitor.visit_impossible(db, storage, path)
                         } else {
-                            path.visit_inner(db, env, storage, false_subtree, visitor, negated)
+                            path.visit(db, env, storage, interior.if_false, visitor)
                         };
                         match subtree {
                             ControlFlow::Continue(subtree) => visitor.visit_edge(
@@ -631,7 +578,7 @@ impl PathAssignments {
             db: &'db dyn Db,
             env: &ProgramEnvironment<'db>,
             storage: &mut ConstraintSetStorage<'db>,
-            sequents: &[Sequent<Constraint<'db>>],
+            sequents: &[Sequent<InternedSequentConstraint<'db>>],
             dest: &mut Vec<Sequent<ConstraintId, u16>>,
             antecedents: &mut FxHashMap<ConstraintAssignment, Vec<usize>>,
         ) {
@@ -646,13 +593,13 @@ impl PathAssignments {
 
                 let sequent = match sequent {
                     Sequent::SingleTautology { ante } => {
-                        let ante = storage.intern_constraint(db, env, *ante);
+                        let ante = storage.intern_constraint(db, env, ante.constraint(db));
                         add_antecedent(ante.when_false());
                         Sequent::SingleTautology { ante }
                     }
                     Sequent::PairImpossibility { ante1, ante2 } => {
-                        let ante1 = storage.intern_constraint(db, env, *ante1);
-                        let ante2 = storage.intern_constraint(db, env, *ante2);
+                        let ante1 = storage.intern_constraint(db, env, ante1.constraint(db));
+                        let ante2 = storage.intern_constraint(db, env, ante2.constraint(db));
                         add_antecedent(ante1.when_true());
                         add_antecedent(ante2.when_true());
                         Sequent::PairImpossibility { ante1, ante2 }
@@ -662,9 +609,9 @@ impl PathAssignments {
                         ante2,
                         ante3,
                     } => {
-                        let ante1 = storage.intern_constraint(db, env, *ante1);
-                        let ante2 = storage.intern_constraint(db, env, *ante2);
-                        let ante3 = storage.intern_constraint(db, env, *ante3);
+                        let ante1 = storage.intern_constraint(db, env, ante1.constraint(db));
+                        let ante2 = storage.intern_constraint(db, env, ante2.constraint(db));
+                        let ante3 = storage.intern_constraint(db, env, ante3.constraint(db));
                         add_antecedent(ante1.when_true());
                         add_antecedent(ante2.when_true());
                         add_antecedent(ante3.when_true());
@@ -681,9 +628,9 @@ impl PathAssignments {
                         is_substitution,
                         ..
                     } => {
-                        let ante1 = storage.intern_constraint(db, env, *ante1);
-                        let ante2 = storage.intern_constraint(db, env, *ante2);
-                        let post = storage.intern_constraint(db, env, *post);
+                        let ante1 = storage.intern_constraint(db, env, ante1.constraint(db));
+                        let ante2 = storage.intern_constraint(db, env, ante2.constraint(db));
+                        let post = storage.intern_constraint(db, env, post.constraint(db));
                         add_antecedent(ante1.when_true());
                         add_antecedent(ante2.when_true());
                         let (ante1_depth, _) =
@@ -701,8 +648,8 @@ impl PathAssignments {
                         }
                     }
                     Sequent::SingleImplication { ante, post, .. } => {
-                        let ante = storage.intern_constraint(db, env, *ante);
-                        let post = storage.intern_constraint(db, env, *post);
+                        let ante = storage.intern_constraint(db, env, ante.constraint(db));
+                        let post = storage.intern_constraint(db, env, post.constraint(db));
                         add_antecedent(ante.when_true());
                         let (ante_depth, _) = storage.cached_constraint_bound_depth(db, env, ante);
                         let fuel_cost = storage.sequent_fuel_cost(db, env, post, ante_depth);
@@ -731,11 +678,12 @@ impl PathAssignments {
                         &mut self.sequent_antecedents,
                     );
                 }
-                SequentGroup::Grouped {
-                    equivalence,
-                    leftwards,
-                    rightwards,
-                } => {
+                SequentGroup::Grouped(grouped) => {
+                    let GroupedSequents {
+                        equivalence,
+                        leftwards,
+                        rightwards,
+                    } = grouped.as_ref();
                     let (first, _) = equivalence.in_builder(db, storage);
                     let (first, second) = if first.is_same_typevar_as(db, equivalence.left) {
                         (leftwards, rightwards)
@@ -1238,7 +1186,7 @@ struct PathAssignmentConflict;
 
 #[cfg(test)]
 mod tests {
-    use super::super::solutions::SolutionWalker;
+    use super::super::solutions::{Polarity, SolutionWalker};
     use super::super::*;
 
     use crate::db::tests::{TestDb, setup_db};
@@ -1262,7 +1210,14 @@ mod tests {
     ) -> ConstraintSet<'db, 'c> {
         let env = db.program_environment();
         let ty = bound.to_instance(db, &env);
-        ConstraintSet::constrain_typevar_equivalence_bound(db, &env, builder, bound_typevar, ty)
+        ConstraintSet::constrain_typevar_equivalence_bound(
+            db,
+            &env,
+            builder,
+            ConstraintProvenance::Evidence,
+            bound_typevar,
+            ty,
+        )
     }
 
     #[test]
@@ -1288,6 +1243,7 @@ mod tests {
             db,
             &env,
             &builder,
+            ConstraintProvenance::Evidence,
             t,
             KnownClass::Bool.to_instance(db, &env),
         );
@@ -1295,6 +1251,7 @@ mod tests {
             db,
             &env,
             &builder,
+            ConstraintProvenance::Evidence,
             t,
             KnownClass::Int.to_instance(db, &env),
         );
@@ -1304,99 +1261,10 @@ mod tests {
 
         for set in [lhs, rhs, intersection, tautology, implication] {
             assert_eq!(
-                set.is_always_satisfied(db, &env),
-                set.negate(db, &builder).is_never_satisfied(db, &env)
+                set.is_always_satisfied(db, &env, TypeVarSet::None),
+                set.negate(db, &builder)
+                    .is_never_satisfied(db, &env, TypeVarSet::None)
             );
-        }
-    }
-
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    enum PathFoldBreak {
-        Satisfied,
-        Unsatisfied,
-        Impossible,
-        Combine,
-    }
-
-    /// A path fold that reconstructs a constraint set from its satisfied paths and can abort at
-    /// a specified callback.
-    struct ReconstructPathFold {
-        break_at: Option<PathFoldBreak>,
-    }
-
-    impl ReconstructPathFold {
-        fn result(
-            &self,
-            at: PathFoldBreak,
-            result: (NodeId, Option<SourceOrderId>),
-        ) -> ControlFlow<PathFoldBreak, (NodeId, Option<SourceOrderId>)> {
-            if self.break_at == Some(at) {
-                ControlFlow::Break(at)
-            } else {
-                ControlFlow::Continue(result)
-            }
-        }
-    }
-
-    impl PathFold for ReconstructPathFold {
-        type Result = (NodeId, Option<SourceOrderId>);
-        type Break = PathFoldBreak;
-
-        fn satisfied<'db>(
-            &mut self,
-            _db: &'db dyn Db,
-            storage: &mut ConstraintSetStorage<'db>,
-            path: &PathAssignments,
-        ) -> ControlFlow<Self::Break, Self::Result> {
-            let result =
-                path.assignments
-                    .iter()
-                    .fold((ALWAYS_TRUE, None), |result, (assignment, _)| {
-                        let (node, source_order) = result;
-                        let (assignment, assignment_source_order) =
-                            Node::new_satisfied_constraint(storage, *assignment);
-                        (
-                            node.and(storage, assignment),
-                            storage.ordered_source_order(source_order, assignment_source_order),
-                        )
-                    });
-            self.result(PathFoldBreak::Satisfied, result)
-        }
-
-        fn unsatisfied<'db>(
-            &mut self,
-            _db: &'db dyn Db,
-            _storage: &mut ConstraintSetStorage<'db>,
-            _path: &PathAssignments,
-        ) -> ControlFlow<Self::Break, Self::Result> {
-            self.result(PathFoldBreak::Unsatisfied, (ALWAYS_FALSE, None))
-        }
-
-        fn impossible<'db>(
-            &mut self,
-            _db: &'db dyn Db,
-            _storage: &mut ConstraintSetStorage<'db>,
-            _path: &PathAssignments,
-        ) -> ControlFlow<Self::Break, Self::Result> {
-            self.result(PathFoldBreak::Impossible, (ALWAYS_FALSE, None))
-        }
-
-        fn combine<'db>(
-            &mut self,
-            _db: &'db dyn Db,
-            storage: &mut ConstraintSetStorage<'db>,
-            if_true: Self::Result,
-            if_uncertain: Self::Result,
-            if_false: Self::Result,
-        ) -> ControlFlow<Self::Break, Self::Result> {
-            let (if_true, if_true_source_order) = if_true;
-            let (if_uncertain, if_uncertain_source_order) = if_uncertain;
-            let (if_false, if_false_source_order) = if_false;
-            let node = if_true.or(storage, if_uncertain).or(storage, if_false);
-            let source_order =
-                storage.ordered_source_order(if_true_source_order, if_uncertain_source_order);
-            let source_order = storage.ordered_source_order(source_order, if_false_source_order);
-            self.result(PathFoldBreak::Combine, (node, source_order))
         }
     }
 
@@ -1423,122 +1291,6 @@ mod tests {
         let actual: Vec<_> = path.discovered.keys().copied().collect();
 
         assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn path_fold_reconstructs_constraint_sets() {
-        let db = setup_db();
-        let db = &db;
-        let env = db.program_environment();
-        let t = create_typevar(db, "T");
-        let u = create_typevar(db, "U");
-        let v = create_typevar(db, "V");
-        let builder = ConstraintSetBuilder::new();
-
-        let t_int = create_constraint(db, &builder, t, KnownClass::Int);
-        let t_str = create_constraint(db, &builder, t, KnownClass::Str);
-        let u_int = create_constraint(db, &builder, u, KnownClass::Int);
-        let v_bytes = create_constraint(db, &builder, v, KnownClass::Bytes);
-        let union = t_int.or(db, &builder, || u_int);
-        let intersection = union.and(db, &builder, || t_str.or(db, &builder, || v_bytes));
-        let contradiction = t_int.and(db, &builder, || t_str);
-        let tautology = union.or(db, &builder, || union.negate(db, &builder));
-
-        let t_u =
-            ConstraintSet::constrain_typevar_upper_bound(db, &env, &builder, t, Type::TypeVar(u));
-        let u_int_upper = ConstraintSet::constrain_typevar_upper_bound(
-            db,
-            &env,
-            &builder,
-            u,
-            KnownClass::Int.to_instance(db, &env),
-        );
-        let int_t = ConstraintSet::constrain_typevar_lower_bound(
-            db,
-            &env,
-            &builder,
-            t,
-            KnownClass::Int.to_instance(db, &env),
-        );
-        let transitive = t_u
-            .and(db, &builder, || u_int_upper)
-            .and(db, &builder, || int_t)
-            .or(db, &builder, || v_bytes);
-
-        for set in [
-            ConstraintSet::always(&builder),
-            ConstraintSet::never(&builder),
-            union,
-            intersection,
-            contradiction,
-            tautology,
-            transitive,
-        ] {
-            let mut storage = builder.storage.borrow_mut();
-            let mut path = set
-                .node
-                .path_assignments(db, &env, &mut storage, set.source_order);
-            let mut fold = ReconstructPathFold { break_at: None };
-            let ControlFlow::Continue((reconstructed, reconstructed_source_order)) =
-                path.visit(db, &env, &mut storage, set.node, &mut fold)
-            else {
-                panic!("reconstruction unexpectedly aborted");
-            };
-            drop(storage);
-            let reconstructed =
-                ConstraintSet::from_node(&builder, reconstructed, reconstructed_source_order);
-            assert!(
-                set.iff(db, &builder, reconstructed)
-                    .is_always_satisfied(db, &env)
-            );
-        }
-    }
-
-    #[test]
-    fn path_fold_break_restores_path_assignments() {
-        let db = setup_db();
-        let db = &db;
-        let env = db.program_environment();
-        let t = create_typevar(db, "T");
-        let u = create_typevar(db, "U");
-        let builder = ConstraintSetBuilder::new();
-        let t_int = create_constraint(db, &builder, t, KnownClass::Int);
-        let t_str = create_constraint(db, &builder, t, KnownClass::Str);
-        let u_int = create_constraint(db, &builder, u, KnownClass::Int);
-        let set = t_int.and(db, &builder, || t_str).or(db, &builder, || u_int);
-
-        for break_at in [
-            PathFoldBreak::Satisfied,
-            PathFoldBreak::Unsatisfied,
-            PathFoldBreak::Impossible,
-            PathFoldBreak::Combine,
-        ] {
-            let mut storage = builder.storage.borrow_mut();
-            let mut path = set
-                .node
-                .path_assignments(db, &env, &mut storage, set.source_order);
-            let mut aborting_fold = ReconstructPathFold {
-                break_at: Some(break_at),
-            };
-            assert_eq!(
-                path.visit(db, &env, &mut storage, set.node, &mut aborting_fold),
-                ControlFlow::Break(break_at)
-            );
-
-            let mut completing_fold = ReconstructPathFold { break_at: None };
-            let ControlFlow::Continue((reconstructed, reconstructed_source_order)) =
-                path.visit(db, &env, &mut storage, set.node, &mut completing_fold)
-            else {
-                panic!("reconstruction unexpectedly aborted after {break_at:?}");
-            };
-            drop(storage);
-            let reconstructed =
-                ConstraintSet::from_node(&builder, reconstructed, reconstructed_source_order);
-            assert!(
-                set.iff(db, &builder, reconstructed)
-                    .is_always_satisfied(db, &env)
-            );
-        }
     }
 
     #[test]
@@ -1589,6 +1341,7 @@ mod tests {
                     &mut limits,
                     &mut path,
                     None,
+                    Polarity::Positive,
                     set.node
                 ),
                 ControlFlow::Break(error)
@@ -1605,6 +1358,7 @@ mod tests {
                 &mut limits,
                 &mut path,
                 None,
+                Polarity::Positive,
                 set.node,
             );
             assert_eq!(walker.finish(), expected);

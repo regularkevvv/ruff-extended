@@ -68,7 +68,7 @@ permission to use unsupported behavior. Always negotiate the version before disp
   "name": "My plugin",
   "version": "0.1.0",
   "protocol-version": { "major": 0, "minor": 3 },
-  "ty-compatibility": { "requirement": ">=0.84.0,<0.85.0" },
+  "ty-compatibility": { "requirement": ">=0.86.0,<0.87.0" },
   "runtime": {
     "kind": "wasm",
     "artifact": "my_plugin.wasm"

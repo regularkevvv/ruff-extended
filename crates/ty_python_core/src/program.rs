@@ -1,12 +1,14 @@
 use crate::{Db, platform::PythonPlatform};
 
+use std::fmt;
+
 use ruff_db::files::File;
-use ruff_db::system::{SystemPath, SystemPathBuf};
+use ruff_db::system::SystemPath;
 use ruff_db::vendored::VendoredFileSystem;
 use ruff_python_ast::PythonVersion;
 use salsa::Setter;
 use ty_module_resolver::{ResolverEnvironment, SearchPaths};
-use ty_site_packages::PythonVersionWithSource;
+use ty_site_packages::{PythonEnvironment, PythonVersionWithSource};
 
 use crate::ProgramFile;
 
@@ -34,7 +36,7 @@ impl<'db> Program<'db> {
             // Plugin configuration is registered separately, through `SemanticPlugins`: this
             // constructor runs inside a tracked query, which cannot create Salsa inputs.
             semantic_plugins: _,
-            virtual_environment: _,
+            python_environment: _,
         } = settings;
 
         let resolver_environment =
@@ -65,11 +67,9 @@ pub struct ProgramSettings {
     pub python_platform: PythonPlatform,
     pub search_paths: SearchPaths,
     pub semantic_plugins: SemanticPluginEnvironment,
-    /// The root of the resolved virtual environment, if any. File watchers use this to observe
-    /// `pyvenv.cfg` and directory changes without resolving the environment again. System Python
-    /// installations are very unlikely to be deleted and recreated, so we exclude them to avoid
-    /// recursively watching a system prefix such as `/usr`.
-    pub virtual_environment: Option<SystemPathBuf>,
+    /// The resolved Python environment. Queries must use this instead of resolving the environment
+    /// again, so that changes invalidate their cached results.
+    pub python_environment: Result<Option<PythonEnvironment>, PythonEnvironmentError>,
 }
 
 /// The semantic plugin environment configured for the project.
@@ -466,7 +466,36 @@ impl ProgramSettings {
             python_platform: PythonPlatform::default(),
             search_paths: SearchPaths::empty(vendored),
             semantic_plugins: SemanticPluginEnvironment::default(),
-            virtual_environment: None,
+            python_environment: Ok(None),
         }
     }
+
+    /// The root of the resolved virtual environment, for watching `pyvenv.cfg` and directory changes.
+    /// System installations are unlikely to be recreated, and watching a prefix such as `/usr`
+    /// recursively would be expensive.
+    pub fn virtual_environment(&self) -> Option<&SystemPath> {
+        let environment = match &self.python_environment {
+            Ok(environment) => environment,
+            Err(error) => &error.last_usable,
+        };
+        environment
+            .as_ref()
+            .filter(|environment| environment.is_virtual())
+            .map(|environment| &**environment.sys_prefix())
+    }
 }
+
+/// A failed environment selection that retains the previous environment for watching and recovery.
+#[derive(Clone, Debug, Eq, PartialEq, get_size2::GetSize)]
+pub struct PythonEnvironmentError {
+    pub message: Box<str>,
+    pub last_usable: Option<PythonEnvironment>,
+}
+
+impl fmt::Display for PythonEnvironmentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.message.fmt(f)
+    }
+}
+
+impl std::error::Error for PythonEnvironmentError {}
