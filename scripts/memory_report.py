@@ -55,6 +55,12 @@ from pathlib import Path
 from typing import Any, Final, Self
 
 KNOWN_PROJECTS: Final = ("flake8", "sphinx", "prefect", "trio")
+# Later Sphinx configurations require return-type-inference, which this source
+# snapshot does not implement. Compare both binaries on the last compatible
+# revision instead of allowing upstream configuration changes to abort the run.
+PROJECT_REVISIONS: Final = {
+    "sphinx": "2077fd46459242c5e8940ce6d40525c235b94378",
+}
 
 
 @dataclass(slots=True, kw_only=True)
@@ -289,8 +295,14 @@ def setup_project(*, name: str, dest: Path) -> tuple[Path, list[str]]:
         print(f"Project {name} already exists at {project_path}", file=sys.stderr)
     else:
         print(f"Setting up {name} and its dependencies...", file=sys.stderr)
+        revision = PROJECT_REVISIONS.get(name)
         subprocess.run(
-            [*setup_command, name, str(project_path)],
+            [
+                *setup_command,
+                name,
+                str(project_path),
+                *(["--revision", revision] if revision else []),
+            ],
             check=True,
             stdout=sys.stderr,
         )
@@ -321,14 +333,19 @@ def run_ty_memory_check(
         str(Path(ty_path).resolve()) if argument == "{ty}" else argument
         for argument in ty_command
     ]
-    result = subprocess.run(
-        command,
-        cwd=project_path,
-        check=True,
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    try:
+        result = subprocess.run(
+            command,
+            cwd=project_path,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    except subprocess.CalledProcessError as error:
+        print(error.stdout, file=sys.stderr)
+        print(error.stderr, file=sys.stderr)
+        raise
     # Write stdout (JSON memory report) to file
     output_path.write_text(result.stdout, encoding="utf-8")
 
