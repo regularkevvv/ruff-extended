@@ -6080,6 +6080,7 @@ fn mock_plugin_execute_project_index(
     };
 
     protocol::PluginResponse::ProjectIndex(protocol::ProjectIndexResponse {
+        class_indexes: BTreeMap::new(),
         plugin_index: serde_json::Value::Null,
         contributions: Vec::new(),
         virtual_types: Vec::new(),
@@ -7130,6 +7131,7 @@ mod tests {
                 );
                 Ok(protocol::PluginResponse::ProjectIndex(
                     protocol::ProjectIndexResponse {
+                        class_indexes: BTreeMap::new(),
                         plugin_index: serde_json::json!({ "member_type": "str" }),
                         contributions: Vec::new(),
                         virtual_types: Vec::new(),
@@ -7255,6 +7257,7 @@ mod tests {
                 );
                 Ok(protocol::PluginResponse::ProjectIndex(
                     protocol::ProjectIndexResponse {
+                        class_indexes: BTreeMap::new(),
                         plugin_index: serde_json::Value::Null,
                         contributions: vec![protocol::Contribution {
                             source: protocol::SymbolSource::default(),
@@ -7345,6 +7348,7 @@ mod tests {
                 );
                 Ok(protocol::PluginResponse::ProjectIndex(
                     protocol::ProjectIndexResponse {
+                        class_indexes: BTreeMap::new(),
                         plugin_index: serde_json::Value::Null,
                         contributions: vec![protocol::Contribution {
                             source: protocol::SymbolSource::default(),
@@ -7630,6 +7634,7 @@ mod tests {
 
                 Ok(protocol::PluginResponse::ProjectIndex(
                     protocol::ProjectIndexResponse {
+                        class_indexes: BTreeMap::new(),
                         plugin_index: serde_json::json!({ "pk_type": "uuid" }),
                         contributions: Vec::new(),
                         virtual_types: Vec::new(),
@@ -7903,6 +7908,7 @@ mod tests {
 
                 Ok(protocol::PluginResponse::ProjectIndex(
                     protocol::ProjectIndexResponse {
+                        class_indexes: BTreeMap::new(),
                         plugin_index: serde_json::Value::Null,
                         contributions: Vec::new(),
                         virtual_types: Vec::new(),
@@ -9651,6 +9657,7 @@ mod tests {
             captured.lock().unwrap().push(request.clone());
             Ok(protocol::PluginResponse::ProjectIndex(
                 protocol::ProjectIndexResponse {
+                    class_indexes: BTreeMap::new(),
                     plugin_index: serde_json::Value::Null,
                     contributions: Vec::new(),
                     virtual_types: Vec::new(),

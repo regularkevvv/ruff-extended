@@ -10,6 +10,26 @@ use ty_plugin_protocol::{
 };
 
 #[test]
+fn class_scoped_indexes_preserve_opaque_json_and_old_wire_messages() {
+    let old = serde_json::json!({"kind":"project-index","plugin-index":{"all":true}});
+    let response: PluginResponse = serde_json::from_value(old.clone()).unwrap();
+    assert_eq!(serde_json::to_value(response).unwrap(), old);
+    let scoped = serde_json::json!({
+        "kind":"project-index", "plugin-index":{"all":true},
+        "class-indexes":{
+            "app.Row":{"qualified-name":"opaque.Name","expression":"opaque.Type","mode":"annotation"},
+            "app.Empty":null, "app.Array":[null,0,"text"], "app.String":"opaque"
+        }
+    });
+    let response: PluginResponse = serde_json::from_value(scoped.clone()).unwrap();
+    assert_eq!(serde_json::to_value(response).unwrap(), scoped);
+    assert!(
+        !ProtocolVersion { major: 0, minor: 7 }.supports(ProtocolVersion { major: 0, minor: 8 })
+    );
+    assert!(ProtocolVersion::CURRENT.supports(ProtocolVersion { major: 0, minor: 7 }));
+}
+
+#[test]
 fn serializes_manifest() {
     let manifest = PluginManifest {
         id: "example.model".to_string(),
@@ -496,6 +516,7 @@ fn serializes_project_index_request_and_response() {
     "#);
 
     let response = PluginResponse::ProjectIndex(ProjectIndexResponse {
+        class_indexes: std::collections::BTreeMap::new(),
         plugin_index: serde_json::json!({ "models": ["app.Book"] }),
         contributions: Vec::new(),
         virtual_types: Vec::new(),

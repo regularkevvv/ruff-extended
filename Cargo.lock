@@ -6090,6 +6090,7 @@ dependencies = [
  "monty",
  "monty-pool",
  "monty-types",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
@@ -6104,7 +6105,7 @@ dependencies = [
 
 [[package]]
 name = "ty_plugin_protocol"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "insta",
  "serde",
@@ -6113,7 +6114,7 @@ dependencies = [
 
 [[package]]
 name = "ty_plugin_sdk"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "serde_json",
  "thiserror 2.0.20",

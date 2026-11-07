@@ -65,7 +65,15 @@ fn example_host(limits: MontyLimits) -> PluginHost<MontyRunner> {
 }
 
 fn source_host(limits: MontyLimits, source: &str) -> PluginHost<MontyRunner> {
-    let manifest = ManifestBuilder::new("example.runner", "Example Runner", "0.1.0")
+    source_host_with_lookup(limits, source, false)
+}
+
+fn source_host_with_lookup(
+    limits: MontyLimits,
+    source: &str,
+    lookup: bool,
+) -> PluginHost<MontyRunner> {
+    let mut manifest = ManifestBuilder::new("example.runner", "Example Runner", "0.1.0")
         .runtime(RuntimeSpec::Monty(
             ty_plugin_sdk::protocol::MontyRuntimeSpec {
                 artifact: "plugin.py".to_string(),
@@ -73,6 +81,7 @@ fn source_host(limits: MontyLimits, source: &str) -> PluginHost<MontyRunner> {
             },
         ))
         .build();
+    manifest.capabilities.project_index_lookup = lookup;
     let plugin_id = manifest.id.clone();
     let environment =
         PluginEnvironment::from_manifests(vec![manifest]).expect("example manifest is valid");
@@ -81,6 +90,127 @@ fn source_host(limits: MontyLimits, source: &str) -> PluginHost<MontyRunner> {
         .add_plugin(plugin_id, source)
         .expect("plugin source compiles");
     PluginHost::new(environment, runner)
+}
+
+#[test]
+fn index_lookup_inline_fallback_and_borrowed_values_agree() {
+    let source = r#"
+@on_call_return
+def answer(request):
+    assert project_index_keys(request, ["models"]) == ["a/b", "qualified.name"]
+    assert project_index_value(request, ["models", "missing"], "default") == "default"
+    assert project_index_value(request, ["models", "a/b"], "default") is None
+    record = project_index_value(request, ["models", "qualified.name"])
+    record["annotation"] = "bytes"
+    return call_return_patch(type_annotation(project_index_value(request, ["models", "qualified.name", "annotation"])))
+"#;
+    let index = serde_json::json!({"models":{"a/b":null,"qualified.name":{"annotation":"int"}}});
+    for lookup in [false, true] {
+        let host = source_host_with_lookup(MontyLimits::default(), source, lookup);
+        let response = host
+            .execute_with_project_index("example.runner", &call_request(), &index)
+            .expect("selected index is available");
+        let PluginResponse::CallReturnPatch(patch) = response else {
+            panic!("expected return patch, got {response:?}");
+        };
+        assert_eq!(patch.return_type.expression, "int");
+        assert_eq!(index["models"]["qualified.name"]["annotation"], "int");
+    }
+}
+
+#[test]
+fn index_lookup_rejects_invalid_requests_and_bounds_replies_and_suspensions() {
+    let calls = [
+        (
+            "_ty_project_index_lookup('value')",
+            "invalid project index lookup",
+        ),
+        (
+            "_ty_project_index_lookup('value', '[]', extra=1)",
+            "invalid project index lookup",
+        ),
+        (
+            "_ty_project_index_lookup('value', 17)",
+            "invalid project index lookup",
+        ),
+        (
+            "_ty_project_index_lookup('value', 'not json')",
+            "invalid project index lookup",
+        ),
+        (
+            "_ty_project_index_lookup('value', '[0]')",
+            "invalid project index lookup",
+        ),
+        (
+            "_ty_project_index_lookup('delete', '[]')",
+            "invalid project index lookup",
+        ),
+        (
+            "_ty_project_index_lookup('value', json.dumps(['x'] * 129))",
+            "invalid project index lookup",
+        ),
+        (
+            "_ty_project_index_lookup('value', ' ' * 65537)",
+            "invalid project index lookup",
+        ),
+        (
+            "_ty_project_index_lookup('value', '[]')",
+            "exceeds the response limit",
+        ),
+    ];
+    let index = serde_json::json!({"unused":"x".repeat(1024)});
+    for (call, expected) in calls {
+        let source = format!(
+            "def __ty_handle__(request):\n    {call}\n    return '{{\"kind\":\"no-change\"}}'\n"
+        );
+        let limits = MontyLimits {
+            max_response_bytes: 512,
+            ..MontyLimits::default()
+        };
+        let host = source_host_with_lookup(limits, &source, true);
+        let error = host
+            .execute_with_project_index("example.runner", &call_request(), &index)
+            .expect_err("invalid lookup is rejected");
+        assert!(error.to_string().contains(expected), "{call}: {error}");
+    }
+    let host = source_host_with_lookup(
+        MontyLimits::default(),
+        r#"
+def __ty_handle__(request):
+    for _ in range(1001):
+        _ty_project_index_lookup("keys", "[]")
+    return '{"kind":"no-change"}'
+"#,
+        true,
+    );
+    let error = host
+        .execute_with_project_index("example.runner", &call_request(), &serde_json::json!({}))
+        .expect_err("host bounds suspension loops");
+    assert!(
+        error.to_string().contains("lookup limit exceeded"),
+        "{error}"
+    );
+}
+
+#[test]
+fn index_lookup_does_not_grant_filesystem_access() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("host-only.txt");
+    std::fs::write(&path, "host-only contents").expect("write canary");
+    let source = format!(
+        "from pathlib import Path\ndef __ty_handle__(request):\n    Path({}).read_text()\n    return '{{\"kind\":\"no-change\"}}'\n",
+        serde_json::to_string(&path.to_string_lossy()).unwrap(),
+    );
+    let host = source_host_with_lookup(MontyLimits::default(), &source, true);
+    let error = host
+        .execute_with_project_index("example.runner", &call_request(), &serde_json::json!({}))
+        .expect_err("index capability cannot service filesystem operations");
+    assert!(
+        error.to_string().contains("no other external operations"),
+        "{error}"
+    );
+    assert!(!error.to_string().contains("host-only contents"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "host-only contents");
 }
 
 #[test]

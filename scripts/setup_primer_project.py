@@ -32,7 +32,7 @@
 # [tool.uv.sources]
 # # Keep the script's lockfile in sync with the mypy-primer pin in the project's uv.lock file
 # # so memory reports and ecosystem jobs use the same project definitions.
-# mypy-primer = { git = "https://github.com/hauntsaninja/mypy_primer" }
+# mypy-primer = { git = "https://github.com/hauntsaninja/mypy_primer", rev = "4bec1e883f8f9900d8ccfd682a0b2ed7f34b7acd" }
 # ///
 
 """Clone a mypy-primer project and set up a virtualenv with its dependencies installed.
@@ -191,7 +191,11 @@ def main() -> None:
     )
 
     venv_python = venv_dir / "bin" / "python"
-    install_base = f"uv pip install --python {shlex.quote(str(venv_python))}"
+    # Primer supplies the dependency recipe explicitly. The target's uv
+    # workspace policies and required uv version do not govern this venv.
+    install_base = (
+        f"uv --no-config pip install --python {shlex.quote(str(venv_python))}"
+    )
     if args.exclude_newer:
         install_base += f" --exclude-newer {shlex.quote(args.exclude_newer)}"
 

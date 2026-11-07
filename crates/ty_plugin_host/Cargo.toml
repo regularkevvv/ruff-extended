@@ -17,11 +17,11 @@ doctest = false
 ty_plugin_protocol = { workspace = true }
 
 thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 # WASM backend dependencies, pulled in only by the `plugins-wasm` feature. wasmtime does not build
 # for `wasm32` targets, so it is declared per-target and disabled there (see `ty_wasm`).
-serde_json = { workspace = true, optional = true }
-
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 wasmtime = { workspace = true, optional = true }
 # Monty backend dependencies, pulled in only by the `plugins-monty` features. The in-process
@@ -45,11 +45,11 @@ default = ["mock"]
 mock = []
 # Non-default production backend: embeds wasmtime to execute real `.wasm` plugin artifacts. Enabled
 # for native builds that want to run WASM plugins; never enabled for the `wasm32` `ty_wasm` build.
-plugins-wasm = ["dep:wasmtime", "dep:serde_json", "dep:tracing"]
+plugins-wasm = ["dep:wasmtime", "dep:tracing"]
 # Monty backend: runs Python plugin source inside the sandboxed `monty` interpreter. The base
 # feature executes plugins in-process; `plugins-monty-pool` adds crash isolation through
 # `monty-pool` worker subprocesses.
-plugins-monty = ["dep:monty", "dep:monty-types", "dep:serde_json", "dep:tracing"]
+plugins-monty = ["dep:monty", "dep:monty-types", "dep:tracing"]
 plugins-monty-pool = ["plugins-monty", "dep:monty-pool", "dep:tokio", "dep:which"]
 # Test-only fixture support. Keeping this separate means release builds embed the Wasmtime runtime
 # without requiring a Rust `wasm32-unknown-unknown` target merely to package the checker.
