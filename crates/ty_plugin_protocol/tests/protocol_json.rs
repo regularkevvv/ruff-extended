@@ -14,8 +14,7 @@ fn class_batches_accept_only_class_messages_and_preserve_item_wire_format() {
     let item = serde_json::json!({"kind":"analyze-class","context":{"module":"demo","file-path":"demo.py","python-version":"3.13","platform":"linux","config":{},"speculative":false},"class":{"qualified-name":"demo.Row"},"project-index":{"opaque":{"kind":"analyze-classes"}}});
     let individual: PluginRequest = serde_json::from_value(item).unwrap();
     let item = serde_json::to_value(individual).unwrap();
-    let batch =
-        serde_json::json!({"kind":"analyze-classes","requests":[item.clone(),item.clone()]});
+    let batch = serde_json::json!({"kind":"analyze-classes","requests":[item.clone(),item]});
     let decoded: PluginRequest = serde_json::from_value(batch.clone()).unwrap();
     assert_eq!(serde_json::to_value(decoded).unwrap(), batch);
     let response = serde_json::json!({"kind":"class-batch","responses":[{"kind":"class-patch"},{"kind":"no-change"},{"kind":"error","message":"expected failure"}]});
