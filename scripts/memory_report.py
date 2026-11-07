@@ -301,7 +301,7 @@ def setup_project(*, name: str, dest: Path) -> tuple[Path, list[str]]:
                 *setup_command,
                 name,
                 str(project_path),
-                *(["--revision", revision] if revision else []),
+                *(["--revision", revision] if revision is not None else []),
             ],
             check=True,
             stdout=sys.stderr,
