@@ -87,8 +87,9 @@ permission to use unsupported behavior. Always negotiate the version before disp
 }
 ```
 
-Use `ty_plugin_sdk::ManifestBuilder` instead of hand-writing production manifests; it keeps claims
-and capability flags aligned.
+Native tooling can use `ty_plugin_sdk::ManifestBuilder` to keep claims and
+capability flags aligned. Python companion plugins use the bundled
+`ty_extended.plugin_sdk` manifest helpers.
 
 See the [plugin authoring
 guide](https://github.com/regularkevvv/ty-extended/blob/main/docs/plugin-authoring.md) to build a

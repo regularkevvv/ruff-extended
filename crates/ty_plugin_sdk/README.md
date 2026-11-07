@@ -142,19 +142,22 @@ mode for a complete generated stub declaration.
 
 ## Test a Plugin
 
-Test the same implementation at three levels:
+Test the native reference and the corresponding Monty implementation together:
 
-1. Call hook methods directly in ordinary Rust unit tests.
+1. Call native hook methods directly in Rust unit tests.
 1. Call `Plugin::handle` or `Plugin::handle_json` to verify dispatch and wire serialization.
-1. Build `wasm32-unknown-unknown` and run the packaged artifact with ty-extended against a fixture Python project.
+1. Replay the same requests through the Python hooks in Monty and compare their responses.
+1. Run the packaged Python plugin through `ty-extended check` and `ty-extended server` against fixture projects.
 
-Native tests stay fast because `export_plugin!` expands to nothing outside `wasm32`.
+The native reference is a development tool. Consumers install the Python plugin and
+the companion, which embeds Monty.
 
 ## Package and Configure It
 
-Ship the generated `.wasm` file with a JSON serialization of the same `PluginManifest`. A Python
-library can place both files in its import package and name the manifest `ty-plugin.json`; users
-then opt into installed-package discovery:
+Ship the Python hook source and its Monty `PluginManifest` in the library's Python
+package. Name the manifest `ty-plugin.json`, set its runtime to `monty`, and point
+its artifact at the Python source. The Rust reference crate is not a consumer
+dependency. Users enable installed-package discovery:
 
 ```toml
 # ty.toml
@@ -171,8 +174,8 @@ enabled = true
 
 [[plugins.plugin]]
 id = "my-plugin"
-path = ".ty/plugins/my_plugin.wasm"
-runtime = "wasm"
+path = ".ty/plugins/my_plugin.py"
+runtime = "monty"
 manifest-path = ".ty/plugins/my-plugin.json"
 trusted = true
 ```
