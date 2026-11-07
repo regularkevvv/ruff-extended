@@ -191,7 +191,11 @@ def main() -> None:
     )
 
     venv_python = venv_dir / "bin" / "python"
-    install_base = f"uv pip install --python {shlex.quote(str(venv_python))}"
+    # Primer supplies the dependency recipe explicitly. The target's uv
+    # workspace policies and required uv version do not govern this venv.
+    install_base = (
+        f"uv --no-config pip install --python {shlex.quote(str(venv_python))}"
+    )
     if args.exclude_newer:
         install_base += f" --exclude-newer {shlex.quote(args.exclude_newer)}"
 
