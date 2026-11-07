@@ -12,6 +12,7 @@ fn manifest_builder_syncs_capabilities_with_claims() {
     let manifest = ManifestBuilder::new("toy.field", "Toy field plugin", "0.1.0")
         .claim_call_return("toy.Field")
         .claim_subclass_transform("toy.Model")
+        .class_batches()
         .claim_call_return_method_on_subclass("toy.Manager", "filter")
         .claim_mutations("toy.Immutable")
         .settings_module("toy.settings")
@@ -26,6 +27,7 @@ fn manifest_builder_syncs_capabilities_with_claims() {
     // Claims flip their capability flags on automatically.
     assert!(manifest.capabilities.call_return);
     assert!(manifest.capabilities.class_transform);
+    assert!(manifest.capabilities.class_batch);
     assert!(manifest.capabilities.settings_data);
     assert!(manifest.capabilities.virtual_types);
     assert!(manifest.capabilities.stub_overlays);

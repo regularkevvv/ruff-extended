@@ -87,6 +87,15 @@ impl ManifestBuilder {
         self
     }
 
+    /// Opt into independent class transforms sharing one bounded invocation.
+    /// Classes still require ordinary transform claims and per-class indexes.
+    #[must_use]
+    pub fn class_batches(mut self) -> Self {
+        self.manifest.capabilities.class_transform = true;
+        self.manifest.capabilities.class_batch = true;
+        self
+    }
+
     /// Claim mutation validation for a class and enable the capability.
     #[must_use]
     pub fn claim_mutations(mut self, qualified_name: impl Into<String>) -> Self {

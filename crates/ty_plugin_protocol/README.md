@@ -24,7 +24,7 @@ wire messages, or building protocol tooling.
 
 ```toml
 [dependencies]
-ty_plugin_protocol = "0.0.10"
+ty_plugin_protocol = "0.0.11"
 ```
 
 ## Protocol Model
@@ -70,8 +70,8 @@ permission to use unsupported behavior. Always negotiate the version before disp
   "id": "my-plugin",
   "name": "My plugin",
   "version": "0.1.0",
-  "protocol-version": { "major": 0, "minor": 8 },
-  "ty-compatibility": { "requirement": ">=0.88.0,<0.89.0" },
+  "protocol-version": { "major": 0, "minor": 9 },
+  "ty-compatibility": { "requirement": ">=0.89.0,<0.90.0" },
   "runtime": {
     "kind": "monty",
     "artifact": "my_plugin.py"
@@ -87,8 +87,9 @@ permission to use unsupported behavior. Always negotiate the version before disp
 }
 ```
 
-Use `ty_plugin_sdk::ManifestBuilder` instead of hand-writing production manifests; it keeps claims
-and capability flags aligned.
+Native tooling can use `ty_plugin_sdk::ManifestBuilder` to keep claims and
+capability flags aligned. Python companion plugins use the bundled
+`ty_extended.plugin_sdk` manifest helpers.
 
 See the [plugin authoring
 guide](https://github.com/regularkevvv/ty-extended/blob/main/docs/plugin-authoring.md) to build a
@@ -135,3 +136,22 @@ literal dictionary keys, never filesystem paths or cross-plugin references.
 The selected index and its revision remain part of semantic cache identity.
 The Monty callback supplies only the current invocation's plugin-owned index,
 preserves fresh module state, and applies the invocation's resource limits.
+
+## Class batches (protocol 0.9)
+
+The optional `class-batch` capability adds `AnalyzeClasses` and `ClassBatch`.
+Each request item is an ordinary tagged `analyze-class` request with its own
+semantic context and complete class-scoped index. Results correspond to inputs
+in order and may contain only a class patch, no-change, or protocol error.
+Batches cannot contain other hook kinds or nested batches.
+
+Opting in means that class results do not depend on shared mutable module state,
+item order, or batch boundaries. Module state is fresh for each batch invocation;
+items within a batch share that invocation. Keep the ordinary class hook: hosts
+can use it for unlisted classes, oversized requests, or a batch that abstains or
+returns an invalid response. A malformed batch must not commit partial results.
+
+The companion batches only claimed classes with explicit `class-indexes`, limits
+each batch to 128 items and 1 MiB of request JSON, and retains the existing Monty
+execution and response limits. Cached item responses retain the individual
+request's plugin identity, index revision, source context, and class summary.

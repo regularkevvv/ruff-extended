@@ -4674,7 +4674,7 @@ mod plugin_tests {
             &db,
             [(
                 Severity::Error,
-                "Plugin `pydantic` uses unsupported protocol version 99.1; ty supports 0.8",
+                "Plugin `pydantic` uses unsupported protocol version 99.1; ty supports 0.9",
             )],
         );
     }

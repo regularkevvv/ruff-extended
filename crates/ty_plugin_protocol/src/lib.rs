@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 8 };
+pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 9 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -127,6 +127,10 @@ pub struct MontyRuntimeSpec {
 pub struct PluginCapabilities {
     pub stub_overlays: bool,
     pub class_transform: bool,
+    /// Opt in to bounded class batches. Each item contains its own semantic
+    /// context and complete class index; ordinary class hooks remain available.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub class_batch: bool,
     pub class_member: bool,
     pub instance_member: bool,
     pub call_signature: bool,
@@ -469,6 +473,7 @@ pub enum PluginRequest {
     Manifest,
     BuildProjectIndex(BuildProjectIndexRequest),
     AnalyzeClass(AnalyzeClassRequest),
+    AnalyzeClasses(AnalyzeClassesRequest),
     ResolveClassMember(ResolveMemberRequest),
     ResolveInstanceMember(ResolveMemberRequest),
     AdjustCallSignature(CallRequest),
@@ -533,6 +538,23 @@ pub struct AnalyzeClassRequest {
     pub class: ClassSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_index: Option<serde_json::Value>,
+}
+
+/// A bounded collection of independent class requests. The plugin explicitly
+/// opts into sharing an interpreter invocation across these items. It must not
+/// depend on batch boundaries or mutate state used by another item's result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AnalyzeClassesRequest {
+    pub requests: Vec<ClassTransformRequest>,
+}
+
+/// Keep each item wire-identical to an individual class request while
+/// rejecting unrelated hooks and recursively nested batches.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ClassTransformRequest {
+    AnalyzeClass(AnalyzeClassRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -903,6 +925,7 @@ pub enum PluginResponse {
     Manifest(Box<PluginManifest>),
     ProjectIndex(ProjectIndexResponse),
     ClassPatch(ClassPatch),
+    ClassBatch(ClassBatchResponse),
     MemberPatch(MemberPatch),
     CallSignaturePatch(CallSignaturePatch),
     CallReturnPatch(CallReturnPatch),
@@ -960,6 +983,22 @@ pub struct ClassPatch {
     pub constructor: Option<CallableSignature>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<PluginDiagnostic>,
+}
+
+/// Results correspond to request items in order. A batch cannot introduce
+/// project indexes, virtual definitions, or another nested batch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ClassBatchResponse {
+    pub responses: Vec<ClassTransformResponse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ClassTransformResponse {
+    ClassPatch(ClassPatch),
+    NoChange,
+    Error(PluginError),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
