@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 7 };
+pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 8 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -134,6 +134,10 @@ pub struct PluginCapabilities {
     pub call_state: bool,
     pub additional_dependencies: bool,
     pub project_index: bool,
+    /// The plugin reads its index through SDK lookup helpers. A host may retain
+    /// the index outside the interpreter and supply only requested values.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub project_index_lookup: bool,
     pub cross_symbol_contributions: bool,
     pub settings_data: bool,
     pub virtual_types: bool,
@@ -475,6 +479,23 @@ pub enum PluginRequest {
     /// would grow every request. `Box` is transparent to serde, so the wire format is
     /// unaffected.
     ValidateMutation(Box<MutationRequest>),
+}
+
+impl PluginRequest {
+    /// Index slot shared by semantic requests; project discovery has no index.
+    pub fn project_index_mut(&mut self) -> Option<&mut Option<serde_json::Value>> {
+        match self {
+            Self::AnalyzeClass(request) => Some(&mut request.project_index),
+            Self::ResolveClassMember(request) | Self::ResolveInstanceMember(request) => {
+                Some(&mut request.project_index)
+            }
+            Self::AdjustCallSignature(request)
+            | Self::AdjustCallReturn(request)
+            | Self::AdjustCallState(request) => Some(&mut request.project_index),
+            Self::ValidateMutation(request) => Some(&mut request.project_index),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -911,6 +932,11 @@ pub struct MutationResponse {
 pub struct ProjectIndexResponse {
     #[serde(default)]
     pub plugin_index: serde_json::Value,
+    /// Optional complete replacement for `project-index` in the named class's
+    /// `analyze-class` request. Other hooks and unlisted classes receive the
+    /// ordinary index. Values are opaque, plugin-owned JSON, including null.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub class_indexes: BTreeMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contributions: Vec<Contribution>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

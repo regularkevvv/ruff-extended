@@ -3,11 +3,16 @@
 [![crates.io](https://img.shields.io/crates/v/ty_plugin_sdk.svg)](https://crates.io/crates/ty_plugin_sdk)
 [![docs.rs](https://docs.rs/ty_plugin_sdk/badge.svg)](https://docs.rs/ty_plugin_sdk)
 
-The authoring SDK for sandboxed [ty-extended](https://github.com/regularkevvv/ty-extended)
-semantic plugins.
+Typed protocol helpers and native regression tests for
+[ty-extended](https://github.com/regularkevvv/ty-extended) semantic plugins.
 
-Use this crate to declare what a plugin owns, implement typed semantic hooks, return
-declarative patches, and export the implementation as a WebAssembly module. It re-exports all wire
+Current ty-extended releases are Monty companions for unchanged official ty.
+Their plugins are Python source using `ty_extended.plugin_sdk`; the Rust SDK
+provides typed protocol tooling and independent native test implementations.
+The companion does not load Rust libraries or WASM modules.
+
+Use this crate to declare what a plugin owns, implement typed semantic hooks and return
+declarative patches. It re-exports all wire
 types from `ty_plugin_protocol` as `ty_plugin_sdk::protocol`, so a plugin normally has only one
 ty dependency.
 
@@ -18,15 +23,14 @@ The host sends a serialized request for a manifest claim; the plugin returns a s
 that the host validates and applies.
 
 ```text
-ty semantic query -> typed protocol request -> plugin hook -> declarative patch -> ty
+companion -> typed protocol request -> Monty hook -> declarative patch -> companion
 ```
 
-The same `Plugin` implementation can be unit-tested natively and exported to WASM for production.
+A native `Plugin` implementation can act as a regression oracle for the corresponding Monty hooks.
 
 ## Quick Start
 
-Create a library crate that produces both a native Rust library and a WASM-compatible dynamic
-library:
+Create a native regression library:
 
 ```toml
 [package]
@@ -35,17 +39,17 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
-crate-type = ["rlib", "cdylib"]
+crate-type = ["rlib"]
 
 [dependencies]
-ty_plugin_sdk = "0.0.9"
+ty_plugin_sdk = "0.0.10"
 ```
 
-Implement `Plugin`, claim the matching hook in the manifest, and export it:
+Implement `Plugin` and claim the matching hook in the corresponding Monty manifest:
 
 ```rust
 use ty_plugin_sdk::protocol::{
-    CallRequest, PluginManifest, PluginResponse, RuntimeSpec, TypeExpr, WasmRuntimeSpec,
+    CallRequest, PluginManifest, PluginResponse, MontyRuntimeSpec, RuntimeSpec, TypeExpr,
 };
 use ty_plugin_sdk::{dsl, ManifestBuilder, Plugin};
 
@@ -55,9 +59,9 @@ struct MyPlugin;
 impl Plugin for MyPlugin {
     fn manifest(&self) -> PluginManifest {
         ManifestBuilder::new("my-plugin", "My plugin", env!("CARGO_PKG_VERSION"))
-            .ty_compatibility(">=0.86.0,<0.87.0")
-            .runtime(RuntimeSpec::Wasm(WasmRuntimeSpec {
-                artifact: "my_plugin.wasm".to_string(),
+            .ty_compatibility(">=0.88.0,<0.89.0")
+            .runtime(RuntimeSpec::Monty(MontyRuntimeSpec {
+                artifact: "my_plugin.py".to_string(),
                 sha256: None,
             }))
             .claim_call_return("my_library.Field")
@@ -68,26 +72,17 @@ impl Plugin for MyPlugin {
         dsl::call_return(TypeExpr::annotation("str"))
     }
 }
-
-ty_plugin_sdk::export_plugin!(MyPlugin::default());
 ```
 
 Every hook has a `PluginResponse::NoChange` default. An implementation only overrides the hooks it
 uses.
 
-## Build the WASM Module
+## WASM exports
 
-```shell
-rustup target add wasm32-unknown-unknown
-cargo build --release --target wasm32-unknown-unknown
-```
-
-The example produces
-`target/wasm32-unknown-unknown/release/my_ty_plugin.wasm`.
-
-`export_plugin!` generates the `ty_plugin_alloc` and `ty_plugin_handle` exports expected by the
-host. The ABI transports JSON through the module's linear memory; the plugin has no WASI or
-ambient host capabilities.
+`export_plugin!` and the WASM wire types remain available for hosts that implement
+that runtime and negotiate the declared protocol version. They are outside the
+current ty-extended companion. Older WASM examples and releases are documented in
+[the historical guide](https://github.com/regularkevvv/ty-extended/blob/main/docs/history/0.86/plugin-authoring.md).
 
 ## Manifests and Claims
 
@@ -105,8 +100,9 @@ attributes, settings, or mutations it declared. Useful builder methods include:
 - `claim_mutations` and `claim_mutations_on_subclass`;
 - `stub_overlay`, `config_schema`, and `default_config`.
 
-Always set a narrow `ty_compatibility` range for a published plugin. The protocol and SDK are
-versioned independently from ty-extended.
+Declare the required companion version in the Python package dependencies. The legacy
+`ty_compatibility` field remains a manifest field; it does not select official ty.
+The protocol and SDK are versioned independently from the companion and checker.
 
 ## Hook Reference
 

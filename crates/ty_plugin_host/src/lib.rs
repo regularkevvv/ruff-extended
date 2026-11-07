@@ -743,6 +743,22 @@ pub trait PluginRunner {
         plugin: &LoadedPlugin,
         request: &PluginRequest,
     ) -> Result<PluginResponse, RuntimeError>;
+
+    /// Borrow a plugin's index for one stateless call. Runtimes without lazy
+    /// lookup support retain the ordinary inline wire representation.
+    fn execute_with_project_index(
+        &self,
+        plugin: &LoadedPlugin,
+        request: &PluginRequest,
+        index: &serde_json::Value,
+    ) -> Result<PluginResponse, RuntimeError> {
+        let mut request = request.clone();
+        let slot = request
+            .project_index_mut()
+            .ok_or_else(|| RuntimeError::InvalidResponse("request has no project index".into()))?;
+        *slot = Some(index.clone());
+        self.execute(plugin, &request)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -765,6 +781,24 @@ impl<R> PluginHost<R> {
 }
 
 impl<R: PluginRunner> PluginHost<R> {
+    pub fn execute_with_project_index(
+        &self,
+        plugin_id: &str,
+        request: &PluginRequest,
+        index: &serde_json::Value,
+    ) -> Result<PluginResponse, HostError> {
+        let plugin = self
+            .environment
+            .plugin(plugin_id)
+            .ok_or_else(|| HostError::UnknownPlugin(plugin_id.to_string()))?;
+        self.runner
+            .execute_with_project_index(plugin, request, index)
+            .map_err(|source| HostError::Runtime {
+                plugin_id: plugin_id.to_owned(),
+                source,
+            })
+    }
+
     pub fn execute(
         &self,
         plugin_id: &str,

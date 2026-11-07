@@ -150,6 +150,7 @@ impl Plugin for MiniDjangoPlugin {
         }
 
         PluginResponse::ProjectIndex(ProjectIndexResponse {
+            class_indexes: BTreeMap::new(),
             plugin_index: json!({
                 "models": models,
                 "settings": settings_values,
