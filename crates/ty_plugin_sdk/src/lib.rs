@@ -11,8 +11,9 @@ pub mod wasm;
 pub use manifest::ManifestBuilder;
 
 use ty_plugin_protocol::{
-    AnalyzeClassRequest, BuildProjectIndexRequest, CallRequest, DependencyRequest, MutationRequest,
-    PluginManifest, PluginRequest, PluginResponse, ResolveMemberRequest,
+    AnalyzeClassRequest, AnalyzeClassesRequest, BuildProjectIndexRequest, CallRequest,
+    DependencyRequest, MutationRequest, PluginManifest, PluginRequest, PluginResponse,
+    ResolveMemberRequest,
 };
 
 /// A semantic plugin: a manifest plus the hooks it chooses to implement.
@@ -29,6 +30,13 @@ pub trait Plugin {
     /// Hook for the `class-transform` capability: adjust a claimed class's fields, members, or
     /// constructor.
     fn analyze_class(&self, request: &AnalyzeClassRequest) -> PluginResponse {
+        let _ = request;
+        PluginResponse::NoChange
+    }
+
+    /// Optional `class-batch` hook. Return one class result per input, in order.
+    /// A host falls back to individual class hooks when this hook abstains.
+    fn analyze_classes(&self, request: &AnalyzeClassesRequest) -> PluginResponse {
         let _ = request;
         PluginResponse::NoChange
     }
@@ -93,6 +101,7 @@ pub trait Plugin {
             PluginRequest::Manifest => PluginResponse::Manifest(Box::new(self.manifest())),
             PluginRequest::BuildProjectIndex(request) => self.build_project_index(request),
             PluginRequest::AnalyzeClass(request) => self.analyze_class(request),
+            PluginRequest::AnalyzeClasses(request) => self.analyze_classes(request),
             PluginRequest::ResolveClassMember(request) => self.resolve_class_member(request),
             PluginRequest::ResolveInstanceMember(request) => self.resolve_instance_member(request),
             PluginRequest::AdjustCallSignature(request) => self.adjust_call_signature(request),

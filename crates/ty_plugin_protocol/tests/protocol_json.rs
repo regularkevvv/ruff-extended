@@ -10,6 +10,42 @@ use ty_plugin_protocol::{
 };
 
 #[test]
+fn class_batches_accept_only_class_messages_and_preserve_item_wire_format() {
+    let item = serde_json::json!({"kind":"analyze-class","context":{"module":"demo","file-path":"demo.py","python-version":"3.13","platform":"linux","config":{},"speculative":false},"class":{"qualified-name":"demo.Row"},"project-index":{"opaque":{"kind":"analyze-classes"}}});
+    let individual: PluginRequest = serde_json::from_value(item).unwrap();
+    let item = serde_json::to_value(individual).unwrap();
+    let batch =
+        serde_json::json!({"kind":"analyze-classes","requests":[item.clone(),item.clone()]});
+    let decoded: PluginRequest = serde_json::from_value(batch.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), batch);
+    let response = serde_json::json!({"kind":"class-batch","responses":[{"kind":"class-patch"},{"kind":"no-change"},{"kind":"error","message":"expected failure"}]});
+    let decoded: PluginResponse = serde_json::from_value(response.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), response);
+    for wrong in [serde_json::json!({"kind":"manifest"}), batch] {
+        assert!(
+            serde_json::from_value::<PluginRequest>(
+                serde_json::json!({"kind":"analyze-classes","requests":[wrong]})
+            )
+            .is_err()
+        );
+    }
+    for wrong in [
+        serde_json::json!({"kind":"project-index","plugin-index":{}}),
+        response,
+    ] {
+        assert!(
+            serde_json::from_value::<PluginResponse>(
+                serde_json::json!({"kind":"class-batch","responses":[wrong]})
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        !ProtocolVersion { major: 0, minor: 8 }.supports(ProtocolVersion { major: 0, minor: 9 })
+    );
+}
+
+#[test]
 fn class_scoped_indexes_preserve_opaque_json_and_old_wire_messages() {
     let old = serde_json::json!({"kind":"project-index","plugin-index":{"all":true}});
     let response: PluginResponse = serde_json::from_value(old.clone()).unwrap();

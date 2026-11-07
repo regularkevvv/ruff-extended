@@ -42,7 +42,7 @@ edition = "2024"
 crate-type = ["rlib"]
 
 [dependencies]
-ty_plugin_sdk = "0.0.10"
+ty_plugin_sdk = "0.0.11"
 ```
 
 Implement `Plugin` and claim the matching hook in the corresponding Monty manifest:
@@ -59,7 +59,7 @@ struct MyPlugin;
 impl Plugin for MyPlugin {
     fn manifest(&self) -> PluginManifest {
         ManifestBuilder::new("my-plugin", "My plugin", env!("CARGO_PKG_VERSION"))
-            .ty_compatibility(">=0.88.0,<0.89.0")
+            .ty_compatibility(">=0.89.0,<0.90.0")
             .runtime(RuntimeSpec::Monty(MontyRuntimeSpec {
                 artifact: "my_plugin.py".to_string(),
                 sha256: None,
@@ -109,6 +109,7 @@ The protocol and SDK are versioned independently from the companion and checker.
 | `Plugin` method           | Capability                | Typical response        |
 | ------------------------- | ------------------------- | ----------------------- |
 | `analyze_class`           | `class-transform`         | `ClassPatch`            |
+| `analyze_classes`         | `class-batch`             | `ClassBatchResponse`    |
 | `resolve_class_member`    | `class-member`            | `MemberPatch`           |
 | `resolve_instance_member` | `instance-member`         | `MemberPatch`           |
 | `adjust_call_signature`   | `call-signature`          | `CallSignaturePatch`    |

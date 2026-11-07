@@ -857,6 +857,7 @@ impl PluginRunner for MockRunner {
 pub enum HookKind {
     Manifest,
     AnalyzeClass,
+    AnalyzeClasses,
     ResolveClassMember,
     ResolveInstanceMember,
     AdjustCallSignature,
@@ -873,6 +874,7 @@ impl From<&PluginRequest> for HookKind {
             PluginRequest::Manifest => Self::Manifest,
             PluginRequest::BuildProjectIndex(_) => Self::BuildProjectIndex,
             PluginRequest::AnalyzeClass(_) => Self::AnalyzeClass,
+            PluginRequest::AnalyzeClasses(_) => Self::AnalyzeClasses,
             PluginRequest::ResolveClassMember(_) => Self::ResolveClassMember,
             PluginRequest::ResolveInstanceMember(_) => Self::ResolveInstanceMember,
             PluginRequest::AdjustCallSignature(_) => Self::AdjustCallSignature,
