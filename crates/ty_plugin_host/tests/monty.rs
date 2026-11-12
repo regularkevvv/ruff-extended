@@ -140,6 +140,122 @@ def answer(request):
 }
 
 #[test]
+fn stateless_batches_match_serial_and_keep_requests_and_indexes_independent() {
+    let source = r#"
+@on_call_return
+def answer(request):
+    assert request['arguments'][0]['value']['value'] == 'token'
+    request['arguments'][0]['value']['value'] = 'local mutation'
+    record = project_index_value(request, ['record'])
+    annotation = record['annotation']
+    record['annotation'] = 'local mutation'
+    assert project_index_value(request, ['record', 'annotation']) == annotation
+    return call_return_patch(type_annotation(annotation))
+"#;
+    for lookup in [false, true] {
+        let host = source_host_with_lookup(MontyLimits::default(), source, lookup);
+        let request = call_request();
+        let requests = vec![&request; 16];
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = ["str", "int", "bytes", "bool"]
+                .into_iter()
+                .map(|annotation| {
+                    let host = &host;
+                    let requests = &requests;
+                    let request = &request;
+                    scope.spawn(move || {
+                        let index = serde_json::json!({"record":{"annotation":annotation}});
+                        let expected = host
+                            .execute_with_project_index("example.runner", request, &index)
+                            .expect("ordinary call");
+                        for _ in 0..4 {
+                            let actual = host
+                                .execute_stateless_batch_with_project_index(
+                                    "example.runner",
+                                    requests,
+                                    &index,
+                                )
+                                .expect("stateless batch");
+                            assert_eq!(actual.len(), requests.len());
+                            assert!(actual.iter().all(|response| response == &expected));
+                            assert_eq!(index["record"]["annotation"], annotation);
+                        }
+                    })
+                })
+                .collect();
+            for worker in workers {
+                worker.join().expect("independent indexed batch");
+            }
+        });
+        assert!(
+            host.execute_stateless_batch_with_project_index(
+                "example.runner",
+                &[&request; 65],
+                &serde_json::json!({})
+            )
+            .is_err()
+        );
+        assert!(
+            host.execute_stateless_batch_with_project_index(
+                "example.runner",
+                &[],
+                &serde_json::json!({})
+            )
+            .expect("empty batch")
+            .is_empty()
+        );
+    }
+}
+
+#[test]
+fn stateless_batch_failures_keep_response_limits_and_ordinary_calls() {
+    let host = source_host_with_lookup(
+        MontyLimits {
+            max_response_bytes: 512,
+            ..MontyLimits::default()
+        },
+        r#"
+@on_call_return
+def answer(request):
+    return call_return_patch(type_annotation('str'))
+"#,
+        true,
+    );
+    let request = call_request();
+    let index = serde_json::json!({});
+    assert!(
+        host.execute_with_project_index("example.runner", &request, &index)
+            .is_ok()
+    );
+    assert!(
+        host.execute_stateless_batch_with_project_index("example.runner", &[&request; 16], &index)
+            .is_err()
+    );
+    assert!(
+        host.execute_with_project_index("example.runner", &request, &index)
+            .is_ok()
+    );
+    for result in ["[]", "[42]", "[\"not JSON\",\"{}\"]"] {
+        let source = format!(
+            "def __ty_handle_many__(payload):\n    return {result:?}\n@on_call_return\ndef answer(request):\n    return call_return_patch(type_annotation('str'))\n"
+        );
+        let host = source_host_with_lookup(MontyLimits::default(), &source, true);
+        assert!(
+            host.execute_stateless_batch_with_project_index(
+                "example.runner",
+                &[&request, &request],
+                &index
+            )
+            .is_err()
+        );
+        assert!(
+            host.execute_with_project_index("example.runner", &request, &index)
+                .is_ok()
+        );
+    }
+}
+
+#[test]
 fn index_lookup_inline_fallback_and_borrowed_values_agree() {
     let source = r#"
 @on_call_return

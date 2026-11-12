@@ -744,6 +744,26 @@ pub trait PluginRunner {
         request: &PluginRequest,
     ) -> Result<PluginResponse, RuntimeError>;
 
+    /// Execute independent handlers whose author guarantees no observable
+    /// mutable module state between requests. The default keeps fresh calls.
+    /// One batch retains the ordinary resource and response-size ceilings.
+    fn execute_stateless_batch_with_project_index(
+        &self,
+        plugin: &LoadedPlugin,
+        requests: &[&PluginRequest],
+        index: &serde_json::Value,
+    ) -> Result<Vec<PluginResponse>, RuntimeError> {
+        if requests.len() > 64 {
+            return Err(RuntimeError::InvalidResponse(
+                "stateless batch exceeds 64 requests".into(),
+            ));
+        }
+        requests
+            .iter()
+            .map(|request| self.execute_with_project_index(plugin, request, index))
+            .collect()
+    }
+
     /// Borrow a plugin's index for one stateless call. Runtimes without lazy
     /// lookup support retain the ordinary inline wire representation.
     fn execute_with_project_index(
@@ -781,6 +801,24 @@ impl<R> PluginHost<R> {
 }
 
 impl<R: PluginRunner> PluginHost<R> {
+    pub fn execute_stateless_batch_with_project_index(
+        &self,
+        plugin_id: &str,
+        requests: &[&PluginRequest],
+        index: &serde_json::Value,
+    ) -> Result<Vec<PluginResponse>, HostError> {
+        let plugin = self
+            .environment
+            .plugin(plugin_id)
+            .ok_or_else(|| HostError::UnknownPlugin(plugin_id.to_owned()))?;
+        self.runner
+            .execute_stateless_batch_with_project_index(plugin, requests, index)
+            .map_err(|source| HostError::Runtime {
+                plugin_id: plugin_id.to_owned(),
+                source,
+            })
+    }
+
     pub fn execute_with_project_index(
         &self,
         plugin_id: &str,

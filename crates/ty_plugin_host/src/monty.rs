@@ -4,6 +4,8 @@
 //! serialized [`PluginRequest`] as `_ty_request_json` and reads back the JSON returned by the
 //! prelude's `__ty_handle__` dispatcher. Every call evaluates the plugin fresh — hooks and
 //! module-level state do not persist, matching the stateless-per-call WASM runtime.
+//! Explicit stateless batches share initialization within one independent snapshot;
+//! callers must attest that handlers depend only on their request and index.
 //!
 //! Two backends share this framing:
 //!
@@ -228,6 +230,17 @@ impl MontyRunner {
         runs: &Mutex<BTreeMap<String, MontyRun>>,
         index: Option<&serde_json::Value>,
     ) -> Result<PluginResponse, RuntimeError> {
+        let value = self.execute_in_process_value(plugin, request_json, runs, index)?;
+        self.decode_response(&value)
+    }
+
+    fn execute_in_process_value(
+        &self,
+        plugin: &LoadedPlugin,
+        request_json: String,
+        runs: &Mutex<BTreeMap<String, MontyRun>>,
+        index: Option<&serde_json::Value>,
+    ) -> Result<MontyObject, RuntimeError> {
         let mut runs = runs.lock().map_err(|_| {
             RuntimeError::Trap(
                 "Monty interpreter state was invalidated by a panic; reload the project"
@@ -246,7 +259,7 @@ impl MontyRunner {
             // invocations do not serialize their entire interpreter runs.
             let run = run.clone();
             drop(runs);
-            return self.execute_indexed(plugin, request_json, run, index);
+            return self.execute_indexed_value(plugin, request_json, run, index);
         }
 
         let mut print_output = CollectedStreams::default();
@@ -262,16 +275,16 @@ impl MontyRunner {
         for (stream, text) in print_output.into_entries() {
             tracing::debug!(plugin = plugin.id(), ?stream, "{text}");
         }
-        self.decode_response(&value)
+        Ok(value)
     }
 
-    fn execute_indexed(
+    fn execute_indexed_value(
         &self,
         plugin: &LoadedPlugin,
         request_json: String,
         run: MontyRun,
         index: &serde_json::Value,
-    ) -> Result<PluginResponse, RuntimeError> {
+    ) -> Result<MontyObject, RuntimeError> {
         let mut print_output = CollectedStreams::default();
         let inputs = vec![
             MontyObject::string(request_json),
@@ -328,7 +341,7 @@ impl MontyRunner {
             tracing::debug!(plugin = plugin.id(), ?stream, "{text}");
         }
 
-        self.decode_response(&value)
+        Ok(value)
     }
 
     #[cfg(feature = "plugins-monty-pool")]
@@ -417,6 +430,67 @@ impl MontyRunner {
 }
 
 impl PluginRunner for MontyRunner {
+    fn execute_stateless_batch_with_project_index(
+        &self,
+        plugin: &LoadedPlugin,
+        requests: &[&PluginRequest],
+        index: &serde_json::Value,
+    ) -> Result<Vec<PluginResponse>, RuntimeError> {
+        if requests.len() > 64 {
+            return Err(RuntimeError::InvalidResponse(
+                "stateless batch exceeds 64 requests".into(),
+            ));
+        }
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        #[allow(irrefutable_let_patterns)]
+        if plugin.manifest().capabilities.project_index_lookup
+            && let Backend::InProcess { runs } = &self.backend
+        {
+            let mut encoded = Vec::with_capacity(requests.len());
+            for request in requests {
+                let mut request = (*request).clone();
+                let slot = request.project_index_mut().ok_or_else(|| {
+                    RuntimeError::InvalidResponse("request has no project index".into())
+                })?;
+                *slot = None;
+                encoded.push(
+                    serde_json::to_string(&request)
+                        .map_err(|error| RuntimeError::InvalidResponse(error.to_string()))?,
+                );
+            }
+            let payload = serde_json::to_string(&encoded)
+                .map_err(|error| RuntimeError::InvalidResponse(error.to_string()))?;
+            catch_interpreter_panic(|| {
+                let value = self.execute_in_process_value(plugin, payload, runs, Some(index))?;
+                let text = value.as_ref().as_str().ok_or_else(|| {
+                    RuntimeError::InvalidResponse("batch returned a non-string value".into())
+                })?;
+                if text.len() > self.limits.max_response_bytes {
+                    return Err(RuntimeError::ResponseTooLarge);
+                }
+                let replies: Vec<String> = serde_json::from_str(text).map_err(|error| {
+                    RuntimeError::InvalidResponse(format!("invalid batch response: {error}"))
+                })?;
+                if replies.len() != requests.len() {
+                    return Err(RuntimeError::InvalidResponse(
+                        "batch response length mismatch".into(),
+                    ));
+                }
+                replies
+                    .into_iter()
+                    .map(|reply| self.decode_response(&MontyObject::string(reply)))
+                    .collect()
+            })?
+        } else {
+            requests
+                .iter()
+                .map(|request| self.execute_with_project_index(plugin, request, index))
+                .collect()
+        }
+    }
+
     fn execute_with_project_index(
         &self,
         plugin: &LoadedPlugin,
