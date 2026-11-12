@@ -498,10 +498,13 @@ impl PluginRunner for MontyRunner {
         index: &serde_json::Value,
     ) -> Result<PluginResponse, RuntimeError> {
         let mut request = request.clone();
-        let slot = request
-            .project_index_mut()
-            .ok_or_else(|| RuntimeError::InvalidResponse("request has no project index".into()))?;
-        *slot = None;
+        if let Some(slot) = request.project_index_mut() {
+            *slot = None;
+        } else if !matches!(request, PluginRequest::BuildProjectIndex(_)) {
+            return Err(RuntimeError::InvalidResponse(
+                "request has no project index".into(),
+            ));
+        }
         if plugin.manifest().capabilities.project_index_lookup
             && let Backend::InProcess { runs } = &self.backend
         {
@@ -511,7 +514,9 @@ impl PluginRunner for MontyRunner {
                 self.execute_in_process(plugin, request_json, runs, Some(index))
             })?;
         }
-        *request.project_index_mut().unwrap() = Some(index.clone());
+        if let Some(slot) = request.project_index_mut() {
+            *slot = Some(index.clone());
+        }
         self.execute(plugin, &request)
     }
 

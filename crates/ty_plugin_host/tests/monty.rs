@@ -93,6 +93,56 @@ fn source_host_with_lookup(
 }
 
 #[test]
+fn project_index_hooks_can_read_bounded_fresh_snapshot_lookups() {
+    let source = r#"
+@on_project_index
+def build(request):
+    result = project_index_value(request, ['source'], {})
+    assert result == {'name': 'café😀', 'fields': ['one']}
+    result['fields'].append('mutated')
+    assert project_index_value(request, ['source'])['fields'] == ['one']
+    return project_index({'source': project_index_value(request, ['source'])})
+"#;
+    let host = source_host_with_lookup(MontyLimits::default(), source, true);
+    let request = PluginRequest::BuildProjectIndex(ty_plugin_protocol::BuildProjectIndexRequest {
+        context: ty_plugin_protocol::ProjectContext {
+            root: "/project".into(),
+            python_version: "3.13".into(),
+            platform: "linux".into(),
+            config: serde_json::json!({}),
+        },
+        classes: Vec::new(),
+        settings: Vec::new(),
+        assignments: Vec::new(),
+        functions: Vec::new(),
+        previous_index_fingerprint: None,
+    });
+    let index = serde_json::json!({"source":{"name":"café😀","fields":["one"]}});
+    let before = index.clone();
+    let response = host
+        .execute_with_project_index("example.runner", &request, &index)
+        .expect("project hook lookup");
+    assert_eq!(
+        serde_json::to_value(response).unwrap()["plugin-index"]["source"],
+        index["source"]
+    );
+    assert_eq!(index, before);
+    let limited = source_host_with_lookup(
+        MontyLimits {
+            max_response_bytes: 16,
+            ..MontyLimits::default()
+        },
+        source,
+        true,
+    );
+    assert!(
+        limited
+            .execute_with_project_index("example.runner", &request, &index)
+            .is_err()
+    );
+}
+
+#[test]
 fn parallel_indexed_calls_preserve_isolation_and_serial_results() {
     let host = source_host_with_lookup(
         MontyLimits::default(),
