@@ -93,6 +93,53 @@ fn source_host_with_lookup(
 }
 
 #[test]
+fn parallel_indexed_calls_preserve_isolation_and_serial_results() {
+    let host = source_host_with_lookup(
+        MontyLimits::default(),
+        r#"
+counter = 0
+@on_call_return
+def answer(request):
+    global counter
+    counter += 1
+    assert counter == 1
+    value = project_index_value(request, ["annotation"])
+    return call_return_patch(type_annotation(value))
+"#,
+        true,
+    );
+    let annotations = ["str", "int", "bytes", "bool"];
+    let expected = annotations.map(|annotation| {
+        let index = serde_json::json!({"annotation": annotation});
+        host.execute_with_project_index("example.runner", &call_request(), &index)
+            .expect("serial indexed call succeeds")
+    });
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = annotations
+            .iter()
+            .enumerate()
+            .map(|(position, annotation)| {
+                let host = &host;
+                let expected = &expected[position];
+                scope.spawn(move || {
+                    let index = serde_json::json!({"annotation": annotation});
+                    for _ in 0..16 {
+                        let actual = host
+                            .execute_with_project_index("example.runner", &call_request(), &index)
+                            .expect("parallel indexed call succeeds");
+                        assert_eq!(&actual, expected);
+                        assert_eq!(index["annotation"], *annotation);
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("indexed worker completes");
+        }
+    });
+}
+
+#[test]
 fn index_lookup_inline_fallback_and_borrowed_values_agree() {
     let source = r#"
 @on_call_return

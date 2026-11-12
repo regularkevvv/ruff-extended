@@ -240,20 +240,49 @@ impl MontyRunner {
                 "monty plugin source was not loaded into the runner",
             ))?;
 
+        if let Some(index) = index {
+            // Indexed calls already execute an independent snapshot. Keep the
+            // cache locked only while cloning that snapshot, so independent
+            // invocations do not serialize their entire interpreter runs.
+            let run = run.clone();
+            drop(runs);
+            return self.execute_indexed(plugin, request_json, run, index);
+        }
+
+        let mut print_output = CollectedStreams::default();
+        let inputs = vec![MontyObject::string(request_json), MontyObject::none()];
+        let value = run
+            .run(
+                inputs,
+                ResourceTracker::new(self.limits.resource_limits()),
+                PrintWriter::collect_streams(&mut print_output),
+            )
+            .map_err(|err| RuntimeError::Trap(err.to_string()))?;
+
+        for (stream, text) in print_output.into_entries() {
+            tracing::debug!(plugin = plugin.id(), ?stream, "{text}");
+        }
+        self.decode_response(&value)
+    }
+
+    fn execute_indexed(
+        &self,
+        plugin: &LoadedPlugin,
+        request_json: String,
+        run: MontyRun,
+        index: &serde_json::Value,
+    ) -> Result<PluginResponse, RuntimeError> {
         let mut print_output = CollectedStreams::default();
         let inputs = vec![
             MontyObject::string(request_json),
-            index.map_or_else(MontyObject::none, |_| {
-                MontyObject::function(INDEX_LOOKUP, None)
-            }),
+            MontyObject::function(INDEX_LOOKUP, None),
         ];
-        let value = if let Some(index) = index {
+        let value = {
             let started = Instant::now();
             let mut remaining = MAX_INDEX_LOOKUPS;
             let mut limits = self.limits.resource_limits();
             limits.max_suspensions = MAX_INDEX_LOOKUPS;
             let mut progress = run
-                .clone()
                 .start(
                     inputs,
                     ResourceTracker::new(limits),
@@ -293,13 +322,6 @@ impl MontyRunner {
                 }
                 .map_err(|err| RuntimeError::Trap(err.to_string()))?;
             }
-        } else {
-            run.run(
-                inputs,
-                ResourceTracker::new(self.limits.resource_limits()),
-                PrintWriter::collect_streams(&mut print_output),
-            )
-            .map_err(|err| RuntimeError::Trap(err.to_string()))?
         };
 
         for (stream, text) in print_output.into_entries() {
